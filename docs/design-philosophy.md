@@ -1,14 +1,16 @@
 ---
-title: FlashBang VaultPlan / VaultExecutor Architecture Supplement
+title: OpenWhisker Design Philosophy
 type: architecture
-status: draft
+status: active
 created: 2026-05-12
-updated: 2026-05-12
+updated: 2026-05-13
 language: zh-CN
 project:
-  - FlashBang
+  - OpenWhisker
   - Obsidian Knowledge Vault
   - LLM Wiki Agent
+historical_source:
+  - FlashBang
 supersedes_partial:
   - plugin-sync-as-primary-write-path
 principle:
@@ -21,11 +23,15 @@ principle:
   - local-first
 ---
 
-# FlashBang × VaultPlan / VaultExecutor 架构补充文档
+# OpenWhisker 设计哲学：VaultPlan / VaultExecutor
 
 ## 0. 文档定位
 
-本文是对《FlashBang × Obsidian LLM Wiki Agent 架构基石》的补充和修订，重点讨论一个新的执行层判断：
+本文是 OpenWhisker 的设计哲学文档，用来说明这个项目为什么采用 wiki-first、plan-before-write、executor-not-free-shell 的架构方向。
+
+它来自 FlashBang 阶段的架构反思，但现在作为 OpenWhisker 的核心设计依据：LLM 负责生成可审计计划，受控 executor 负责真正写入 vault。
+
+本文重点讨论一个新的执行层判断：
 
 ```text
 原设计：FlashBang Core → SyncAction → Obsidian Plugin → Vault

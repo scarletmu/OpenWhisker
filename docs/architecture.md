@@ -1,8 +1,25 @@
 # 架构概览
 
-本文是 OpenWhisker 的最小架构索引。
+本文是 OpenWhisker 的当前架构索引。
 
-详细概念来源仍然是 `FlashBang-VaultPlan-VaultExecutor-Architecture.md`。本文负责把概念文档收敛成当前仓库第一层可 review 的架构边界。
+详细概念来源仍然是 `docs/design-philosophy.md`。本文负责把概念文档收敛成当前仓库的实现边界和后续演进方向。
+
+## 当前实现基线
+
+Phase 1 已完成，仓库现在包含一条可运行的低风险 raw capture 链路：
+
+```text
+raw text input
+  -> WikiJob(type=ingest_raw)
+  -> VaultPlan(create_note)
+  -> PolicyChecker low-risk auto-allow
+  -> direct_fs_executor
+  -> test vault Raw/Inbox note
+  -> operation log
+  -> outbox result
+```
+
+这个基线只写入本地 test vault，默认路径是 `testdata/vault`。真实 Obsidian vault、LLM 调用、中高风险 approval、Sync 和插件集成仍然不在当前实现范围内。
 
 ## 系统定位
 
@@ -65,7 +82,7 @@ reasoning 和 writing 之间的审计边界。
 
 它在 path guard、lock、before-hash check、operation log 和 sync-aware 行为保护下执行已批准的 `VaultOperation`。
 
-初始 executor 目标：
+当前 executor：
 
 - `direct_fs_executor`，用于低风险 raw capture 和确定性 report 写入。
 
@@ -82,15 +99,18 @@ reasoning 和 writing 之间的审计边界。
 
 ## 数据对象
 
-第一版 durable object model 应包含：
+第一版 durable object model 已包含：
 
 - `WikiJob`
 - `VaultPlan`
 - `VaultOperation`
-- `VaultDiff`
 - `VaultApplyResult`
 - `OutboxMessage`
 - `VaultOperationLog`
+
+后续在 approval 和 conflict handling 阶段再补齐：
+
+- `VaultDiff`
 - `VaultLock`
 
 不要为了某个具体 IM 平台或某个具体 Obsidian 目录结构优化数据模型。

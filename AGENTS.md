@@ -6,11 +6,11 @@ The current goal is to develop the OpenWhisker direction from the FlashBang star
 
 ## Primary Sources
 
-### Active Architecture Draft
+### Design Philosophy
 
-- `FlashBang-VaultPlan-VaultExecutor-Architecture.md`
+- `docs/design-philosophy.md`
 
-This is the primary local draft for the proposed `VaultPlan / VaultExecutor` architecture.
+This is the primary design source for the proposed `VaultPlan / VaultExecutor` architecture.
 
 Use it as the main design source for:
 
@@ -25,7 +25,7 @@ Use it as the main design source for:
 - sync-aware execution
 - Obsidian plugin role changes
 
-Treat this document as a draft. Do not assume it describes implemented code.
+This document defines design direction. Do not assume every described capability is already implemented.
 
 ### Local Obsidian Vault
 

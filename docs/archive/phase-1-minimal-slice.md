@@ -1,6 +1,10 @@
 # Phase 1 最小切片
 
+状态：已完成，归档。
+
 这是第一阶段值得先构建的最小实现边界。
+
+当前实现状态：Phase 1 第一条 `ingest raw` CLI 链路已经落地。
 
 目标不是实现完整 wiki agent，而是用低风险 vault 输出和可 review 的数据结构验证 plan-before-write pipeline。
 
@@ -31,15 +35,15 @@ raw text input
 
 ## 范围内
 
-- 项目 package layout。
-- 最小 job、plan、operation 和 outbox record 的 SQLite schema。
-- raw ingest path 所需的 `WikiJob` lifecycle state。
-- `VaultPlan` 和 `VaultOperation` 数据结构。
-- 面向低风险 raw capture 的 `PolicyChecker`。
-- 带严格 path guard 的 `direct_fs_executor`。
-- applied operation 的 operation log。
-- raw text input 的 CLI entrypoint。
-- policy check、path guard 和 raw note creation 的测试。
+- [x] 项目 package layout。
+- [x] 最小 job、plan、operation 和 outbox record 的 SQLite schema。
+- [x] raw ingest path 所需的 `WikiJob` lifecycle state。
+- [x] `VaultPlan` 和 `VaultOperation` 数据结构。
+- [x] 面向低风险 raw capture 的 `PolicyChecker`。
+- [x] 带严格 path guard 的 `direct_fs_executor`。
+- [x] applied operation 的 operation log。
+- [x] raw text input 的 CLI entrypoint。
+- [x] policy check、path guard 和 raw note creation 的测试。
 
 ## 已确认的 Phase 1 决策
 
