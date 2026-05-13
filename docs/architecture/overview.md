@@ -2,11 +2,11 @@
 
 本文是 OpenWhisker 的当前架构索引。
 
-详细概念来源仍然是 `docs/design-philosophy.md`。本文负责把概念文档收敛成当前仓库的实现边界和后续演进方向。
+详细概念来源仍然是 `docs/architecture/design-philosophy.md`。本文负责把概念文档收敛成当前仓库的实现边界和后续演进方向。
 
 ## 当前实现基线
 
-Phase 1 已完成，仓库现在包含一条可运行的低风险 raw capture 链路：
+Phase 3 最小闭环已落地。仓库现在包含一条可运行的低风险 raw capture 链路、一条中风险 plan-before-approval 链路，以及受控 Headless Sync client：
 
 ```text
 raw text input
@@ -19,7 +19,11 @@ raw text input
   -> outbox result
 ```
 
-这个基线只写入本地 test vault，默认路径是 `testdata/vault`。真实 Obsidian vault、LLM 调用、中高风险 approval、Sync 和插件集成仍然不在当前实现范围内。
+中风险整理链路会为最近一条 raw capture 生成 deterministic `organize_raw` 计划，先 prepare diff 和 `before_hash`，等待 CLI approval 后才写入 `Knowledge/Drafts/` 并移动 raw note 到 `Raw/Processed/`。
+
+approval apply 现在是 sync-aware 的：默认 test vault 仍关闭同步；当用户显式传入真实 vault 路径且使用默认 `--sync=auto` 时，core 会在 `direct_fs_executor.Apply` 前后通过 Headless `ob` 执行 one-shot sync。pre-sync 后仍由 `DirectFS.Apply` 重新执行 lock、path guard 和 `before_hash` guard；post-sync 失败只作为 warning 返回，不把已成功的 vault write 误标为失败。
+
+当前已实现 Matrix Adapter MVP、长期 Matrix daemon、Core Adapter API、受控 raw context builder、可显式启用的 OpenAI-compatible Raw Organizer 最小路径、`organize today` grouped plan、第一版 agent output policy gate，以及 Raw/Processed processing note 写入；默认 `organize last` 仍使用 deterministic planner，避免无意触发外部模型调用。仍未实现插件集成、Knowledge Expander 和高风险知识库重构自动执行。下一阶段计划见 `docs/phases/phase-4-wiki-agent-workflow.md`。
 
 ## 系统定位
 
@@ -48,6 +52,8 @@ Core 可以调用 agent 和 executor，但不应该把具体 vault 的组织规�
 负责 LLM-backed reasoning。
 
 它读取 raw input、相关 vault notes、适用的 `AGENTS.md` 和用户指令，然后返回结构化 plan。它不直接写文件，不执行 shell，也不任意调用 Obsidian CLI。
+
+Phase 4 已先固定 Core Adapter API、Matrix Adapter MVP、Agent Host contract 和受控 vault context，并接入第一版真实 LLM-backed Raw Organizer。Agent 可以替换 deterministic planner 的 reasoning 层，但不能替代 Policy Checker、VaultExecutor 或 SyncClient。
 
 初始 agent role：
 
@@ -84,18 +90,20 @@ reasoning 和 writing 之间的审计边界。
 
 当前 executor：
 
-- `direct_fs_executor`，用于低风险 raw capture 和确定性 report 写入。
+- `direct_fs_executor`，用于低风险 raw capture、中风险 approved plan 写入和确定性 report 写入。
+- `HeadlessSyncClient`，只作为 sync client 调用 `ob sync-status --path <vault>` 和 `ob sync --path <vault>`，不直接修改 vault 文件，也不替代 `direct_fs_executor`。
 
 后续 executor：
 
 - `obsidian_cli_executor`
-- `headless_sync_executor`
 - `plugin_executor`
 - `hybrid_executor`
 
 ### Outbox
 
 向选定的 UI 或 IM channel 发送用户可见的状态、审批提示、diff、错误和完成消息。
+
+首期核心 IM 入口实践见 `docs/adapters/matrix-private-im.md`。Matrix adapter 属于交互层和 outbox 通知层，通过 bot client `/sync` 接收命令和 raw input，不直接写 vault，也不绕过 `VaultPlan -> Policy Check -> Approval -> VaultExecutor` 链路。
 
 ## 数据对象
 
@@ -108,10 +116,16 @@ reasoning 和 writing 之间的审计边界。
 - `OutboxMessage`
 - `VaultOperationLog`
 
-后续在 approval 和 conflict handling 阶段再补齐：
+Phase 2 已补齐：
 
 - `VaultDiff`
 - `VaultLock`
+
+Phase 3 已补齐：
+
+- `SyncResult`
+- `SyncClient`
+- approval apply 的 `sync_before` / `sync_after` 结果
 
 不要为了某个具体 IM 平台或某个具体 Obsidian 目录结构优化数据模型。
 

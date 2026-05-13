@@ -1,4 +1,5 @@
 data/
+.env.local
 testdata/vault/**/*.md
 testdata/vault/**/*.db
 *.db

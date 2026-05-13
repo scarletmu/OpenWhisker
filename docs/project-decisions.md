@@ -1,0 +1,58 @@
+# Project Decisions
+
+本文收敛原 `docs/decisions/` 下的 ADR 内容，作为当前仍然有效的项目级决策索引。
+
+不再为早期阶段维护分散 ADR。阶段内的执行默认值记录在对应 Phase 文档中；跨阶段长期约束记录在本文和架构文档中。
+
+## 有效决策
+
+### 1. VaultPlan before Vault Write
+
+OpenWhisker 使用 `VaultPlan` 作为 LLM reasoning 和 vault mutation 之间的边界。
+
+- LLM 可以提出 plan，但不能直接写 vault 文件。
+- LLM 不能执行任意 shell。
+- LLM 不能任意调用 Obsidian CLI。
+- 只有受控的 `VaultExecutor` 可以 apply 已批准的 `VaultOperation`。
+- Risk classification、approval、diff、hash guard 和 operation log 是写入路径的一等能力。
+
+这条决策来自原 `ADR 0001`，现在已经成为系统第一架构约束。详细设计见 [设计哲学](architecture/design-philosophy.md) 和 [架构概览](architecture/overview.md)。
+
+### 2. 早期阶段使用 CLI + SQLite + test vault
+
+Phase 1 到 Phase 3 都采用保守执行默认值：
+
+- 入口先使用 CLI。
+- 持久化直接使用 SQLite。
+- 默认写入本地 test vault。
+- 不默认写真实 Obsidian vault；真实 vault 需要用户显式传入 `--vault`。
+- 不先实现 HTTP API、IM adapter、LLM-backed planner 或 Obsidian plugin。
+
+这条决策来自原 `ADR 0002`。现在已并入 [Phase 1 最小切片](phases/phase-1-minimal-slice.md)、[Phase 2 审批与 Diff](phases/phase-2-approval-diff.md) 和 [Phase 3 Sync-Aware Approval Execution](phases/phase-3-headless-sync-executor.md)。
+
+### 3. Knowledge 写入先进入 Draft
+
+Phase 2 的中风险整理 workflow 只写入 `Knowledge/Drafts/`，不直接 patch 长期正式 knowledge note。
+
+批准后可以移动 raw note 到 `Raw/Processed/`，但 durable knowledge promotion 仍留给后续 Phase。
+
+### 4. Sync 不是事务系统
+
+Obsidian Sync 或 Headless Sync 只作为同步层，不作为写入事务系统。
+
+VaultExecutor 仍必须自己负责：
+
+- path guard；
+- vault lock；
+- `before_hash` check；
+- conflict state；
+- operation log。
+
+Phase 3 的实现遵循这一点：Headless `ob` 只作为受控 sync client，approval apply 前后执行 one-shot sync；vault mutation 仍由 `direct_fs_executor` 完成。
+
+## 已收敛的旧 ADR
+
+- `ADR 0001：VaultPlan Before Vault Write`：并入本文第 1 条。
+- `ADR 0002：Phase 1 Execution Defaults`：并入本文第 2 条和 Phase 1 文档。
+
+旧 `docs/decisions/` 目录不再作为活跃文档入口维护。

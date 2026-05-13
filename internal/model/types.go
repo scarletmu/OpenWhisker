@@ -3,27 +3,59 @@ package model
 import "time"
 
 const (
-	JobTypeIngestRaw = "ingest_raw"
+	JobTypeIngestRaw        = "ingest_raw"
+	JobTypeOrganizeRaw      = "organize_raw"
+	JobTypeOrganizeRawToday = "organize_raw_today"
 
-	JobStatusPending  = "pending"
-	JobStatusApplying = "applying"
-	JobStatusDone     = "done"
-	JobStatusFailed   = "failed"
+	JobStatusPending          = "pending"
+	JobStatusAwaitingApproval = "awaiting_approval"
+	JobStatusApplying         = "applying"
+	JobStatusDone             = "done"
+	JobStatusFailed           = "failed"
+	JobStatusRejected         = "rejected"
 
-	PlanStatusProposed = "proposed"
-	PlanStatusApplied  = "applied"
-	PlanStatusFailed   = "failed"
+	PlanStatusProposed         = "proposed"
+	PlanStatusAwaitingApproval = "awaiting_approval"
+	PlanStatusApproved         = "approved"
+	PlanStatusRejected         = "rejected"
+	PlanStatusApplying         = "applying"
+	PlanStatusApplied          = "applied"
+	PlanStatusFailed           = "failed"
+	PlanStatusConflict         = "conflict"
 
-	RiskLow = "low"
+	RiskLow    = "low"
+	RiskMedium = "medium"
 
 	OperationCreateNote       = "create_note"
+	OperationAppendNote       = "append_note"
+	OperationMoveNote         = "move_note"
 	OperationWriteAgentReport = "write_agent_report"
 
-	OutboxKindResult = "result"
-	OutboxKindError  = "error"
+	OutboxKindResult   = "result"
+	OutboxKindError    = "error"
+	OutboxKindApproval = "approval"
+	OutboxKindDiff     = "diff"
+	OutboxKindConflict = "conflict"
+	OutboxKindRejected = "rejected"
+
+	OutboxStatusPending   = "pending"
+	OutboxStatusDelivered = "delivered"
+
+	AdapterMatrix = "matrix"
 
 	OperationStatusApplied = "applied"
 	OperationStatusFailed  = "failed"
+
+	SyncModeAuto = "auto"
+	SyncModeOff  = "off"
+	SyncModeOn   = "on"
+
+	SyncBackendHeadless = "headless"
+
+	SyncPhaseStatus = "status"
+	SyncPhaseManual = "manual"
+	SyncPhaseBefore = "before_apply"
+	SyncPhaseAfter  = "after_apply"
 )
 
 type WikiJob struct {
@@ -49,9 +81,15 @@ type VaultPlan struct {
 	SourceRefs       []string
 	TargetPaths      []string
 	Operations       []VaultOperation
+	Diff             *VaultDiff
 	Status           string
 	CreatedAt        time.Time
+	PreparedAt       *time.Time
+	ApprovedAt       *time.Time
+	RejectedAt       *time.Time
 	AppliedAt        *time.Time
+	RejectedReason   string
+	Error            string
 }
 
 type VaultOperation struct {
@@ -68,8 +106,46 @@ type CreateNotePayload struct {
 	Content string `json:"content"`
 }
 
+type AppendNotePayload struct {
+	Content string `json:"content"`
+}
+
+type MoveNotePayload struct {
+	DestinationPath string `json:"destination_path"`
+	ProcessingNote  string `json:"processing_note,omitempty"`
+}
+
+type VaultDiff struct {
+	PlanID  string      `json:"plan_id"`
+	Summary string      `json:"summary"`
+	Entries []DiffEntry `json:"entries"`
+}
+
+type DiffEntry struct {
+	OperationID string `json:"operation_id"`
+	Type        string `json:"type"`
+	TargetPath  string `json:"target_path"`
+	BeforeHash  string `json:"before_hash"`
+	AfterHash   string `json:"after_hash,omitempty"`
+	Summary     string `json:"summary"`
+	Preview     string `json:"preview"`
+}
+
 type VaultApplyResult struct {
 	AppliedOperations []AppliedOperation `json:"applied_operations"`
+	SyncBefore        *SyncResult        `json:"sync_before,omitempty"`
+	SyncAfter         *SyncResult        `json:"sync_after,omitempty"`
+}
+
+type SyncResult struct {
+	Mode    string `json:"mode"`
+	Backend string `json:"backend,omitempty"`
+	Phase   string `json:"phase"`
+	OK      bool   `json:"ok"`
+	Command string `json:"command,omitempty"`
+	Output  string `json:"output,omitempty"`
+	Warning string `json:"warning,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 type AppliedOperation struct {

@@ -8,7 +8,7 @@ The current goal is to develop the OpenWhisker direction from the FlashBang star
 
 ### Design Philosophy
 
-- `docs/design-philosophy.md`
+- `docs/architecture/design-philosophy.md`
 
 This is the primary design source for the proposed `VaultPlan / VaultExecutor` architecture.
 
@@ -90,6 +90,17 @@ When sources conflict, resolve them in this order:
 6. External documentation, only when current third-party behavior must be verified.
 
 FlashBang is not the future maintenance target for this work. Avoid carrying over v1 constraints when the active OpenWhisker design intentionally supersedes them.
+
+## Code Navigation
+
+When locating implementation modules, follow the documentation chain before editing code:
+
+1. Read this root `AGENTS.md`.
+2. Read `docs/README.md`, then the linked architecture or phase document relevant to the task.
+3. Read the nearest code-directory `AGENTS.md` before opening implementation files.
+4. Use package tests as behavior anchors after the document chain identifies the module.
+
+Prefer this chain over jumping directly from a vague feature name to scattered code search. Use `internal/AGENTS.md` as the module map for core implementation work.
 
 ## Current Design Direction
 

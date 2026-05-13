@@ -116,7 +116,7 @@ func (s IngestService) IngestRaw(ctx context.Context, req IngestRawRequest) (Ing
 		JobID:     job.ID,
 		Kind:      model.OutboxKindResult,
 		Body:      fmt.Sprintf("Raw capture saved to %s", result.TargetPath),
-		Status:    "pending",
+		Status:    model.OutboxStatusPending,
 		CreatedAt: s.now(),
 	}); err != nil {
 		return IngestRawResult{}, err
@@ -161,7 +161,7 @@ func (s IngestService) failJob(jobID string, err error) error {
 		JobID:     jobID,
 		Kind:      model.OutboxKindError,
 		Body:      err.Error(),
-		Status:    "pending",
+		Status:    model.OutboxStatusPending,
 		CreatedAt: s.now(),
 	})
 	return s.store.UpdateJobStatus(jobID, model.JobStatusFailed, "", err.Error())
