@@ -23,7 +23,7 @@ raw text input
 
 approval apply 现在是 sync-aware 的：默认 test vault 仍关闭同步；当用户显式传入真实 vault 路径且使用默认 `--sync=auto` 时，core 会在 `direct_fs_executor.Apply` 前后通过 Headless `ob` 执行 one-shot sync。pre-sync 后仍由 `DirectFS.Apply` 重新执行 lock、path guard 和 `before_hash` guard；post-sync 失败只作为 warning 返回，不把已成功的 vault write 误标为失败。
 
-当前已实现 Matrix Adapter MVP、长期 Matrix daemon、Core Adapter API、受控 raw context builder、可显式启用的 OpenAI-compatible Raw Organizer 最小路径、`organize today` grouped plan、第一版 agent output policy gate，以及 Raw/Processed processing note 写入；默认 `organize last` 仍使用 deterministic planner，避免无意触发外部模型调用。仍未实现插件集成、Knowledge Expander 和高风险知识库重构自动执行。下一阶段计划见 `docs/phases/phase-4-wiki-agent-workflow.md`。
+当前已实现 Matrix Adapter MVP、长期 Matrix daemon、Core Adapter API、受控 raw context builder、可显式启用的 OpenAI-compatible Raw Organizer 最小路径、`organize today` grouped plan、第一版 agent output policy gate、`VaultProfile -> VaultRawOrganizerSkill` 生成边界、`vault profile preview` 本地 skill bundle 预览、外部 vault-local `vault-profile-analyzer` Skill 模板，以及 Raw/Processed processing note 写入；默认 `organize last` 仍使用 deterministic planner，避免无意触发外部模型调用。仍未实现加载用户确认后的 Profile / Skill、插件集成、Knowledge Expander 和高风险知识库重构自动执行。下一阶段计划见 `docs/phases/phase-4-wiki-agent-workflow.md`。
 
 ## 系统定位
 
@@ -39,6 +39,20 @@ OpenWhisker 是面向个人 Obsidian 知识库的本地优先 workflow host。
 - 通过确定性 executor 执行已批准的操作；
 - 保留 source traceability 和 operation log。
 
+## Skill-driven 外部对接
+
+OpenWhisker 的外部对接节点采用 skill-driven 方向：程序固定连接、计划、审批、执行和审计边界；外部对象的本地协作方式由 Profile 和 Skill 描述。
+
+```text
+External System
+  -> Profile 分析它是什么
+  -> Skill 描述怎么跟它协作
+  -> LLM 基于 Skill 产出结构化计划
+  -> OpenWhisker 做 policy、approval 和 deterministic execution
+```
+
+在 vault 场景里，`VaultProfile` 是被分析出来的本地事实，例如目录、标签、草稿区、禁止区域和规则来源；`VaultSkill` 是基于 Profile 编译出的任务说明。Profile / Skill 生产应发生在用户自己的 vault 侧，例如通过 vault-local Skill 主动生成和审阅；OpenWhisker runtime 只消费用户确认后的结果。运行时主要给 LLM 的应该是任务 Skill，Profile 作为可审查的事实摘要随附，不应该把某个 vault 的现状硬编码成 OpenWhisker 的通用 schema。
+
 ## 主要运行组件
 
 ### Core
@@ -51,7 +65,7 @@ Core 可以调用 agent 和 executor，但不应该把具体 vault 的组织规�
 
 负责 LLM-backed reasoning。
 
-它读取 raw input、相关 vault notes、适用的 `AGENTS.md` 和用户指令，然后返回结构化 plan。它不直接写文件，不执行 shell，也不任意调用 Obsidian CLI。
+它读取 raw input、任务 Skill、必要的 Profile 摘要、显式允许的 vault context 和用户指令，然后返回结构化 plan。它不直接写文件，不执行 shell，也不任意调用 Obsidian CLI。
 
 Phase 4 已先固定 Core Adapter API、Matrix Adapter MVP、Agent Host contract 和受控 vault context，并接入第一版真实 LLM-backed Raw Organizer。Agent 可以替换 deterministic planner 的 reasoning 层，但不能替代 Policy Checker、VaultExecutor 或 SyncClient。
 
@@ -80,7 +94,8 @@ reasoning 和 writing 之间的审计边界。
 - risk classification；
 - approval requirement；
 - source traceability；
-- durable note 的 frontmatter 和 controlled tag 要求。
+- OpenWhisker trace frontmatter；
+- vault-specific `VaultProfile` / `VaultSkill` 中声明的目录和 controlled tag 要求。
 
 ### VaultExecutor
 

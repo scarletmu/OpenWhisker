@@ -15,10 +15,11 @@ import (
 )
 
 type IngestService struct {
-	store    *storage.Store
-	checker  policy.Checker
-	executor executor.DirectFS
-	now      func() time.Time
+	store       *storage.Store
+	checker     policy.Checker
+	executor    executor.DirectFS
+	conventions policy.Conventions
+	now         func() time.Time
 }
 
 type IngestRawRequest struct {
@@ -35,11 +36,17 @@ type IngestRawResult struct {
 }
 
 func NewIngestService(store *storage.Store, vaultRoot string) IngestService {
+	return NewIngestServiceWithConventions(store, vaultRoot, policy.DefaultConventions())
+}
+
+func NewIngestServiceWithConventions(store *storage.Store, vaultRoot string, conventions policy.Conventions) IngestService {
+	conventions = conventions.Normalize()
 	return IngestService{
-		store:    store,
-		checker:  policy.NewChecker(),
-		executor: executor.NewDirectFS(vaultRoot, store),
-		now:      func() time.Time { return time.Now().UTC() },
+		store:       store,
+		checker:     policy.NewCheckerWithConventions(conventions),
+		executor:    executor.NewDirectFS(vaultRoot, store),
+		conventions: conventions,
+		now:         func() time.Time { return time.Now().UTC() },
 	}
 }
 
@@ -125,7 +132,7 @@ func (s IngestService) IngestRaw(ctx context.Context, req IngestRawRequest) (Ing
 }
 
 func (s IngestService) buildRawPlan(job model.WikiJob, text string, now time.Time) (model.VaultPlan, error) {
-	targetPath := fmt.Sprintf("Raw/Inbox/%s.md", job.ID)
+	targetPath := fmt.Sprintf("%s/%s.md", s.conventions.RawInboxDir, job.ID)
 	payload, err := json.Marshal(model.CreateNotePayload{
 		Content: renderRawNote(job, text, now),
 	})

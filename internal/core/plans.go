@@ -14,18 +14,21 @@ import (
 	"github.com/scarletmu/openwhisker/internal/executor"
 	"github.com/scarletmu/openwhisker/internal/model"
 	"github.com/scarletmu/openwhisker/internal/policy"
+	"github.com/scarletmu/openwhisker/internal/profile"
 	"github.com/scarletmu/openwhisker/internal/storage"
 )
 
 type PlanService struct {
-	store      *storage.Store
-	checker    policy.Checker
-	executor   executor.DirectFS
-	syncClient executor.SyncClient
-	syncMode   string
-	vaultRoot  string
-	organizer  RawOrganizer
-	now        func() time.Time
+	store       *storage.Store
+	checker     policy.Checker
+	executor    executor.DirectFS
+	syncClient  executor.SyncClient
+	syncMode    string
+	contextMode string
+	conventions policy.Conventions
+	vaultRoot   string
+	organizer   RawOrganizer
+	now         func() time.Time
 }
 
 type PlanServiceOptions struct {
@@ -33,7 +36,14 @@ type PlanServiceOptions struct {
 	SyncBackend string
 	SyncClient  executor.SyncClient
 	Organizer   RawOrganizer
+	ContextMode string
+	Conventions policy.Conventions
 }
+
+const (
+	ContextModeMinimal    = "minimal"
+	ContextModeVaultRules = "vault-rules"
+)
 
 type RawOrganizer interface {
 	OrganizeRaw(context.Context, RawOrganizerRequest) (model.VaultPlan, error)
@@ -48,6 +58,7 @@ type RawOrganizerRequest struct {
 	RawJob       model.WikiJob
 	RawPath      string
 	VaultRoot    string
+	Conventions  policy.Conventions
 	VaultContext RawOrganizerContext
 	Now          time.Time
 }
@@ -57,6 +68,7 @@ type RawTodayOrganizerRequest struct {
 	RawJobs      []model.WikiJob
 	RawPaths     []string
 	VaultRoot    string
+	Conventions  policy.Conventions
 	VaultContext []RawOrganizerContext
 	Day          time.Time
 	Now          time.Time
@@ -66,6 +78,12 @@ type RawOrganizerContext struct {
 	RawPath   string
 	RawNote   string
 	Documents []VaultContextDocument
+}
+
+type RawOrganizerContextPreview struct {
+	RawJobID string              `json:"raw_job_id"`
+	RawPath  string              `json:"raw_path"`
+	Context  RawOrganizerContext `json:"context"`
 }
 
 type VaultContextDocument struct {
@@ -92,6 +110,16 @@ type PlanActionResult struct {
 	Messages   []string          `json:"messages"`
 }
 
+type NoPreparedDiffError struct {
+	PlanID    string
+	Status    string
+	RiskLevel string
+}
+
+func (e NoPreparedDiffError) Error() string {
+	return fmt.Sprintf("plan %s has no prepared diff", e.PlanID)
+}
+
 func NewPlanService(store *storage.Store, vaultRoot string) PlanService {
 	return NewPlanServiceWithOptions(store, vaultRoot, PlanServiceOptions{
 		SyncMode:   model.SyncModeOff,
@@ -112,27 +140,27 @@ func NewPlanServiceWithOptions(store *storage.Store, vaultRoot string, opts Plan
 			syncClient = executor.NoopSyncClient{}
 		}
 	}
+	conventions := opts.Conventions.Normalize()
 	return PlanService{
-		store:      store,
-		checker:    policy.NewChecker(),
-		executor:   executor.NewDirectFS(vaultRoot, store),
-		syncClient: syncClient,
-		syncMode:   syncMode,
-		vaultRoot:  vaultRoot,
-		organizer:  defaultRawOrganizer(opts.Organizer),
-		now:        func() time.Time { return time.Now().UTC() },
+		store:       store,
+		checker:     policy.NewCheckerWithConventions(conventions),
+		executor:    executor.NewDirectFS(vaultRoot, store),
+		syncClient:  syncClient,
+		syncMode:    syncMode,
+		contextMode: normalizeContextMode(opts.ContextMode),
+		conventions: conventions,
+		vaultRoot:   vaultRoot,
+		organizer:   defaultRawOrganizer(opts.Organizer),
+		now:         func() time.Time { return time.Now().UTC() },
 	}
 }
 
 func (s PlanService) OrganizeLast(ctx context.Context) (OrganizeRawResult, error) {
-	rawJob, err := s.store.LatestDoneIngestRawJob()
+	preview, rawJob, err := s.previewLatestRawContext(ctx)
 	if err != nil {
 		return OrganizeRawResult{}, err
 	}
-	rawPath := rawTargetPath(rawJob)
-	if rawPath == "" {
-		return OrganizeRawResult{}, fmt.Errorf("raw job %s has no target path", rawJob.ID)
-	}
+	rawPath := preview.RawPath
 
 	now := s.now()
 	inputJSON, err := json.Marshal(map[string]string{
@@ -156,17 +184,13 @@ func (s PlanService) OrganizeLast(ctx context.Context) (OrganizeRawResult, error
 		return OrganizeRawResult{}, err
 	}
 
-	vaultContext, err := buildRawOrganizerContext(ctx, s.vaultRoot, rawPath)
-	if err != nil {
-		_ = s.failPlanJob(job.ID, err)
-		return OrganizeRawResult{}, err
-	}
 	plan, err := s.organizer.OrganizeRaw(ctx, RawOrganizerRequest{
 		Job:          job,
 		RawJob:       rawJob,
 		RawPath:      rawPath,
 		VaultRoot:    s.vaultRoot,
-		VaultContext: vaultContext,
+		Conventions:  s.conventions,
+		VaultContext: preview.Context,
 		Now:          now,
 	})
 	if err != nil {
@@ -217,6 +241,11 @@ func (s PlanService) OrganizeLast(ctx context.Context) (OrganizeRawResult, error
 	}, nil
 }
 
+func (s PlanService) PreviewLastRawContext(ctx context.Context) (RawOrganizerContextPreview, error) {
+	preview, _, err := s.previewLatestRawContext(ctx)
+	return preview, err
+}
+
 func (s PlanService) OrganizeToday(ctx context.Context, day time.Time) (OrganizeRawResult, error) {
 	day = normalizeDay(day)
 	start, end := dayBounds(day)
@@ -257,7 +286,7 @@ func (s PlanService) OrganizeToday(ctx context.Context, day time.Time) (Organize
 	}
 	var contexts []RawOrganizerContext
 	for _, rawPath := range rawPaths {
-		vaultContext, err := buildRawOrganizerContext(ctx, s.vaultRoot, rawPath)
+		vaultContext, err := buildRawOrganizerContext(ctx, s.vaultRoot, rawPath, s.contextMode, s.conventions)
 		if err != nil {
 			_ = s.failPlanJob(job.ID, err)
 			return OrganizeRawResult{}, err
@@ -273,6 +302,7 @@ func (s PlanService) OrganizeToday(ctx context.Context, day time.Time) (Organize
 		RawJobs:      rawJobs,
 		RawPaths:     rawPaths,
 		VaultRoot:    s.vaultRoot,
+		Conventions:  s.conventions,
 		VaultContext: contexts,
 		Day:          day,
 		Now:          now,
@@ -340,7 +370,11 @@ func (s PlanService) Diff(identifier string) (*model.VaultDiff, error) {
 		return nil, err
 	}
 	if plan.Diff == nil {
-		return nil, fmt.Errorf("plan %s has no prepared diff", plan.ID)
+		return nil, NoPreparedDiffError{
+			PlanID:    plan.ID,
+			Status:    plan.Status,
+			RiskLevel: plan.RiskLevel,
+		}
 	}
 	return plan.Diff, nil
 }
@@ -498,26 +532,38 @@ func defaultRawOrganizer(organizer RawOrganizer) RawOrganizer {
 	return deterministicRawOrganizer{}
 }
 
+func normalizeContextMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", ContextModeMinimal:
+		return ContextModeMinimal
+	case ContextModeVaultRules:
+		return ContextModeVaultRules
+	default:
+		return ContextModeMinimal
+	}
+}
+
 func (deterministicRawOrganizer) OrganizeRaw(ctx context.Context, req RawOrganizerRequest) (model.VaultPlan, error) {
 	if err := ctx.Err(); err != nil {
 		return model.VaultPlan{}, err
 	}
-	return buildOrganizePlan(req.Job, req.RawJob, req.RawPath, req.Now)
+	return buildOrganizePlan(req.Job, req.RawJob, req.RawPath, req.Conventions, req.Now)
 }
 
 func (deterministicRawOrganizer) OrganizeRawToday(ctx context.Context, req RawTodayOrganizerRequest) (model.VaultPlan, error) {
 	if err := ctx.Err(); err != nil {
 		return model.VaultPlan{}, err
 	}
-	return buildOrganizeTodayPlan(req.Job, req.RawJobs, req.RawPaths, req.Day, req.Now, "Deterministic Raw Organizer grouped today's raw captures into one review-needed Knowledge draft.", renderTodayKnowledgeDraft(req, "Today's Raw Capture Review", "Deterministic grouped draft for today's raw captures. Review each source before promoting this into durable Knowledge."))
+	return buildOrganizeTodayPlan(req.Job, req.RawJobs, req.RawPaths, req.Conventions, req.Day, req.Now, "Deterministic Raw Organizer grouped today's raw captures into one review-needed Knowledge draft.", renderTodayKnowledgeDraft(req, "Today's Raw Capture Review", "Deterministic grouped draft for today's raw captures. Review each source before promoting this into durable Knowledge."))
 }
 
-func buildOrganizePlan(job, rawJob model.WikiJob, rawPath string, now time.Time) (model.VaultPlan, error) {
+func buildOrganizePlan(job, rawJob model.WikiJob, rawPath string, conventions policy.Conventions, now time.Time) (model.VaultPlan, error) {
+	conventions = conventions.Normalize()
 	base := strings.TrimSuffix(filepath.Base(rawPath), filepath.Ext(rawPath))
-	knowledgePath := "Knowledge/Drafts/" + base + ".md"
-	processedPath := "Raw/Processed/" + base + ".md"
+	knowledgePath := joinVaultPath(conventions.KnowledgeDraftDir, base+".md")
+	processedPath := joinVaultPath(conventions.RawProcessedDir, base+".md")
 	createPayload, err := json.Marshal(model.CreateNotePayload{
-		Content: renderKnowledgeDraft(job, rawJob, rawPath, processedPath, now),
+		Content: renderKnowledgeDraft(job, rawJob, rawPath, processedPath, conventions, now),
 	})
 	if err != nil {
 		return model.VaultPlan{}, err
@@ -562,16 +608,17 @@ func buildOrganizePlan(job, rawJob model.WikiJob, rawPath string, now time.Time)
 	}, nil
 }
 
-func buildOrganizeTodayPlan(job model.WikiJob, rawJobs []model.WikiJob, rawPaths []string, day, now time.Time, processingNote, content string) (model.VaultPlan, error) {
+func buildOrganizeTodayPlan(job model.WikiJob, rawJobs []model.WikiJob, rawPaths []string, conventions policy.Conventions, day, now time.Time, processingNote, content string) (model.VaultPlan, error) {
 	if len(rawJobs) == 0 || len(rawJobs) != len(rawPaths) {
 		return model.VaultPlan{}, errors.New("raw today plan requires matching raw jobs and paths")
 	}
+	conventions = conventions.Normalize()
 	date := day.Format("2006-01-02")
-	knowledgePath := fmt.Sprintf("Knowledge/Drafts/%s-raw-review-%s.md", date, job.ID)
+	knowledgePath := joinVaultPath(conventions.KnowledgeDraftDir, fmt.Sprintf("%s-raw-review-%s.md", date, job.ID))
 	var processedPaths []string
 	for _, rawPath := range rawPaths {
 		base := strings.TrimSuffix(filepath.Base(rawPath), filepath.Ext(rawPath))
-		processedPaths = append(processedPaths, "Raw/Processed/"+base+".md")
+		processedPaths = append(processedPaths, joinVaultPath(conventions.RawProcessedDir, base+".md"))
 	}
 	createPayload, err := json.Marshal(model.CreateNotePayload{Content: content})
 	if err != nil {
@@ -663,7 +710,27 @@ func rawTargetPath(job model.WikiJob) string {
 	return "Raw/Inbox/" + job.ID + ".md"
 }
 
-func buildRawOrganizerContext(ctx context.Context, vaultRoot, rawPath string) (RawOrganizerContext, error) {
+func (s PlanService) previewLatestRawContext(ctx context.Context) (RawOrganizerContextPreview, model.WikiJob, error) {
+	rawJob, err := s.store.LatestDoneIngestRawJob()
+	if err != nil {
+		return RawOrganizerContextPreview{}, model.WikiJob{}, err
+	}
+	rawPath := rawTargetPath(rawJob)
+	if rawPath == "" {
+		return RawOrganizerContextPreview{}, model.WikiJob{}, fmt.Errorf("raw job %s has no target path", rawJob.ID)
+	}
+	vaultContext, err := buildRawOrganizerContext(ctx, s.vaultRoot, rawPath, s.contextMode, s.conventions)
+	if err != nil {
+		return RawOrganizerContextPreview{}, model.WikiJob{}, err
+	}
+	return RawOrganizerContextPreview{
+		RawJobID: rawJob.ID,
+		RawPath:  rawPath,
+		Context:  vaultContext,
+	}, rawJob, nil
+}
+
+func buildRawOrganizerContext(ctx context.Context, vaultRoot, rawPath, contextMode string, conventions policy.Conventions) (RawOrganizerContext, error) {
 	if vaultRoot == "" {
 		return RawOrganizerContext{}, errors.New("vault root is required")
 	}
@@ -678,6 +745,15 @@ func buildRawOrganizerContext(ctx context.Context, vaultRoot, rawPath string) (R
 	context := RawOrganizerContext{
 		RawPath: rawPath,
 		RawNote: string(rawNote),
+	}
+	for _, doc := range profile.ContextDocuments(conventions) {
+		context.Documents = append(context.Documents, VaultContextDocument{
+			Path:    doc.Path,
+			Content: doc.Content,
+		})
+	}
+	if normalizeContextMode(contextMode) == ContextModeMinimal {
+		return context, nil
 	}
 	for _, relPath := range []string{
 		"AGENTS.md",
@@ -713,7 +789,7 @@ func (s PlanService) filterExistingInboxRawJobs(rawJobs []model.WikiJob) ([]mode
 	var outPaths []string
 	for _, rawJob := range rawJobs {
 		rawPath := rawTargetPath(rawJob)
-		if rawPath == "" || !strings.HasPrefix(rawPath, "Raw/Inbox/") {
+		if rawPath == "" || !hasVaultDirPrefix(rawPath, s.conventions.RawInboxDir) {
 			continue
 		}
 		fullPath, err := executor.ResolveVaultPath(s.vaultRoot, rawPath)
@@ -752,7 +828,7 @@ func jobIDs(jobs []model.WikiJob) []string {
 	return ids
 }
 
-func renderKnowledgeDraft(job, rawJob model.WikiJob, rawPath, processedPath string, createdAt time.Time) string {
+func renderKnowledgeDraft(job, rawJob model.WikiJob, rawPath, processedPath string, conventions policy.Conventions, createdAt time.Time) string {
 	return fmt.Sprintf(`---
 openwhisker_job_id: %s
 openwhisker_job_type: %s
@@ -763,8 +839,7 @@ status: draft
 needs_review: true
 created_at: %s
 tags:
-  - knowledge/draft
-  - review/needed
+%s
 ---
 
 # Knowledge Draft from %s
@@ -778,7 +853,7 @@ tags:
 ## Draft
 
 This deterministic Phase 2 draft preserves traceability and proves the approval-before-write path. Replace this section with LLM-backed organization in a later phase.
-`, job.ID, job.Type, rawJob.ID, rawPath, processedPath, createdAt.Format(time.RFC3339), rawJob.ID,
+`, job.ID, job.Type, rawJob.ID, rawPath, processedPath, createdAt.Format(time.RFC3339), renderYAMLList(conventions.RequiredDraftTags), rawJob.ID,
 		rawJob.ID, rawPath, processedPath)
 }
 
@@ -786,21 +861,21 @@ func renderTodayKnowledgeDraft(req RawTodayOrganizerRequest, title, body string)
 	var rawJobLines, rawPathLines, processedPathLines, sourceLines []string
 	for i, rawJob := range req.RawJobs {
 		rawPath := req.RawPaths[i]
-		processedPath := "Raw/Processed/" + strings.TrimSuffix(filepath.Base(rawPath), filepath.Ext(rawPath)) + ".md"
+		processedPath := joinVaultPath(req.Conventions.RawProcessedDir, strings.TrimSuffix(filepath.Base(rawPath), filepath.Ext(rawPath))+".md")
 		rawJobLines = append(rawJobLines, "  - "+rawJob.ID)
 		rawPathLines = append(rawPathLines, "  - "+rawPath)
 		processedPathLines = append(processedPathLines, "  - "+processedPath)
 		sourceLines = append(sourceLines, fmt.Sprintf("- %s: %s -> %s", rawJob.ID, rawPath, processedPath))
 	}
-	firstProcessed := "Raw/Processed/unknown.md"
+	firstProcessed := joinVaultPath(req.Conventions.RawProcessedDir, "unknown.md")
 	if len(req.RawPaths) > 0 {
-		firstProcessed = "Raw/Processed/" + strings.TrimSuffix(filepath.Base(req.RawPaths[0]), filepath.Ext(req.RawPaths[0])) + ".md"
+		firstProcessed = joinVaultPath(req.Conventions.RawProcessedDir, strings.TrimSuffix(filepath.Base(req.RawPaths[0]), filepath.Ext(req.RawPaths[0]))+".md")
 	}
 	return fmt.Sprintf(`---
 openwhisker_job_id: %s
 openwhisker_job_type: %s
 source_raw_job_id: batch
-source_raw_path: Raw/Inbox
+source_raw_path: %s
 source_processed_path: %s
 source_raw_job_ids:
 %s
@@ -812,8 +887,7 @@ status: draft
 needs_review: true
 created_at: %s
 tags:
-  - knowledge/draft
-  - review/needed
+%s
 ---
 
 # %s
@@ -830,8 +904,8 @@ tags:
 
 - 核对每条 raw 输入是否应该进入同一个 Knowledge draft。
 - 核对是否需要拆分成多个主题笔记。
-`, req.Job.ID, req.Job.Type, firstProcessed, strings.Join(rawJobLines, "\n"), strings.Join(rawPathLines, "\n"),
-		strings.Join(processedPathLines, "\n"), req.Now.Format(time.RFC3339), strings.TrimSpace(title),
+`, req.Job.ID, req.Job.Type, req.Conventions.RawInboxDir, firstProcessed, strings.Join(rawJobLines, "\n"), strings.Join(rawPathLines, "\n"),
+		strings.Join(processedPathLines, "\n"), req.Now.Format(time.RFC3339), renderYAMLList(req.Conventions.RequiredDraftTags), strings.TrimSpace(title),
 		strings.TrimSpace(body), strings.Join(sourceLines, "\n"))
 }
 
@@ -866,4 +940,40 @@ func renderProcessedRawNote(job, rawJob model.WikiJob, rawPath, processedPath st
 
 %s
 `, job.ID, rawJob.ID, rawPath, processedPath, processedAt.Format(time.RFC3339), strings.Join(outputLines, "\n"), strings.TrimSpace(note))
+}
+
+func joinVaultPath(dir, name string) string {
+	dir = strings.Trim(strings.TrimSpace(filepath.ToSlash(dir)), "/")
+	name = strings.Trim(strings.TrimSpace(filepath.ToSlash(name)), "/")
+	if dir == "" {
+		return name
+	}
+	if name == "" {
+		return dir
+	}
+	return dir + "/" + name
+}
+
+func hasVaultDirPrefix(path, dir string) bool {
+	path = strings.Trim(strings.TrimSpace(filepath.ToSlash(path)), "/")
+	dir = strings.Trim(strings.TrimSpace(filepath.ToSlash(dir)), "/")
+	return path == dir || strings.HasPrefix(path, dir+"/")
+}
+
+func renderYAMLList(values []string) string {
+	if len(values) == 0 {
+		return "  []"
+	}
+	lines := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		lines = append(lines, "  - "+value)
+	}
+	if len(lines) == 0 {
+		return "  []"
+	}
+	return strings.Join(lines, "\n")
 }

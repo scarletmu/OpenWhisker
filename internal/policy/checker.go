@@ -10,13 +10,82 @@ import (
 	"github.com/scarletmu/openwhisker/internal/model"
 )
 
-type Checker struct{}
-
-func NewChecker() Checker {
-	return Checker{}
+type Conventions struct {
+	ProfileID         string   `json:"profile_id"`
+	RawInboxDir       string   `json:"raw_inbox_dir"`
+	RawProcessedDir   string   `json:"raw_processed_dir"`
+	KnowledgeDir      string   `json:"knowledge_dir"`
+	KnowledgeDraftDir string   `json:"knowledge_draft_dir"`
+	RequiredDraftTags []string `json:"required_draft_tags,omitempty"`
 }
 
-func (Checker) Check(plan model.VaultPlan) error {
+type Checker struct {
+	conventions Conventions
+}
+
+func NewChecker() Checker {
+	return NewCheckerWithConventions(DefaultConventions())
+}
+
+func NewCheckerWithConventions(conventions Conventions) Checker {
+	return Checker{conventions: conventions.Normalize()}
+}
+
+func DefaultConventions() Conventions {
+	return Conventions{
+		ProfileID:         "generic",
+		RawInboxDir:       "Raw/Inbox",
+		RawProcessedDir:   "Raw/Processed",
+		KnowledgeDir:      "Knowledge",
+		KnowledgeDraftDir: "Knowledge/Drafts",
+	}
+}
+
+func KnowledgeVaultConventions() Conventions {
+	conventions := DefaultConventions()
+	conventions.ProfileID = "knowledge-vault"
+	conventions.RequiredDraftTags = []string{"type/knowledge", "status/draft", "status/needs-review"}
+	return conventions
+}
+
+func ConventionsForProfile(profile string) (Conventions, error) {
+	switch strings.ToLower(strings.TrimSpace(profile)) {
+	case "", "generic":
+		return DefaultConventions(), nil
+	case "knowledge-vault":
+		return KnowledgeVaultConventions(), nil
+	default:
+		return Conventions{}, fmt.Errorf("unknown vault profile %q", profile)
+	}
+}
+
+func (c Conventions) Normalize() Conventions {
+	if strings.TrimSpace(c.ProfileID) == "" {
+		c.ProfileID = "generic"
+	}
+	if strings.TrimSpace(c.RawInboxDir) == "" {
+		c.RawInboxDir = "Raw/Inbox"
+	}
+	if strings.TrimSpace(c.RawProcessedDir) == "" {
+		c.RawProcessedDir = "Raw/Processed"
+	}
+	if strings.TrimSpace(c.KnowledgeDir) == "" {
+		c.KnowledgeDir = "Knowledge"
+	}
+	if strings.TrimSpace(c.KnowledgeDraftDir) == "" {
+		c.KnowledgeDraftDir = strings.TrimRight(c.KnowledgeDir, "/") + "/Drafts"
+	}
+	c.RawInboxDir = cleanRelativeDir(c.RawInboxDir)
+	c.RawProcessedDir = cleanRelativeDir(c.RawProcessedDir)
+	c.KnowledgeDir = cleanRelativeDir(c.KnowledgeDir)
+	c.KnowledgeDraftDir = cleanRelativeDir(c.KnowledgeDraftDir)
+	c.ProfileID = strings.ToLower(strings.TrimSpace(c.ProfileID))
+	c.RequiredDraftTags = cleanStringList(c.RequiredDraftTags)
+	return c
+}
+
+func (c Checker) Check(plan model.VaultPlan) error {
+	conventions := c.conventions.Normalize()
 	if plan.RiskLevel != model.RiskLow {
 		return fmt.Errorf("risk %q is not auto-allowed", plan.RiskLevel)
 	}
@@ -35,8 +104,8 @@ func (Checker) Check(plan model.VaultPlan) error {
 		}
 		switch op.Type {
 		case model.OperationCreateNote:
-			if !strings.HasPrefix(op.TargetPath, "Raw/Inbox/") {
-				return fmt.Errorf("create_note target %q is outside Raw/Inbox", op.TargetPath)
+			if !hasDirPrefix(op.TargetPath, conventions.RawInboxDir) {
+				return fmt.Errorf("create_note target %q is outside %s", op.TargetPath, conventions.RawInboxDir)
 			}
 		case model.OperationWriteAgentReport:
 			if !strings.HasPrefix(op.TargetPath, "Meta/Reports/") {
@@ -49,7 +118,8 @@ func (Checker) Check(plan model.VaultPlan) error {
 	return nil
 }
 
-func (Checker) CheckForApproval(plan model.VaultPlan) error {
+func (c Checker) CheckForApproval(plan model.VaultPlan) error {
+	conventions := c.conventions.Normalize()
 	if plan.RiskLevel != model.RiskMedium {
 		return fmt.Errorf("approval flow only supports medium risk plans, got %q", plan.RiskLevel)
 	}
@@ -88,7 +158,7 @@ func (Checker) CheckForApproval(plan model.VaultPlan) error {
 	var knowledgeTargetPaths []string
 	for _, targetPath := range plan.TargetPaths {
 		targetSet[targetPath] = true
-		if strings.HasPrefix(targetPath, "Knowledge/") {
+		if hasDirPrefix(targetPath, conventions.KnowledgeDir) {
 			knowledgeTargetPaths = append(knowledgeTargetPaths, targetPath)
 		}
 	}
@@ -113,19 +183,19 @@ func (Checker) CheckForApproval(plan model.VaultPlan) error {
 		}
 		switch op.Type {
 		case model.OperationCreateNote:
-			if !strings.HasPrefix(op.TargetPath, "Knowledge/Drafts/") {
-				return fmt.Errorf("create_note target %q is outside Knowledge/Drafts", op.TargetPath)
+			if !hasDirPrefix(op.TargetPath, conventions.KnowledgeDraftDir) {
+				return fmt.Errorf("create_note target %q is outside %s", op.TargetPath, conventions.KnowledgeDraftDir)
 			}
 			var payload model.CreateNotePayload
 			if err := json.Unmarshal([]byte(op.PayloadJSON), &payload); err != nil {
 				return fmt.Errorf("decode create_note payload for %s: %w", op.ID, err)
 			}
-			if err := validateKnowledgeDraftPayload(op, payload); err != nil {
+			if err := validateKnowledgeDraftPayload(op, payload, conventions); err != nil {
 				return err
 			}
 		case model.OperationAppendNote:
-			if !strings.HasPrefix(op.TargetPath, "Knowledge/") {
-				return fmt.Errorf("append_note target %q is outside Knowledge", op.TargetPath)
+			if !hasDirPrefix(op.TargetPath, conventions.KnowledgeDir) {
+				return fmt.Errorf("append_note target %q is outside %s", op.TargetPath, conventions.KnowledgeDir)
 			}
 			var payload model.AppendNotePayload
 			if err := json.Unmarshal([]byte(op.PayloadJSON), &payload); err != nil {
@@ -135,8 +205,8 @@ func (Checker) CheckForApproval(plan model.VaultPlan) error {
 				return fmt.Errorf("append_note payload content is required for %s", op.ID)
 			}
 		case model.OperationMoveNote:
-			if !strings.HasPrefix(op.TargetPath, "Raw/Inbox/") {
-				return fmt.Errorf("move_note source %q is outside Raw/Inbox", op.TargetPath)
+			if !hasDirPrefix(op.TargetPath, conventions.RawInboxDir) {
+				return fmt.Errorf("move_note source %q is outside %s", op.TargetPath, conventions.RawInboxDir)
 			}
 			var payload model.MoveNotePayload
 			if err := json.Unmarshal([]byte(op.PayloadJSON), &payload); err != nil {
@@ -145,8 +215,8 @@ func (Checker) CheckForApproval(plan model.VaultPlan) error {
 			if err := validateRelativeVaultPath(payload.DestinationPath); err != nil {
 				return fmt.Errorf("operation %s destination path: %w", op.ID, err)
 			}
-			if !strings.HasPrefix(payload.DestinationPath, "Raw/Processed/") {
-				return fmt.Errorf("move_note destination %q is outside Raw/Processed", payload.DestinationPath)
+			if !hasDirPrefix(payload.DestinationPath, conventions.RawProcessedDir) {
+				return fmt.Errorf("move_note destination %q is outside %s", payload.DestinationPath, conventions.RawProcessedDir)
 			}
 			if !targetSet[payload.DestinationPath] {
 				return fmt.Errorf("operation %s destination %q is missing from plan target_paths", op.ID, payload.DestinationPath)
@@ -198,7 +268,7 @@ func validateRelativeVaultPath(path string) error {
 	return nil
 }
 
-func validateKnowledgeDraftPayload(op model.VaultOperation, payload model.CreateNotePayload) error {
+func validateKnowledgeDraftPayload(op model.VaultOperation, payload model.CreateNotePayload, conventions Conventions) error {
 	content := strings.TrimSpace(payload.Content)
 	if content == "" {
 		return fmt.Errorf("create_note payload content is required for %s", op.ID)
@@ -230,14 +300,13 @@ func validateKnowledgeDraftPayload(op model.VaultOperation, payload model.Create
 	if err := validateRelativeVaultPath(processedPath); err != nil {
 		return fmt.Errorf("create_note payload for %s source_processed_path: %w", op.ID, err)
 	}
-	if !strings.HasPrefix(processedPath, "Raw/Processed/") {
-		return fmt.Errorf("create_note payload for %s source_processed_path %q is outside Raw/Processed", op.ID, processedPath)
+	if !hasDirPrefix(processedPath, conventions.RawProcessedDir) {
+		return fmt.Errorf("create_note payload for %s source_processed_path %q is outside %s", op.ID, processedPath, conventions.RawProcessedDir)
 	}
-	if !frontmatterHasListValue(frontmatter, "knowledge/draft") {
-		return fmt.Errorf("create_note payload for %s tags must include knowledge/draft", op.ID)
-	}
-	if !frontmatterHasListValue(frontmatter, "review/needed") {
-		return fmt.Errorf("create_note payload for %s tags must include review/needed", op.ID)
+	for _, tag := range conventions.RequiredDraftTags {
+		if !frontmatterHasListValue(frontmatter, tag) {
+			return fmt.Errorf("create_note payload for %s tags must include %s", op.ID, tag)
+		}
 	}
 	if !strings.Contains(body, processedPath) {
 		return fmt.Errorf("create_note payload for %s must link to source_processed_path in the body", op.ID)
@@ -304,4 +373,33 @@ func frontmatterHasListValue(frontmatter, value string) bool {
 		}
 	}
 	return false
+}
+
+func cleanRelativeDir(path string) string {
+	path = strings.TrimSpace(filepath.ToSlash(path))
+	path = strings.Trim(path, "/")
+	if path == "" || path == "." {
+		return path
+	}
+	return filepath.ToSlash(filepath.Clean(path))
+}
+
+func cleanStringList(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
+
+func hasDirPrefix(path, dir string) bool {
+	dir = cleanRelativeDir(dir)
+	path = filepath.ToSlash(path)
+	return path == dir || strings.HasPrefix(path, dir+"/")
 }

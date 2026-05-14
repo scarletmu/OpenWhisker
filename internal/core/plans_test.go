@@ -125,7 +125,7 @@ func TestOrganizeLastUsesInjectedRawOrganizer(t *testing.T) {
 	}
 }
 
-func TestOrganizeLastPassesRawOrganizerContext(t *testing.T) {
+func TestOrganizeLastPassesMinimalRawOrganizerContextByDefault(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "openwhisker.db")
 	vaultRoot := filepath.Join(dir, "vault")
@@ -152,6 +152,40 @@ func TestOrganizeLastPassesRawOrganizerContext(t *testing.T) {
 
 	service := NewPlanServiceWithOptions(store, vaultRoot, PlanServiceOptions{
 		Organizer: checkingRawOrganizer{},
+	})
+	if _, err := service.OrganizeLast(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOrganizeLastCanIncludeVaultRulesContext(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "openwhisker.db")
+	vaultRoot := filepath.Join(dir, "vault")
+	if err := os.MkdirAll(filepath.Join(vaultRoot, "Meta"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vaultRoot, "AGENTS.md"), []byte("root vault rule"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vaultRoot, "Meta", "Tagging.md"), []byte("tag rule"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := NewIngestService(store, vaultRoot).IngestRaw(context.Background(), IngestRawRequest{
+		Text:   "context should include this raw text",
+		Source: "test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	service := NewPlanServiceWithOptions(store, vaultRoot, PlanServiceOptions{
+		Organizer:   checkingVaultRulesRawOrganizer{},
+		ContextMode: ContextModeVaultRules,
 	})
 	if _, err := service.OrganizeLast(context.Background()); err != nil {
 		t.Fatal(err)
@@ -554,11 +588,13 @@ type fakeRawOrganizer struct {
 
 type checkingRawOrganizer struct{}
 
+type checkingVaultRulesRawOrganizer struct{}
+
 func (f fakeRawOrganizer) OrganizeRaw(ctx context.Context, req RawOrganizerRequest) (model.VaultPlan, error) {
 	if err := ctx.Err(); err != nil {
 		return model.VaultPlan{}, err
 	}
-	plan, err := buildOrganizePlan(req.Job, req.RawJob, req.RawPath, req.Now)
+	plan, err := buildOrganizePlan(req.Job, req.RawJob, req.RawPath, req.Conventions, req.Now)
 	if err != nil {
 		return model.VaultPlan{}, err
 	}
@@ -573,8 +609,41 @@ func (checkingRawOrganizer) OrganizeRaw(ctx context.Context, req RawOrganizerReq
 	if !strings.Contains(req.VaultContext.RawNote, "context should include this raw text") {
 		return model.VaultPlan{}, errors.New("raw note missing from organizer context")
 	}
-	var sawRootRule, sawTagRule bool
+	var sawSkill, sawProfile bool
 	for _, doc := range req.VaultContext.Documents {
+		if doc.Path == "OpenWhisker/VaultRawOrganizerSkill.md" && strings.Contains(doc.Content, "compiled from the current VaultProfile") {
+			sawSkill = true
+			continue
+		}
+		if doc.Path == "OpenWhisker/VaultProfile.md" && strings.Contains(doc.Content, "local convention summary") {
+			sawProfile = true
+			continue
+		}
+		if doc.Path == "AGENTS.md" || doc.Path == "Meta/Tagging.md" {
+			return model.VaultPlan{}, errors.New("minimal organizer context included vault rules")
+		}
+	}
+	if !sawSkill || !sawProfile {
+		return model.VaultPlan{}, errors.New("minimal organizer context missing OpenWhisker docs")
+	}
+	return buildOrganizePlan(req.Job, req.RawJob, req.RawPath, req.Conventions, req.Now)
+}
+
+func (checkingVaultRulesRawOrganizer) OrganizeRaw(ctx context.Context, req RawOrganizerRequest) (model.VaultPlan, error) {
+	if err := ctx.Err(); err != nil {
+		return model.VaultPlan{}, err
+	}
+	if !strings.Contains(req.VaultContext.RawNote, "context should include this raw text") {
+		return model.VaultPlan{}, errors.New("raw note missing from organizer context")
+	}
+	var sawSkill, sawProfile, sawRootRule, sawTagRule bool
+	for _, doc := range req.VaultContext.Documents {
+		if doc.Path == "OpenWhisker/VaultRawOrganizerSkill.md" && strings.Contains(doc.Content, "compiled from the current VaultProfile") {
+			sawSkill = true
+		}
+		if doc.Path == "OpenWhisker/VaultProfile.md" && strings.Contains(doc.Content, "local convention summary") {
+			sawProfile = true
+		}
 		if doc.Path == "AGENTS.md" && strings.Contains(doc.Content, "root vault rule") {
 			sawRootRule = true
 		}
@@ -582,10 +651,10 @@ func (checkingRawOrganizer) OrganizeRaw(ctx context.Context, req RawOrganizerReq
 			sawTagRule = true
 		}
 	}
-	if !sawRootRule || !sawTagRule {
+	if !sawSkill || !sawProfile || !sawRootRule || !sawTagRule {
 		return model.VaultPlan{}, errors.New("vault context rules missing")
 	}
-	return buildOrganizePlan(req.Job, req.RawJob, req.RawPath, req.Now)
+	return buildOrganizePlan(req.Job, req.RawJob, req.RawPath, req.Conventions, req.Now)
 }
 
 func (c *fakeSyncClient) Status(_ context.Context, _ string) (model.SyncResult, error) {

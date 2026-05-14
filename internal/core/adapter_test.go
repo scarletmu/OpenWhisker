@@ -40,6 +40,18 @@ func TestAdapterServiceHandlesMatrixRawDedupeAndApproval(t *testing.T) {
 	if raw.Status != model.JobStatusDone || raw.JobID == "" {
 		t.Fatalf("raw response = %+v, want done job", raw)
 	}
+	rawDiff, err := service.HandleText(context.Background(), AdapterRequest{
+		Adapter: model.AdapterMatrix,
+		EventID: "$event-raw-diff",
+		Sender:  "@user:example.test",
+		Text:    "/diff " + raw.JobID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rawDiff.Status != "no_diff" || !strings.Contains(rawDiff.Body, "low-risk raw capture") {
+		t.Fatalf("raw diff response = %+v, want friendly no_diff response", rawDiff)
+	}
 	duplicate, err := service.HandleText(context.Background(), AdapterRequest{
 		Adapter: model.AdapterMatrix,
 		EventID: "$event-1",
@@ -74,8 +86,13 @@ func TestAdapterServiceHandlesMatrixRawDedupeAndApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(diff.Body, "create_note") {
-		t.Fatalf("diff body = %q, want create_note", diff.Body)
+	for _, want := range []string{"审批预览", "创建笔记", "移动笔记", "审批前重点看"} {
+		if !strings.Contains(diff.Body, want) {
+			t.Fatalf("diff body = %q, want %q", diff.Body, want)
+		}
+	}
+	if strings.Contains(diff.Body, "openwhisker_job_id") || strings.Contains(diff.Body, "before_hash") {
+		t.Fatalf("diff body = %q, should hide low-level metadata", diff.Body)
 	}
 	approved, err := service.HandleText(context.Background(), AdapterRequest{
 		Adapter: model.AdapterMatrix,
@@ -96,7 +113,7 @@ func TestAdapterServiceHandlesMatrixRawDedupeAndApproval(t *testing.T) {
 	}
 	defer db.Close()
 	assertCount(t, db, "wiki_jobs", 2)
-	assertCount(t, db, "adapter_events", 4)
+	assertCount(t, db, "adapter_events", 5)
 	pending, err := service.PullOutbox(10)
 	if err != nil {
 		t.Fatal(err)

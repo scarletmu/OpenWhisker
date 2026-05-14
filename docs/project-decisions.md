@@ -50,6 +50,18 @@ VaultExecutor 仍必须自己负责：
 
 Phase 3 的实现遵循这一点：Headless `ob` 只作为受控 sync client，approval apply 前后执行 one-shot sync；vault mutation 仍由 `direct_fs_executor` 完成。
 
+### 5. 外部对接节点优先 Skill-driven
+
+OpenWhisker 的关键外部对接节点不应主要靠硬编码业务规则驱动，而应采用类似 OpenClaw 的 skill-driven 模式。
+
+- `Profile` 描述某个外部对象当前是什么样，例如一个 vault 的目录、标签、草稿习惯、禁止区域和规则来源。
+- `Profile` 可以由用户在自己的 vault 里运行 vault-local Skill 生成候选版本，但候选版本需要人工确认后才进入稳定运行；OpenWhisker runtime 不负责主动扫描用户 vault 来生成 Profile。
+- `Skill` 是从已确认 Profile 编译出的任务说明，面向具体 workflow，例如 Raw Organizer、Knowledge Expander、Matrix command detector。
+- 运行时发给 LLM 的主要参考物应是任务 Skill，而不是完整规则文档或硬编码 schema。
+- Core、Policy 和 Executor 仍固定安全契约：plan-before-write、path safety、risk、approval、hash guard、traceability 和 deterministic execution。
+
+当前 Phase 4 的第一处实践是 `VaultProfile -> VaultRawOrganizerSkill -> VaultPlan`。后续 Matrix room、Web source、Git、Calendar 或 Task 系统也应沿用同一原则：adapter 固定接入和安全边界，Profile / Skill 描述本地协作方式。
+
 ## 已收敛的旧 ADR
 
 - `ADR 0001：VaultPlan Before Vault Write`：并入本文第 1 条。

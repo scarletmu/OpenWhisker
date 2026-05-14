@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -177,6 +179,56 @@ func TestRawOrganizerForNameBuildsOpenAIOrganizer(t *testing.T) {
 	}
 }
 
+func TestRunOrganizePreviewContext(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "openwhisker.db")
+	vaultRoot := filepath.Join(dir, "vault")
+	var ingestOut bytes.Buffer
+	if err := run([]string{
+		"ingest", "raw",
+		"--db", dbPath,
+		"--vault", vaultRoot,
+		"--text", "preview context raw",
+	}, strings.NewReader(""), &ingestOut, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := run([]string{
+		"organize", "preview-context",
+		"--db", dbPath,
+		"--vault", vaultRoot,
+	}, strings.NewReader(""), &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	body := out.String()
+	for _, want := range []string{`"raw_job_id"`, `"raw_path"`, "preview context raw"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("preview context output = %s, want %q", body, want)
+		}
+	}
+}
+
+func TestRunVaultProfilePreviewBuildsSkillBundle(t *testing.T) {
+	var out bytes.Buffer
+	if err := run([]string{
+		"vault", "profile", "preview",
+		"--vault-profile", "knowledge-vault",
+	}, strings.NewReader(""), &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	body := out.String()
+	for _, want := range []string{
+		`"id": "knowledge-vault"`,
+		`"name": "vault-raw-organizer"`,
+		"VaultRawOrganizerSkill.md",
+		"status/needs-review",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("profile preview output = %s, want %q", body, want)
+		}
+	}
+}
+
 func TestRunMatrixDaemonLoopPersistsSinceToken(t *testing.T) {
 	dir := t.TempDir()
 	sinceFile := filepath.Join(dir, "matrix-since.token")
@@ -211,6 +263,78 @@ func TestRunMatrixDaemonLoopPersistsSinceToken(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "matrix daemon poll completed") {
 		t.Fatalf("logs = %q, want completion log", logs.String())
+	}
+}
+
+func TestMatrixClientForAuthLogsInAndCachesSession(t *testing.T) {
+	dir := t.TempDir()
+	sessionFile := filepath.Join(dir, "matrix-session.json")
+	var loginCount int
+	httpClient := &http.Client{Transport: mainRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		loginCount++
+		if r.Method != http.MethodPost || r.URL.Path != "/_matrix/client/v3/login" {
+			t.Fatalf("request = %s %s, want login", r.Method, r.URL.Path)
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["password"] != "secret" {
+			t.Fatalf("password = %v, want secret", payload["password"])
+		}
+		return mainJSONResponse(`{"user_id":"@bot:example.test","access_token":"token-1","device_id":"DEVICE1"}`), nil
+	})}
+
+	client, userID, err := matrixClientForAuth(context.Background(), matrixAuthOptions{
+		Homeserver:  "https://matrix.example.test",
+		UserID:      "@bot:example.test",
+		Password:    "secret",
+		SessionFile: sessionFile,
+		HTTPClient:  httpClient,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if userID != "@bot:example.test" || client.AccessToken != "token-1" {
+		t.Fatalf("auth = user %q token %q, want login credentials", userID, client.AccessToken)
+	}
+	session, err := readMatrixSession(sessionFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.AccessToken != "token-1" || session.DeviceID != "DEVICE1" {
+		t.Fatalf("session = %+v, want cached login", session)
+	}
+	if loginCount != 1 {
+		t.Fatalf("loginCount = %d, want 1", loginCount)
+	}
+
+	cachedClient, cachedUserID, err := matrixClientForAuth(context.Background(), matrixAuthOptions{
+		Homeserver:  "https://matrix.example.test",
+		UserID:      "@bot:example.test",
+		Password:    "secret",
+		SessionFile: sessionFile,
+		HTTPClient:  httpClient,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cachedUserID != "@bot:example.test" || cachedClient.AccessToken != "token-1" {
+		t.Fatalf("cached auth = user %q token %q, want cached credentials", cachedUserID, cachedClient.AccessToken)
+	}
+	if loginCount != 1 {
+		t.Fatalf("loginCount = %d, want cached session without second login", loginCount)
+	}
+}
+
+func TestMatrixClientForAuthRequiresCredential(t *testing.T) {
+	_, _, err := matrixClientForAuth(context.Background(), matrixAuthOptions{
+		Homeserver:  "https://matrix.example.test",
+		UserID:      "@bot:example.test",
+		SessionFile: filepath.Join(t.TempDir(), "missing.json"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "OPENWHISKER_MATRIX_ACCESS_TOKEN or OPENWHISKER_MATRIX_PASSWORD") {
+		t.Fatalf("error = %v, want credential error", err)
 	}
 }
 
@@ -256,6 +380,21 @@ func TestLoadLocalEnvFindsParentEnvAndDoesNotOverrideExisting(t *testing.T) {
 	}
 	if got := os.Getenv("OPENWHISKER_TEST_ENV_FILE_QUOTED"); got != "quoted value" {
 		t.Fatalf("quoted env after unset = %q, want quoted value", got)
+	}
+}
+
+type mainRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f mainRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func mainJSONResponse(body string) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
 	}
 }
 

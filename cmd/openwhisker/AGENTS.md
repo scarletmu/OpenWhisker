@@ -7,6 +7,7 @@ Current commands:
 - `ingest raw` captures raw text into `Raw/Inbox/`.
 - `organize last` prepares a medium-risk organization plan.
 - `plan diff`, `plan approve`, and `plan reject` drive approval flow.
+- `vault profile preview` renders the current Profile / Skill bundle without calling LLMs or writing the vault.
 - `jobs show` exposes stored job state for debugging.
 
 Primary files:

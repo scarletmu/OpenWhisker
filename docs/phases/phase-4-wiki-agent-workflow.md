@@ -14,6 +14,7 @@
 - 已新增 Matrix Adapter MVP：支持 Matrix `/sync` 单次轮询、文本消息入站、调用 Core Adapter API、从 outbox 回发 Matrix 文本消息。
 - 已新增 CLI 入口 `openwhisker matrix poll-once`，用于手动验证 Matrix 单次轮询。
 - 已新增 CLI 入口 `openwhisker matrix daemon`，用于长期运行 Matrix `/sync` 循环；支持 `since` token 本地持久化、interrupt / SIGTERM 正常退出、错误退避和 pending outbox 继续投递。
+- Matrix 认证已支持账号密码登录模式：无显式 access token 时，可用 `OPENWHISKER_MATRIX_PASSWORD` 调 Matrix password login，并把 session 缓存到 ignored 的 `data/matrix-session.json`；显式 token 仍作为兼容路径保留。
 - 已新增第一版 agent output policy gate：medium-risk plan 必须有 source refs、target paths、operation reason/payload，Knowledge draft 必须有 frontmatter、受控 tag、`needs_review` 和 Raw/Processed 正文链接。
 - 已新增 `organize today` 最小 grouped plan：当天仍在 `Raw/Inbox` 的 raw captures 会生成一个 grouped Knowledge draft 和多条 approved raw move。
 
@@ -21,11 +22,12 @@
 
 - 已新增 `internal/agent` LLM reasoning adapter 边界，明确禁止 provider 直接写 vault、执行 shell 或调用 Obsidian CLI。
 - 已新增 OpenAI-compatible Chat Completions Raw Organizer 最小实现：读取受控 raw context，要求 structured JSON 输出，并把结果归一化为 medium-risk `VaultPlan`。
-- 已新增 Raw Organizer Context Builder：读取 raw note、vault root `AGENTS.md`、`Meta/README.md`、`Meta/Tagging.md`、`Raw/AGENTS.md` 和 `Knowledge/AGENTS.md`；不读取隐藏路径、`.obsidian`、`.git`、secrets 或 vault root 外文件。
+- 已新增 Raw Organizer Context Builder：默认只读取 raw note、由当前 `VaultProfile` 编译出的 task-specific `VaultRawOrganizerSkill` 和当前 `VaultProfile` 摘要；显式 `--context-mode=vault-rules` 时才附带 vault root `AGENTS.md`、`Meta/README.md`、`Meta/Tagging.md`、`Raw/AGENTS.md` 和 `Knowledge/AGENTS.md`。Context builder 不读取隐藏路径、`.obsidian`、`.git`、secrets 或 vault root 外文件。
 - CLI `organize last`、Matrix `poll-once` 和 Matrix `daemon` 已支持 `--organizer deterministic|openai-compatible`；默认 deterministic，启用兼容 endpoint 时优先使用 `OPENWHISKER_LLM_API_KEY`、`OPENWHISKER_LLM_BASE_URL` 和 `OPENWHISKER_LLM_MODEL`。
 - 已扩展 `move_note` payload：approved raw move 会在 `Raw/Processed/` note 末尾追加 OpenWhisker processing note，包含 plan job、raw job、处理时间、Raw/Processed 路径、Knowledge output link 和剩余 review 项。
 - 已新增 provider contract tests、Chat Completions request tests、context builder tests 和 CLI organizer selection tests。
 - 已新增 policy regression tests，覆盖缺 source refs、缺 frontmatter、缺 Raw/Processed 正文链接、move destination 未列入 target paths 等 agent 输出拒绝场景。
+- 已新增 `internal/profile` 本地 Profile / Skill bundle 生成边界，并提供 `vault profile preview` 用于预览当前 profile 会编译出的 `VaultRawOrganizerSkill`。Profile / Skill 生成不进入 OpenWhisker runtime 主路径，改由外部 vault-local `vault-profile-analyzer` Skill 模板承接。
 - 尚未完成 Knowledge Expander。
 
 最小启用方式：
@@ -49,15 +51,92 @@ export OPENWHISKER_LLM_PROJECT_ID=...
 
 旧的 `OPENWHISKER_OPENAI_*` 和 `OPENAI_API_KEY` 只作为兼容 fallback 保留；新文档、新配置和 `.env.local` 模板应优先使用 `OPENWHISKER_LLM_*`。官方 OpenAI 只是 OpenAI-compatible endpoint 的一种可选实现，不是 Phase 4 的默认口径。
 
+## 设计收敛：Profile 分析与 Skill 驱动
+
+Phase 4 的外部对接原则收敛为 skill-driven adapter architecture：OpenWhisker 固定安全流程，外部对象的本地协作方式由 Profile 和 Skill 描述。
+
+在 vault 场景里：
+
+- `VaultProfile` 是被分析出来的事实：这个 vault 有哪些目录、哪些区域承担什么职责、常见标签、草稿习惯、完成态习惯、哪些位置不能碰、哪些文档像规则源。
+- `VaultProfile` 可以由用户在自己的 vault 里运行 vault-local Skill，分析本地 `AGENTS.md`、`Meta/` 规则、历史笔记和样本生成候选版本；候选版本不能自动成为真理，需要人工确认。
+- `VaultSkill` 是基于已确认 Profile 编译出的任务说明：例如 Raw Organizer 应该怎么处理输入、输出什么格式、用哪些目录和 tag、哪些事不要做。
+- 运行时发给 LLM 的主要参考物是任务 Skill，而不是完整 vault 规则大杂烩；Profile 作为可审查的事实摘要随附。
+- OpenWhisker 不把某个 vault 的现状标准化为所有人的固定格式，只校验安全契约和当前 Profile / Skill 明确声明的本地约束。
+
+当前代码已经把 minimal context 调整为：
+
+```text
+raw note
+  + OpenWhisker/VaultRawOrganizerSkill.md
+  + OpenWhisker/VaultProfile.md
+```
+
+其中 `VaultRawOrganizerSkill.md` 由当前 profile conventions 编译出来，是本次 Raw Organizer 的主要 vault-specific guidance；`VaultProfile.md` 是事实摘要。Profile / Skill 的生产应发生在用户 vault 侧，OpenWhisker 只负责预览和消费用户确认后的结果。
+
+本地可先预览当前配置会得到的 Profile / Skill bundle：
+
+```sh
+go run ./cmd/openwhisker vault profile preview --vault-profile knowledge-vault
+```
+
+如果要从 vault 本地规则生成候选 Profile / Skill，应使用外部 vault-local Skill，而不是 OpenWhisker runtime 命令。模板见：
+
+```text
+docs/skills/vault-profile-analyzer/SKILL.md
+```
+
 ## 下一步真实环境验证顺序
 
 Phase 4 代码闭环已经可以进入真实环境验证，但验证顺序应保持保守：
 
 1. **真实 Matrix + test vault**：先运行 `matrix daemon --vault testdata/vault --organizer=deterministic`，验证 IM 收发、event 去重、outbox 投递、`/organize last`、`/organize today`、`/diff`、`/approve` 和 `since` token 持久化，不污染真实 vault。
-2. **真实 vault + deterministic organizer**：再切到 `/Users/wang/Documents/KnowLedge`，验证 vault `AGENTS.md` context、`Raw/Inbox`、`Raw/Processed`、`Knowledge/Drafts`、approval apply 和 Headless Sync 行为，保持输出稳定可控。
+2. **真实 vault + deterministic organizer**：再切到 `/Users/wang/Documents/KnowLedge`，验证 `Raw/Inbox`、`Raw/Processed`、`Knowledge/Drafts`、approval apply 和 Headless Sync 行为，保持输出稳定可控。真实 vault 验证应使用独立本地 SQLite，例如 `OPENWHISKER_DEBUG_DB=data/openwhisker-real.db`，避免和 test vault 的 job / plan / operation log 混在一起。
 3. **真实 vault + OpenAI-compatible LLM**：最后启用 `--organizer=openai-compatible`，验证真实整理质量。中风险 plan 仍必须走 diff、approval、hash guard 和 `VaultExecutor`，不直接写正式 Knowledge note。
 
+本地 ignored debug 脚本可用于这三步验证：
+
+```sh
+scripts/local/matrix-debug.sh status
+scripts/local/matrix-debug.sh daemon
+
+OPENWHISKER_DEBUG_VAULT=/Users/wang/Documents/KnowLedge \
+OPENWHISKER_DEBUG_DB=data/openwhisker-real.db \
+scripts/local/matrix-debug.sh daemon
+```
+
+`OPENWHISKER_MATRIX_SESSION_FILE` 和 `OPENWHISKER_MATRIX_SINCE_FILE` 可以继续复用；前者保存 Matrix 登录 session，后者避免 daemon 重启后重复消费旧消息。`OPENWHISKER_DEBUG_DB` 建议按 vault 或验证阶段拆分。
+
+进入第 3 步前必须先做一次合成 raw 或 test vault 的 provider smoke，确认兼容 endpoint、模型名、key 权限和 structured JSON 输出可用。不要在权限、模型分组或输出格式尚未确认时，把真实 vault raw/context 发送到外部 LLM endpoint。
+
+外发前可先在本地预览真实 organizer 会读取的上下文。默认 `minimal` 只包含 raw note、由当前 `VaultProfile` 编译出的 `VaultRawOrganizerSkill` 和当前 `VaultProfile` 摘要；如需调试完整 vault 规则，可显式传 `--context-mode=vault-rules`：
+
+```sh
+go run ./cmd/openwhisker organize preview-context \
+  --db data/openwhisker-real.db \
+  --vault /Users/wang/Documents/KnowLedge \
+  --vault-profile knowledge-vault
+```
+
+该命令只读本地 SQLite 和 vault，不调用 LLM、不生成 plan、不写 vault。
+
+Phase 4 默认不把完整 vault 规则全文发送给外部 LLM。OpenWhisker 只固定执行安全契约：source trace、plan-before-write、risk、approval、path safety 和 deterministic executor。具体 vault 的 raw inbox、processed raw、草稿区、tag 清单等属于 `VaultProfile`，并通过任务 `VaultSkill` 进入 LLM 上下文，不能硬编码成所有 vault 的通用 schema。当前 `knowledge-vault` profile 只是 `/Users/wang/Documents/KnowLedge` 的本地范式；默认 `generic` profile 保持更少假设。其他 vault 可以通过 `OPENWHISKER_RAW_INBOX_DIR`、`OPENWHISKER_RAW_PROCESSED_DIR`、`OPENWHISKER_KNOWLEDGE_DIR`、`OPENWHISKER_KNOWLEDGE_DRAFT_DIR` 和 `OPENWHISKER_REQUIRED_DRAFT_TAGS` 覆盖本地约定。
+
 这三步通过后，再继续推进 Knowledge Expander、high-risk proposal policy、真实 Matrix 部署固化和多房间 / room-scoped outbox。
+
+## 未来方向：Command Detector
+
+Matrix 当前先保留 `/status`、`/jobs`、`/organize last`、`/diff`、`/approve` 等显式命令作为 debug / fallback。Element 对 slash command 的客户端拦截会影响体验，但短期不急于用更多固定前缀解决。
+
+后续可以在 Matrix Adapter 和 Core Adapter API 之间增加一个极小模型驱动的 `Command Detector`：
+
+```text
+Matrix text
+  -> Command Detector
+  -> raw_capture | command | unclear_intent
+  -> Core Adapter API
+```
+
+它只负责入口意图分类和参数抽取，例如把“帮我整理刚才那条”“看看最近任务”“批准这个计划”归一化为结构化 command。它不直接写 vault、不生成 `VaultPlan`、不调用 `VaultExecutor`、不绕过 policy / approval；所有执行仍由 Core、Plan、Policy 和 Executor 决定。
 
 Phase 4 的目标不是绕过现有 executor，也不是先实现 desktop Obsidian CLI executor 或 scheduler，而是打通真实端到端 vertical slice：Matrix IM 作为首期核心交互入口，Wiki Agent Host 使用真实 LLM provider 生成结构化 `VaultPlan`，中风险变更继续经过 policy、diff、approval、hash guard 和 sync-aware executor。LLM 可以读取受控 vault context 并生成计划，但仍然不能直接写 vault、不能执行 shell、不能自由调用 Obsidian CLI；Matrix Adapter 也不能直接调用 LLM 或写 vault。
 
@@ -66,7 +145,7 @@ Phase 4 的目标不是绕过现有 executor，也不是先实现 desktop Obsidi
 Phase 4 主线是真实 LLM + Matrix IM approval workflow，拆成三个连续切片：
 
 1. **Phase 4A：Core Adapter API + Matrix Adapter MVP + Agent Host Contract**。先定义 Core 给 IM adapter 使用的稳定入口、Matrix 入站/出站最小闭环、Wiki Agent Host 的输入输出边界、vault context 读取范围、结构化 plan 校验和 fake/fixture agent 验证方式。
-2. **Phase 4B：Real LLM-backed Raw Organizer**。接入真实 LLM provider，让 Matrix `/organize last` 从 raw note、vault rules、已有 wiki context 中生成可审批 `VaultPlan`，并通过 Matrix 完成 diff、approval、reject 和结果回传。当前已完成最小 OpenAI-compatible provider 接入，后续补齐更完整的 validator、上下文检索和 Raw/Processed 处理记录。
+2. **Phase 4B：Real LLM-backed Raw Organizer**。接入真实 LLM provider，让 Matrix `/organize last` 从 raw note、VaultRawOrganizerSkill、VaultProfile 摘要、可选 vault rules 和已有 wiki context 中生成可审批 `VaultPlan`，并通过 Matrix 完成 diff、approval、reject 和结果回传。当前已完成最小 OpenAI-compatible provider 接入，后续补齐更完整的 validator、上下文检索和 Raw/Processed 处理记录。
 3. **Phase 4C：Organize Today + Knowledge Expander + Proposal Policy**。让 `organize today` 支持多 raw 分组整理，并让 Knowledge Expander 支持扩展、拆分建议、hub / child note proposal；高风险 split / merge 默认只生成 proposal note。
 
 Phase 4 必须包含真实 LLM provider 接入；fake / fixture agent 只作为 contract、validator 和 regression test 的替身。Provider 细节必须被隔离在 Agent Host 边界内。Core、Policy、Executor 和 Matrix Adapter 只消费结构化 job、plan、outbox 或 command result，不依赖具体模型或 SDK。
@@ -78,7 +157,7 @@ Phase 4 必须包含真实 LLM provider 接入；fake / fixture agent 只作为 
 1. 通过 Matrix IM 接收 raw input、命令、approval 和 reject；
 2. 通过 Core Adapter API 把 IM event 转换为受控 `WikiJob`、`VaultPlan` 生命周期操作和 `OutboxMessage`；
 3. 为 agent 组装受控 vault context；
-4. 读取最近适用的 vault `AGENTS.md` 和 workflow 文档；
+4. 使用由 vault-specific `VaultProfile` 编译出的 task-specific Raw Organizer Skill / contract 约束 LLM 输出；
 5. 让真实 LLM-backed Raw Organizer 生成可审计的 `VaultPlan`；
 6. 让 Knowledge Expander 生成扩展计划或 proposal；
 7. 在 plan 进入执行前校验 source traceability、frontmatter、controlled tags 和风险等级；
@@ -95,7 +174,7 @@ Matrix /organize last or CLI organize last
   -> Core Adapter API / command router
   -> Raw/Inbox or Raw/Sources note
   -> WikiJob(type=organize_raw)
-  -> Vault Context Builder reads raw + nearest AGENTS.md + limited wiki context
+  -> Vault Context Builder reads raw + VaultRawOrganizerSkill + VaultProfile
   -> Wiki Agent Host / Raw Organizer generates VaultPlan
   -> policy validates source traceability, paths, metadata, risk
   -> direct_fs_executor prepares diff + before_hash
@@ -142,7 +221,7 @@ Matrix command, CLI command, or selected topic
 - Matrix Adapter 只调用 Core 入口，不直接写 vault、不直接调用 LLM、不执行 shell、不调用 Obsidian CLI。
 - 定义 Wiki Agent Host 的稳定职责：接收 job、user intent、受控 vault context，返回结构化 `VaultPlan` 或 proposal result。
 - 定义 Raw Organizer 和 Knowledge Expander 的最小输入输出契约。
-- 定义 vault context 读取规则：raw note、最近适用 `AGENTS.md`、`Meta/README.md`、`Meta/Tagging.md`、必要的 destination guide 和有限 wiki search 结果。
+- 定义 context 读取规则：默认 raw note + task-specific VaultRawOrganizerSkill + VaultProfile；完整 vault rules context 只作为显式调试模式，不作为真实外发默认值。
 - 定义 fake / fixture agent 验证方式，确保 adapter、contract 和 plan validation regression 不依赖真实模型。
 - 定义 agent output 的校验要求：合法 operation、clean relative path、source refs、target paths、risk、reason 和 metadata。
 

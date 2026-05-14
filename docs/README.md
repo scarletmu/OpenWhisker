@@ -28,8 +28,12 @@ docs/
     phase-2-approval-diff.md
     phase-3-headless-sync-executor.md
     phase-4-wiki-agent-workflow.md
+    phase-4-matrix-test-feedback.md
   adapters/
     matrix-private-im.md
+  skills/
+    vault-profile-analyzer/
+      SKILL.md
 ```
 
 ## 当前实现索引
@@ -37,7 +41,7 @@ docs/
 - Phase 1：`ingest raw` 低风险 raw capture 已落地，默认写入 `testdata/vault/Raw/Inbox/`。
 - Phase 2：`organize last`、`plan diff`、`plan approve`、`plan reject` 审批闭环已落地，包含 diff、`before_hash` guard、vault lock 和 operation log。
 - Phase 3：`vault sync-status`、`vault sync` 和 `plan approve --sync=auto|off|on` 已落地；默认 test vault 不触发外部 sync，显式真实 vault approval 默认启用 Headless one-shot sync。
-- Phase 4：推进中；Matrix IM MVP、Core Adapter API、Raw Organizer contract、受控 vault context、可显式启用的 OpenAI-compatible Raw Organizer 最小路径、第一版 agent output policy gate、Raw/Processed processing note 写入、长期 Matrix daemon，以及 `organize today` grouped plan 已落地。下一步按“真实 Matrix + test vault -> 真实 vault + deterministic -> 真实 vault + OpenAI-compatible LLM”顺序验证，再继续补 Knowledge Expander 和 high-risk proposal policy。
+- Phase 4：推进中；Matrix IM MVP、Core Adapter API、Raw Organizer contract、受控 vault context、`VaultProfile -> VaultSkill` 边界、`vault profile preview` 本地 skill bundle 预览、外部 vault-local `vault-profile-analyzer` Skill 模板、可显式启用的 OpenAI-compatible Raw Organizer 最小路径、第一版 agent output policy gate、Raw/Processed processing note 写入、长期 Matrix daemon，以及 `organize today` grouped plan 已落地。下一步按“真实 Matrix + test vault -> 真实 vault + deterministic -> 真实 vault + OpenAI-compatible LLM”顺序验证，再继续补加载用户确认后的 Profile / Skill、Knowledge Expander 和 high-risk proposal policy。
 
 ## 维护规则
 

@@ -3,7 +3,7 @@ title: Matrix Adapter 实践
 type: architecture
 status: draft
 created: 2026-05-13
-updated: 2026-05-13
+updated: 2026-05-14
 project:
   - OpenWhisker
 component:
@@ -90,13 +90,49 @@ go run ./cmd/openwhisker matrix daemon
 
 ```sh
 export OPENWHISKER_MATRIX_HOMESERVER=https://matrix.example.com
-export OPENWHISKER_MATRIX_ACCESS_TOKEN=...
 export OPENWHISKER_MATRIX_USER_ID=@openwhisker:example.com
 export OPENWHISKER_MATRIX_ROOM_ID='!room:example.com'
+export OPENWHISKER_MATRIX_PASSWORD=...
+
+# 可选：显式 token 仍可用；若未提供，OpenWhisker 会用 bot 密码登录并缓存 session。
+export OPENWHISKER_MATRIX_ACCESS_TOKEN=...
+export OPENWHISKER_MATRIX_SESSION_FILE=data/matrix-session.json
 
 export OPENWHISKER_LLM_API_KEY=...
 export OPENWHISKER_LLM_BASE_URL=https://your-compatible-endpoint.example/v1
 export OPENWHISKER_LLM_MODEL=your-model
+```
+
+账号密码模式是本地接入的推荐路径：`.env.local` 保存 bot 密码，`matrix poll-once` / `matrix daemon` 启动时若没有显式 `OPENWHISKER_MATRIX_ACCESS_TOKEN`，会调用 Matrix password login，拿到 `access_token` 后写入 ignored 的 `data/matrix-session.json`。后续启动优先复用这个 session。Element 的 recovery key 属于 E2EE 账号恢复材料，不写入 OpenWhisker 配置；首版自动化房间仍要求非 E2EE。
+
+OpenAI-compatible organizer 在真实 vault 启用前，应先用合成 raw 或 test vault 做 provider smoke。确认 endpoint、模型名、key 权限和 structured JSON 输出都正常后，再显式决定是否把真实 vault raw/context 发送到该 endpoint。
+
+真实 vault 外发前可先本地预览将进入 Raw Organizer 的上下文：
+
+```sh
+go run ./cmd/openwhisker organize preview-context \
+  --db data/openwhisker-real.db \
+  --vault /Users/wang/Documents/KnowLedge
+```
+
+该命令只读本地数据，不调用 LLM，也不写 vault。
+
+默认 context mode 是 `minimal`：只包含 raw note、由当前 `VaultProfile` 编译出的 task-specific `VaultRawOrganizerSkill`，以及当前 `VaultProfile` 摘要；不发送完整 vault 规则文档。需要调试完整规则上下文时，显式传 `--context-mode=vault-rules`。
+
+`VaultProfile` 表示当前 vault 的本地范式，不是 OpenWhisker 的通用 schema。长期目标是用户在自己的 vault 里运行 vault-local Skill 生成候选 Profile，再由人确认；OpenWhisker runtime 只消费已确认的 Profile / Skill。默认 `generic` profile 只保留基础目录约定；当前 KnowLedge vault 应显式使用 `OPENWHISKER_VAULT_PROFILE=knowledge-vault` 或 `--vault-profile=knowledge-vault`，让 policy 和 task skill 都使用该 vault 的 draft tag 约束。
+
+其他 vault 可以继续使用 `generic`，并通过 `OPENWHISKER_RAW_INBOX_DIR`、`OPENWHISKER_RAW_PROCESSED_DIR`、`OPENWHISKER_KNOWLEDGE_DIR`、`OPENWHISKER_KNOWLEDGE_DRAFT_DIR` 和 `OPENWHISKER_REQUIRED_DRAFT_TAGS` 覆盖自己的目录和 tag 约定。
+
+可用本地命令预览当前配置会编译出的 Profile / Skill bundle：
+
+```sh
+go run ./cmd/openwhisker vault profile preview --vault-profile=knowledge-vault
+```
+
+需要检查当前 vault 规则能推导出什么候选 Profile / Skill 时，应在 vault 侧运行外部 Skill，而不是让 OpenWhisker daemon 扫描 vault。模板见：
+
+```text
+docs/skills/vault-profile-analyzer/SKILL.md
 ```
 
 最小运行：
@@ -105,10 +141,24 @@ export OPENWHISKER_LLM_MODEL=your-model
 go run ./cmd/openwhisker matrix daemon \
   --vault /Users/wang/Documents/KnowLedge \
   --organizer=openai-compatible \
+  --vault-profile=knowledge-vault \
   --since-file data/matrix-since.token
 ```
 
 当前 daemon 仍是单房间 MVP；多房间路由、room-scoped outbox、systemd / launchd 部署文件和真实 Matrix 环境压测留给后续切片。
+
+本地调试可以使用 ignored 的 `scripts/local/matrix-debug.sh`。它会自动读取 `.env.local`，并支持用 `OPENWHISKER_DEBUG_DB` 和 `OPENWHISKER_DEBUG_VAULT` 显式区分不同验证阶段：
+
+```sh
+scripts/local/matrix-debug.sh status
+scripts/local/matrix-debug.sh daemon
+
+OPENWHISKER_DEBUG_VAULT=/Users/wang/Documents/KnowLedge \
+OPENWHISKER_DEBUG_DB=data/openwhisker-real.db \
+scripts/local/matrix-debug.sh daemon
+```
+
+真实 vault 验证时应使用独立 SQLite 文件，避免把 `testdata/vault` 的 job、plan 和 operation log 混入真实 vault 运行记录。Matrix session cache 和 since token 可以继续复用。
 
 ## 运行拓扑
 
@@ -430,7 +480,7 @@ User:
 Flow:
   command router
     -> WikiJob(type=organize_raw)
-    -> Wiki Agent reads raw + nearest AGENTS.md
+    -> Wiki Agent reads raw + VaultRawOrganizerSkill + VaultProfile
     -> VaultPlan
     -> policy check
     -> prepared diff

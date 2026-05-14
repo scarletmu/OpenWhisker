@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
@@ -34,6 +35,19 @@ type Client struct {
 	HTTPClient  *http.Client
 }
 
+type LoginRequest struct {
+	UserID                   string
+	Password                 string
+	DeviceID                 string
+	InitialDeviceDisplayName string
+}
+
+type LoginResponse struct {
+	UserID      string `json:"user_id"`
+	AccessToken string `json:"access_token"`
+	DeviceID    string `json:"device_id"`
+}
+
 type SyncResponse struct {
 	NextBatch string `json:"next_batch"`
 	Rooms     struct {
@@ -55,8 +69,10 @@ type Event struct {
 }
 
 type MessageContent struct {
-	MsgType string `json:"msgtype"`
-	Body    string `json:"body"`
+	MsgType       string `json:"msgtype"`
+	Body          string `json:"body"`
+	Format        string `json:"format,omitempty"`
+	FormattedBody string `json:"formatted_body,omitempty"`
 }
 
 func (a Adapter) PollOnce(ctx context.Context, since string, timeout time.Duration) (string, error) {
@@ -78,7 +94,7 @@ func (a Adapter) PollOnce(ctx context.Context, since string, timeout time.Durati
 			if !isTextMessage(event) || event.Sender == a.UserID {
 				continue
 			}
-			_, err := a.Core.HandleText(ctx, core.AdapterRequest{
+			response, err := a.Core.HandleText(ctx, core.AdapterRequest{
 				Adapter: model.AdapterMatrix,
 				EventID: event.EventID,
 				Sender:  event.Sender,
@@ -89,6 +105,11 @@ func (a Adapter) PollOnce(ctx context.Context, since string, timeout time.Durati
 					return "", sendErr
 				}
 				continue
+			}
+			if shouldSendImmediateResponse(response) {
+				if err := a.Client.SendText(ctx, roomID, formatAdapterResponse(response)); err != nil {
+					return "", err
+				}
 			}
 		}
 	}
@@ -146,7 +167,7 @@ func (c Client) SendText(ctx context.Context, roomID, body string) error {
 	if err != nil {
 		return err
 	}
-	payload, err := json.Marshal(MessageContent{MsgType: "m.text", Body: body})
+	payload, err := json.Marshal(newTextMessage(body))
 	if err != nil {
 		return err
 	}
@@ -157,6 +178,50 @@ func (c Client) SendText(ctx context.Context, roomID, body string) error {
 	req.Header.Set("Content-Type", "application/json")
 	c.authorize(req)
 	return c.doJSON(req, nil)
+}
+
+func (c Client) LoginPassword(ctx context.Context, login LoginRequest) (LoginResponse, error) {
+	var response LoginResponse
+	if strings.TrimSpace(login.UserID) == "" {
+		return response, fmt.Errorf("matrix login user id is required")
+	}
+	if login.Password == "" {
+		return response, fmt.Errorf("matrix login password is required")
+	}
+	endpoint, err := c.endpoint("/_matrix/client/v3/login")
+	if err != nil {
+		return response, err
+	}
+	payload := map[string]any{
+		"type": "m.login.password",
+		"identifier": map[string]string{
+			"type": "m.id.user",
+			"user": strings.TrimSpace(login.UserID),
+		},
+		"password": login.Password,
+	}
+	if strings.TrimSpace(login.DeviceID) != "" {
+		payload["device_id"] = strings.TrimSpace(login.DeviceID)
+	}
+	if strings.TrimSpace(login.InitialDeviceDisplayName) != "" {
+		payload["initial_device_display_name"] = strings.TrimSpace(login.InitialDeviceDisplayName)
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return response, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(body))
+	if err != nil {
+		return response, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if err := c.doJSON(req, &response); err != nil {
+		return LoginResponse{}, err
+	}
+	if strings.TrimSpace(response.AccessToken) == "" {
+		return LoginResponse{}, fmt.Errorf("matrix login response did not include access_token")
+	}
+	return response, nil
 }
 
 func (c Client) endpoint(path string) (*url.URL, error) {
@@ -215,4 +280,95 @@ func formatOutboxMessage(msg model.OutboxMessage) string {
 		return msg.Body
 	}
 	return fmt.Sprintf("[%s] %s", msg.Kind, msg.Body)
+}
+
+func shouldSendImmediateResponse(response core.AdapterResponse) bool {
+	if response.Duplicate || strings.TrimSpace(response.Body) == "" {
+		return false
+	}
+	return response.OutboxKind == "" || response.OutboxKind == model.OutboxKindDiff
+}
+
+func formatAdapterResponse(response core.AdapterResponse) string {
+	if response.OutboxKind == "" {
+		return response.Body
+	}
+	return fmt.Sprintf("[%s] %s", response.OutboxKind, response.Body)
+}
+
+func newTextMessage(body string) MessageContent {
+	content := MessageContent{MsgType: "m.text", Body: body}
+	if formatted := matrixHTML(body); formatted != "" && formatted != html.EscapeString(body) {
+		content.Format = "org.matrix.custom.html"
+		content.FormattedBody = formatted
+	}
+	return content
+}
+
+func matrixHTML(body string) string {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return ""
+	}
+	var out []string
+	inList := false
+	inCode := false
+	var codeLines []string
+	closeList := func() {
+		if inList {
+			out = append(out, "</ul>")
+			inList = false
+		}
+	}
+	closeCode := func() {
+		if inCode {
+			out = append(out, "<pre><code>"+html.EscapeString(strings.Join(codeLines, "\n"))+"</code></pre>")
+			codeLines = nil
+			inCode = false
+		}
+	}
+	for _, raw := range strings.Split(body, "\n") {
+		line := strings.TrimRight(raw, "\r")
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			if inCode {
+				closeCode()
+			} else {
+				closeList()
+				inCode = true
+				codeLines = nil
+			}
+			continue
+		}
+		if inCode {
+			codeLines = append(codeLines, line)
+			continue
+		}
+		if trimmed == "" {
+			closeList()
+			continue
+		}
+		if strings.HasPrefix(trimmed, "- ") {
+			if !inList {
+				out = append(out, "<ul>")
+				inList = true
+			}
+			out = append(out, "<li>"+html.EscapeString(strings.TrimSpace(strings.TrimPrefix(trimmed, "- ")))+"</li>")
+			continue
+		}
+		closeList()
+		switch {
+		case strings.HasPrefix(trimmed, "### "):
+			out = append(out, "<strong>"+html.EscapeString(strings.TrimSpace(strings.TrimPrefix(trimmed, "### ")))+"</strong>")
+		case strings.HasPrefix(trimmed, "## "):
+			out = append(out, "<strong>"+html.EscapeString(strings.TrimSpace(strings.TrimPrefix(trimmed, "## ")))+"</strong>")
+		case strings.HasPrefix(trimmed, "# "):
+			out = append(out, "<strong>"+html.EscapeString(strings.TrimSpace(strings.TrimPrefix(trimmed, "# ")))+"</strong>")
+		default:
+			out = append(out, html.EscapeString(trimmed))
+		}
+	}
+	closeCode()
+	closeList()
+	return strings.Join(out, "<br>")
 }

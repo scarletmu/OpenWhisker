@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -115,7 +116,7 @@ func (s AdapterService) MarkOutboxDelivered(id string) error {
 }
 
 func (s AdapterService) ingestRaw(ctx context.Context, req AdapterRequest, text string) (AdapterResponse, error) {
-	result, err := NewIngestService(s.store, s.vaultRoot).IngestRaw(ctx, IngestRawRequest{
+	result, err := NewIngestServiceWithConventions(s.store, s.vaultRoot, s.planOpts.Conventions).IngestRaw(ctx, IngestRawRequest{
 		Text:   text,
 		Source: adapterSource(req),
 	})
@@ -168,6 +169,14 @@ func (s AdapterService) handleDiff(identifier string) (AdapterResponse, error) {
 	}
 	diff, err := s.planService().Diff(identifier)
 	if err != nil {
+		var noDiff NoPreparedDiffError
+		if errors.As(err, &noDiff) {
+			return AdapterResponse{
+				Status: "no_diff",
+				PlanID: noDiff.PlanID,
+				Body:   renderNoPreparedDiff(noDiff),
+			}, nil
+		}
 		return AdapterResponse{}, err
 	}
 	return AdapterResponse{
@@ -284,14 +293,133 @@ func resultStatusSummary(status string, paths []string) string {
 	return status + " for " + strings.Join(paths, ", ")
 }
 
+func renderNoPreparedDiff(err NoPreparedDiffError) string {
+	if err.RiskLevel == model.RiskLow && err.Status == model.PlanStatusApplied {
+		return fmt.Sprintf("Plan %s is a low-risk raw capture that was already auto-applied, so it has no approval diff.\nRun /organize last first, then use /diff <plan_id> on the approval plan.", err.PlanID)
+	}
+	return fmt.Sprintf("Plan %s has no prepared approval diff. Current status: %s.", err.PlanID, err.Status)
+}
+
 func renderAdapterDiff(diff *model.VaultDiff) string {
-	var lines []string
-	lines = append(lines, fmt.Sprintf("Diff for plan %s: %s", diff.PlanID, diff.Summary))
-	for _, entry := range diff.Entries {
-		lines = append(lines, fmt.Sprintf("- %s %s", entry.Type, entry.TargetPath))
-		if entry.Preview != "" {
-			lines = append(lines, entry.Preview)
-		}
+	lines := []string{
+		"## 审批预览",
+		"",
+		fmt.Sprintf("- Plan: %s", diff.PlanID),
+		fmt.Sprintf("- 摘要: %s", diff.Summary),
+		fmt.Sprintf("- 操作数: %d", len(diff.Entries)),
+		"",
+		"## 将执行",
+	}
+	for i, entry := range diff.Entries {
+		lines = append(lines, fmt.Sprintf("- %d. %s", i+1, humanDiffOperation(entry)))
+	}
+	lines = append(lines,
+		"",
+		"## 审批前重点看",
+		"- 路径是否符合预期。",
+		"- 新建或追加的内容是否值得进入 vault。",
+		"- Raw 移动会在 approve 后才发生。",
+	)
+	if preview := humanDiffPreview(diff.Entries); preview != "" {
+		lines = append(lines, "", "## 内容预览", preview)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func humanDiffOperation(entry model.DiffEntry) string {
+	switch entry.Type {
+	case model.OperationCreateNote:
+		return "创建笔记: " + entry.TargetPath
+	case model.OperationWriteAgentReport:
+		return "创建 agent report: " + entry.TargetPath
+	case model.OperationAppendNote:
+		return "追加内容: " + entry.TargetPath
+	case model.OperationMoveNote:
+		source, dest := movePreviewPaths(entry)
+		if dest == "" {
+			return "移动笔记: " + source
+		}
+		return fmt.Sprintf("移动笔记: %s -> %s", source, dest)
+	default:
+		return entry.Type + ": " + entry.TargetPath
+	}
+}
+
+func movePreviewPaths(entry model.DiffEntry) (string, string) {
+	source := entry.TargetPath
+	for _, line := range strings.Split(entry.Preview, "\n") {
+		line = strings.TrimSpace(line)
+		if left, right, ok := strings.Cut(line, " -> "); ok {
+			return strings.TrimSpace(left), strings.TrimSpace(right)
+		}
+	}
+	if strings.HasPrefix(entry.Summary, "move note to ") {
+		return source, strings.TrimPrefix(entry.Summary, "move note to ")
+	}
+	return source, ""
+}
+
+func humanDiffPreview(entries []model.DiffEntry) string {
+	var sections []string
+	for i, entry := range entries {
+		switch entry.Type {
+		case model.OperationCreateNote, model.OperationAppendNote, model.OperationWriteAgentReport:
+			excerpt := markdownExcerpt(entry.Preview, 8)
+			if excerpt == "" {
+				continue
+			}
+			sections = append(sections, fmt.Sprintf("### %d. %s\n\n%s", i+1, entry.TargetPath, excerpt))
+		case model.OperationMoveNote:
+			source, dest := movePreviewPaths(entry)
+			line := fmt.Sprintf("### %d. %s\n\n%s -> %s", i+1, source, source, dest)
+			if strings.Contains(entry.Preview, "## OpenWhisker Processing") {
+				line += "\n\n会在处理后的 raw 笔记末尾追加 OpenWhisker processing 记录。"
+			}
+			sections = append(sections, line)
+		}
+	}
+	return strings.Join(sections, "\n\n")
+}
+
+func markdownExcerpt(markdown string, maxLines int) string {
+	lines := strings.Split(strings.ReplaceAll(markdown, "\r\n", "\n"), "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+	start := 0
+	if strings.TrimSpace(lines[0]) == "---" {
+		for i := 1; i < len(lines); i++ {
+			if strings.TrimSpace(lines[i]) == "---" {
+				start = i + 1
+				break
+			}
+		}
+	}
+	var out []string
+	for _, line := range lines[start:] {
+		line = strings.TrimRight(line, " \t")
+		if strings.TrimSpace(line) == "" && len(out) == 0 {
+			continue
+		}
+		if strings.TrimSpace(line) == "---" {
+			continue
+		}
+		line = truncateRunes(line, 180)
+		out = append(out, line)
+		if len(out) >= maxLines {
+			break
+		}
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
+func truncateRunes(s string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= limit {
+		return s
+	}
+	return string(runes[:limit]) + "..."
 }

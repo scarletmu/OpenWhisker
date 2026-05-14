@@ -121,6 +121,31 @@ func TestCheckerRejectsMoveWithoutProcessingNote(t *testing.T) {
 	}
 }
 
+func TestCheckerUsesProfileRequiredDraftTags(t *testing.T) {
+	plan := mediumRiskRawOrganizerPlan(t)
+	plan.Operations[0].PayloadJSON = mustJSON(t, model.CreateNotePayload{
+		Content: strings.Replace(validKnowledgeDraft(), "  - status/needs-review\n", "", 1),
+	})
+	if err := NewChecker().CheckForApproval(plan); err != nil {
+		t.Fatalf("generic checker should not require vault-specific tags: %v", err)
+	}
+	err := NewCheckerWithConventions(KnowledgeVaultConventions()).CheckForApproval(plan)
+	if err == nil || !strings.Contains(err.Error(), "status/needs-review") {
+		t.Fatalf("CheckForApproval() error = %v, want required tag error", err)
+	}
+}
+
+func TestConventionsCarryProfileIdentity(t *testing.T) {
+	generic := DefaultConventions().Normalize()
+	if generic.ProfileID != "generic" {
+		t.Fatalf("generic profile id = %q", generic.ProfileID)
+	}
+	knowledge := KnowledgeVaultConventions().Normalize()
+	if knowledge.ProfileID != "knowledge-vault" {
+		t.Fatalf("knowledge profile id = %q", knowledge.ProfileID)
+	}
+}
+
 func mediumRiskRawOrganizerPlan(t *testing.T) model.VaultPlan {
 	t.Helper()
 	return model.VaultPlan{
@@ -166,8 +191,9 @@ source_processed_path: Raw/Processed/job_test.md
 status: draft
 needs_review: true
 tags:
-  - knowledge/draft
-  - review/needed
+  - type/knowledge
+  - status/draft
+  - status/needs-review
 ---
 
 # Test Draft

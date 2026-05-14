@@ -1,5 +1,6 @@
 data/
 .env.local
+scripts/local/
 testdata/vault/**/*.md
 testdata/vault/**/*.db
 *.db

@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -19,6 +20,8 @@ import (
 	"github.com/scarletmu/openwhisker/internal/core"
 	"github.com/scarletmu/openwhisker/internal/executor"
 	"github.com/scarletmu/openwhisker/internal/model"
+	"github.com/scarletmu/openwhisker/internal/policy"
+	"github.com/scarletmu/openwhisker/internal/profile"
 	"github.com/scarletmu/openwhisker/internal/storage"
 )
 
@@ -45,6 +48,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runOrganizeLast(args[2:], stdout, stderr)
 	case args[0] == "organize" && args[1] == "today":
 		return runOrganizeToday(args[2:], stdout, stderr)
+	case args[0] == "organize" && args[1] == "preview-context":
+		return runOrganizePreviewContext(args[2:], stdout, stderr)
 	case args[0] == "plan" && args[1] == "diff":
 		return runPlanDiff(args[2:], stdout, stderr)
 	case args[0] == "plan" && args[1] == "approve":
@@ -55,6 +60,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runVaultSyncStatus(args[2:], stdout, stderr)
 	case args[0] == "vault" && args[1] == "sync":
 		return runVaultSync(args[2:], stdout, stderr)
+	case len(args) >= 3 && args[0] == "vault" && args[1] == "profile" && args[2] == "preview":
+		return runVaultProfilePreview(args[3:], stdout, stderr)
 	case args[0] == "jobs" && args[1] == "show":
 		return runJobShow(args[2:], stdout, stderr)
 	case args[0] == "matrix" && args[1] == "poll-once":
@@ -74,6 +81,7 @@ func runIngestRaw(args []string, stdin io.Reader, stdout, stderr io.Writer) erro
 	vaultRoot := fs.String("vault", "testdata/vault", "target test vault root")
 	text := fs.String("text", "", "raw text to ingest; stdin is used when empty")
 	source := fs.String("source", "cli", "input source label")
+	vaultProfile := fs.String("vault-profile", vaultProfileDefault(), "vault profile: generic or knowledge-vault")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -95,7 +103,11 @@ func runIngestRaw(args []string, stdin io.Reader, stdout, stderr io.Writer) erro
 	}
 	defer store.Close()
 
-	service := core.NewIngestService(store, *vaultRoot)
+	conventions, err := vaultConventionsForProfile(*vaultProfile)
+	if err != nil {
+		return err
+	}
+	service := core.NewIngestServiceWithConventions(store, *vaultRoot, conventions)
 	result, err := service.IngestRaw(context.Background(), core.IngestRawRequest{
 		Text:   rawText,
 		Source: *source,
@@ -117,6 +129,8 @@ func runOrganizeLast(args []string, stdout, stderr io.Writer) error {
 	dbPath := fs.String("db", "data/openwhisker.db", "SQLite database path")
 	vaultRoot := fs.String("vault", "testdata/vault", "target test vault root")
 	organizerName := fs.String("organizer", organizerDefault(), "raw organizer: deterministic or openai-compatible")
+	contextMode := fs.String("context-mode", contextModeDefault(), "raw organizer context mode: minimal or vault-rules")
+	vaultProfile := fs.String("vault-profile", vaultProfileDefault(), "vault profile: generic or knowledge-vault")
 	llmModel := fs.String("llm-model", llmModelDefault(), "OpenAI-compatible model for --organizer=openai-compatible")
 	openAIModel := fs.String("openai-model", "", "deprecated alias for --llm-model")
 	if err := fs.Parse(args); err != nil {
@@ -131,8 +145,14 @@ func runOrganizeLast(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	conventions, err := vaultConventionsForProfile(*vaultProfile)
+	if err != nil {
+		return err
+	}
 	result, err := core.NewPlanServiceWithOptions(store, *vaultRoot, core.PlanServiceOptions{
-		Organizer: organizer,
+		Organizer:   organizer,
+		ContextMode: *contextMode,
+		Conventions: conventions,
 	}).OrganizeLast(context.Background())
 	if err != nil {
 		return err
@@ -147,6 +167,8 @@ func runOrganizeToday(args []string, stdout, stderr io.Writer) error {
 	vaultRoot := fs.String("vault", "testdata/vault", "target test vault root")
 	dateValue := fs.String("date", "", "local date to organize in YYYY-MM-DD; default is today")
 	organizerName := fs.String("organizer", organizerDefault(), "raw organizer: deterministic or openai-compatible")
+	contextMode := fs.String("context-mode", contextModeDefault(), "raw organizer context mode: minimal or vault-rules")
+	vaultProfile := fs.String("vault-profile", vaultProfileDefault(), "vault profile: generic or knowledge-vault")
 	llmModel := fs.String("llm-model", llmModelDefault(), "OpenAI-compatible model for --organizer=openai-compatible")
 	openAIModel := fs.String("openai-model", "", "deprecated alias for --llm-model")
 	if err := fs.Parse(args); err != nil {
@@ -168,13 +190,68 @@ func runOrganizeToday(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	conventions, err := vaultConventionsForProfile(*vaultProfile)
+	if err != nil {
+		return err
+	}
 	result, err := core.NewPlanServiceWithOptions(store, *vaultRoot, core.PlanServiceOptions{
-		Organizer: organizer,
+		Organizer:   organizer,
+		ContextMode: *contextMode,
+		Conventions: conventions,
 	}).OrganizeToday(context.Background(), day)
 	if err != nil {
 		return err
 	}
 	return printJSON(stdout, result)
+}
+
+func runOrganizePreviewContext(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("organize preview-context", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dbPath := fs.String("db", "data/openwhisker.db", "SQLite database path")
+	vaultRoot := fs.String("vault", "testdata/vault", "target test vault root")
+	contextMode := fs.String("context-mode", contextModeDefault(), "raw organizer context mode: minimal or vault-rules")
+	vaultProfile := fs.String("vault-profile", vaultProfileDefault(), "vault profile: generic or knowledge-vault")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: openwhisker organize preview-context [--db data/openwhisker.db] [--vault testdata/vault]")
+	}
+	store, err := storage.Open(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	conventions, err := vaultConventionsForProfile(*vaultProfile)
+	if err != nil {
+		return err
+	}
+	preview, err := core.NewPlanServiceWithOptions(store, *vaultRoot, core.PlanServiceOptions{
+		ContextMode: *contextMode,
+		Conventions: conventions,
+	}).PreviewLastRawContext(context.Background())
+	if err != nil {
+		return err
+	}
+	return printJSON(stdout, preview)
+}
+
+func runVaultProfilePreview(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("vault profile preview", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	vaultProfile := fs.String("vault-profile", vaultProfileDefault(), "vault profile: generic or knowledge-vault")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: openwhisker vault profile preview [--vault-profile generic|knowledge-vault]")
+	}
+	conventions, err := vaultConventionsForProfile(*vaultProfile)
+	if err != nil {
+		return err
+	}
+	return printJSON(stdout, profile.BuildBundle(conventions))
 }
 
 func runPlanDiff(args []string, stdout, stderr io.Writer) error {
@@ -207,6 +284,7 @@ func runPlanApprove(args []string, stdout, stderr io.Writer) error {
 	vaultRoot := fs.String("vault", "testdata/vault", "target test vault root")
 	syncMode := fs.String("sync", model.SyncModeAuto, "sync mode: auto, off, or on")
 	obBin := fs.String("ob-bin", defaultOBBin(), "Headless ob binary")
+	vaultProfile := fs.String("vault-profile", vaultProfileDefault(), "vault profile: generic or knowledge-vault")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -222,9 +300,14 @@ func runPlanApprove(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	conventions, err := vaultConventionsForProfile(*vaultProfile)
+	if err != nil {
+		return err
+	}
 	result, err := core.NewPlanServiceWithOptions(store, *vaultRoot, core.PlanServiceOptions{
-		SyncMode:   effectiveSyncMode,
-		SyncClient: syncClientForMode(effectiveSyncMode, *obBin),
+		SyncMode:    effectiveSyncMode,
+		SyncClient:  syncClientForMode(effectiveSyncMode, *obBin),
+		Conventions: conventions,
 	}).Approve(context.Background(), fs.Arg(0))
 	if err != nil {
 		return err
@@ -385,18 +468,22 @@ func runMatrixPollOnce(args []string, stdout, stderr io.Writer) error {
 	vaultRoot := fs.String("vault", "testdata/vault", "target vault root")
 	homeserver := fs.String("homeserver", os.Getenv("OPENWHISKER_MATRIX_HOMESERVER"), "Matrix homeserver URL")
 	accessToken := fs.String("access-token", os.Getenv("OPENWHISKER_MATRIX_ACCESS_TOKEN"), "Matrix access token")
+	password := fs.String("password", os.Getenv("OPENWHISKER_MATRIX_PASSWORD"), "Matrix bot password used to login when no access token is configured")
 	userID := fs.String("user-id", os.Getenv("OPENWHISKER_MATRIX_USER_ID"), "Matrix bot user id")
 	roomID := fs.String("room-id", os.Getenv("OPENWHISKER_MATRIX_ROOM_ID"), "Matrix room id")
+	sessionFile := fs.String("session-file", matrixSessionFileDefault(), "Matrix login session cache file")
 	since := fs.String("since", "", "Matrix sync token")
 	timeout := fs.Duration("timeout", 5*time.Second, "Matrix sync timeout")
 	organizerName := fs.String("organizer", organizerDefault(), "raw organizer: deterministic or openai-compatible")
+	contextMode := fs.String("context-mode", contextModeDefault(), "raw organizer context mode: minimal or vault-rules")
+	vaultProfile := fs.String("vault-profile", vaultProfileDefault(), "vault profile: generic or knowledge-vault")
 	llmModel := fs.String("llm-model", llmModelDefault(), "OpenAI-compatible model for --organizer=openai-compatible")
 	openAIModel := fs.String("openai-model", "", "deprecated alias for --llm-model")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return fmt.Errorf("usage: openwhisker matrix poll-once [--db data/openwhisker.db] [--vault testdata/vault] [--homeserver URL] [--access-token TOKEN] [--user-id USER] [--room-id ROOM] [--since TOKEN]")
+		return fmt.Errorf("usage: openwhisker matrix poll-once [--db data/openwhisker.db] [--vault testdata/vault] [--homeserver URL] [--access-token TOKEN] [--password PASSWORD] [--user-id USER] [--room-id ROOM] [--session-file data/matrix-session.json] [--since TOKEN]")
 	}
 	store, err := storage.Open(*dbPath)
 	if err != nil {
@@ -407,13 +494,31 @@ func runMatrixPollOnce(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	conventions, err := vaultConventionsForProfile(*vaultProfile)
+	if err != nil {
+		return err
+	}
 	service := core.NewAdapterServiceWithOptions(store, *vaultRoot, core.AdapterServiceOptions{
-		PlanOptions: core.PlanServiceOptions{Organizer: organizer},
+		PlanOptions: core.PlanServiceOptions{
+			Organizer:   organizer,
+			ContextMode: *contextMode,
+			Conventions: conventions,
+		},
 	})
+	matrixClient, resolvedUserID, err := matrixClientForAuth(context.Background(), matrixAuthOptions{
+		Homeserver:  *homeserver,
+		AccessToken: *accessToken,
+		UserID:      *userID,
+		Password:    *password,
+		SessionFile: *sessionFile,
+	})
+	if err != nil {
+		return err
+	}
 	adapter := matrix.Adapter{
 		Core:   service,
-		Client: matrix.Client{Homeserver: *homeserver, AccessToken: *accessToken},
-		UserID: *userID,
+		Client: matrixClient,
+		UserID: resolvedUserID,
 		RoomID: *roomID,
 	}
 	nextBatch, err := adapter.PollOnce(context.Background(), *since, *timeout)
@@ -430,21 +535,25 @@ func runMatrixDaemon(args []string, stdout, stderr io.Writer) error {
 	vaultRoot := fs.String("vault", "testdata/vault", "target vault root")
 	homeserver := fs.String("homeserver", os.Getenv("OPENWHISKER_MATRIX_HOMESERVER"), "Matrix homeserver URL")
 	accessToken := fs.String("access-token", os.Getenv("OPENWHISKER_MATRIX_ACCESS_TOKEN"), "Matrix access token")
+	password := fs.String("password", os.Getenv("OPENWHISKER_MATRIX_PASSWORD"), "Matrix bot password used to login when no access token is configured")
 	userID := fs.String("user-id", os.Getenv("OPENWHISKER_MATRIX_USER_ID"), "Matrix bot user id")
 	roomID := fs.String("room-id", os.Getenv("OPENWHISKER_MATRIX_ROOM_ID"), "Matrix room id")
 	sinceFile := fs.String("since-file", "data/matrix-since.token", "Matrix sync token state file")
+	sessionFile := fs.String("session-file", matrixSessionFileDefault(), "Matrix login session cache file")
 	timeout := fs.Duration("timeout", 30*time.Second, "Matrix sync timeout")
 	idleDelay := fs.Duration("idle-delay", time.Second, "delay between successful sync loops")
 	errorDelay := fs.Duration("error-delay", 5*time.Second, "delay after Matrix sync errors")
 	maxPolls := fs.Int("max-polls", 0, "maximum poll attempts before exiting; 0 means run until interrupted")
 	organizerName := fs.String("organizer", organizerDefault(), "raw organizer: deterministic or openai-compatible")
+	contextMode := fs.String("context-mode", contextModeDefault(), "raw organizer context mode: minimal or vault-rules")
+	vaultProfile := fs.String("vault-profile", vaultProfileDefault(), "vault profile: generic or knowledge-vault")
 	llmModel := fs.String("llm-model", llmModelDefault(), "OpenAI-compatible model for --organizer=openai-compatible")
 	openAIModel := fs.String("openai-model", "", "deprecated alias for --llm-model")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return fmt.Errorf("usage: openwhisker matrix daemon [--db data/openwhisker.db] [--vault testdata/vault] [--homeserver URL] [--access-token TOKEN] [--user-id USER] [--room-id ROOM] [--since-file data/matrix-since.token]")
+		return fmt.Errorf("usage: openwhisker matrix daemon [--db data/openwhisker.db] [--vault testdata/vault] [--homeserver URL] [--access-token TOKEN] [--password PASSWORD] [--user-id USER] [--room-id ROOM] [--since-file data/matrix-since.token] [--session-file data/matrix-session.json]")
 	}
 	store, err := storage.Open(*dbPath)
 	if err != nil {
@@ -455,13 +564,31 @@ func runMatrixDaemon(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	conventions, err := vaultConventionsForProfile(*vaultProfile)
+	if err != nil {
+		return err
+	}
 	service := core.NewAdapterServiceWithOptions(store, *vaultRoot, core.AdapterServiceOptions{
-		PlanOptions: core.PlanServiceOptions{Organizer: organizer},
+		PlanOptions: core.PlanServiceOptions{
+			Organizer:   organizer,
+			ContextMode: *contextMode,
+			Conventions: conventions,
+		},
 	})
+	matrixClient, resolvedUserID, err := matrixClientForAuth(context.Background(), matrixAuthOptions{
+		Homeserver:  *homeserver,
+		AccessToken: *accessToken,
+		UserID:      *userID,
+		Password:    *password,
+		SessionFile: *sessionFile,
+	})
+	if err != nil {
+		return err
+	}
 	adapter := matrix.Adapter{
 		Core:   service,
-		Client: matrix.Client{Homeserver: *homeserver, AccessToken: *accessToken},
-		UserID: *userID,
+		Client: matrixClient,
+		UserID: resolvedUserID,
 		RoomID: *roomID,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -491,6 +618,23 @@ type matrixDaemonOptions struct {
 	ErrorDelay time.Duration
 	MaxPolls   int
 	Logger     io.Writer
+}
+
+type matrixAuthOptions struct {
+	Homeserver  string
+	AccessToken string
+	UserID      string
+	Password    string
+	SessionFile string
+	HTTPClient  *http.Client
+}
+
+type matrixSession struct {
+	Homeserver  string `json:"homeserver"`
+	UserID      string `json:"user_id"`
+	AccessToken string `json:"access_token"`
+	DeviceID    string `json:"device_id,omitempty"`
+	UpdatedAt   string `json:"updated_at"`
 }
 
 func runMatrixDaemonLoop(ctx context.Context, poller matrixPoller, opts matrixDaemonOptions) (string, error) {
@@ -535,6 +679,125 @@ func runMatrixDaemonLoop(ctx context.Context, poller matrixPoller, opts matrixDa
 			return since, nil
 		}
 	}
+}
+
+func matrixClientForAuth(ctx context.Context, opts matrixAuthOptions) (matrix.Client, string, error) {
+	homeserver := strings.TrimSpace(opts.Homeserver)
+	userID := strings.TrimSpace(opts.UserID)
+	client := matrix.Client{
+		Homeserver: homeserver,
+		HTTPClient: opts.HTTPClient,
+	}
+	if token := strings.TrimSpace(opts.AccessToken); token != "" {
+		client.AccessToken = token
+		return client, userID, nil
+	}
+
+	session, err := readMatrixSession(opts.SessionFile)
+	if err != nil {
+		return matrix.Client{}, "", err
+	}
+	if matrixSessionMatches(session, homeserver, userID) {
+		client.AccessToken = session.AccessToken
+		return client, coalesce(userID, session.UserID), nil
+	}
+
+	if opts.Password == "" {
+		return matrix.Client{}, "", fmt.Errorf("OPENWHISKER_MATRIX_ACCESS_TOKEN or OPENWHISKER_MATRIX_PASSWORD is required")
+	}
+	if userID == "" {
+		return matrix.Client{}, "", fmt.Errorf("OPENWHISKER_MATRIX_USER_ID is required when logging in with OPENWHISKER_MATRIX_PASSWORD")
+	}
+	login, err := client.LoginPassword(ctx, matrix.LoginRequest{
+		UserID:                   userID,
+		Password:                 opts.Password,
+		DeviceID:                 reusableMatrixDeviceID(session, homeserver, userID),
+		InitialDeviceDisplayName: "OpenWhisker Matrix Adapter",
+	})
+	if err != nil {
+		return matrix.Client{}, "", err
+	}
+	resolvedUserID := coalesce(strings.TrimSpace(login.UserID), userID)
+	client.AccessToken = login.AccessToken
+	if err := writeMatrixSession(opts.SessionFile, matrixSession{
+		Homeserver:  homeserver,
+		UserID:      resolvedUserID,
+		AccessToken: login.AccessToken,
+		DeviceID:    strings.TrimSpace(login.DeviceID),
+		UpdatedAt:   time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		return matrix.Client{}, "", err
+	}
+	return client, resolvedUserID, nil
+}
+
+func matrixSessionMatches(session matrixSession, homeserver, userID string) bool {
+	if strings.TrimSpace(session.AccessToken) == "" {
+		return false
+	}
+	if homeserver != "" && strings.TrimSpace(session.Homeserver) != homeserver {
+		return false
+	}
+	if userID != "" && strings.TrimSpace(session.UserID) != userID {
+		return false
+	}
+	return true
+}
+
+func reusableMatrixDeviceID(session matrixSession, homeserver, userID string) string {
+	if strings.TrimSpace(session.DeviceID) == "" {
+		return ""
+	}
+	if homeserver != "" && strings.TrimSpace(session.Homeserver) != homeserver {
+		return ""
+	}
+	if userID != "" && strings.TrimSpace(session.UserID) != userID {
+		return ""
+	}
+	return strings.TrimSpace(session.DeviceID)
+}
+
+func readMatrixSession(path string) (matrixSession, error) {
+	if strings.TrimSpace(path) == "" {
+		return matrixSession{}, nil
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return matrixSession{}, nil
+	}
+	if err != nil {
+		return matrixSession{}, err
+	}
+	var session matrixSession
+	if err := json.Unmarshal(data, &session); err != nil {
+		return matrixSession{}, err
+	}
+	return session, nil
+}
+
+func writeMatrixSession(path string, session matrixSession) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(session, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, append(data, '\n'), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
+func matrixSessionFileDefault() string {
+	if value := strings.TrimSpace(os.Getenv("OPENWHISKER_MATRIX_SESSION_FILE")); value != "" {
+		return value
+	}
+	return "data/matrix-session.json"
 }
 
 func readMatrixSince(path string) (string, error) {
@@ -604,17 +867,19 @@ func printJSON(stdout io.Writer, value any) error {
 
 func printUsage(stderr io.Writer) {
 	fmt.Fprintln(stderr, `usage:
-  openwhisker ingest raw [--text TEXT] [--db data/openwhisker.db] [--vault testdata/vault]
-  openwhisker organize last [--db data/openwhisker.db] [--vault testdata/vault] [--organizer deterministic|openai-compatible] [--llm-model MODEL]
-  openwhisker organize today [--db data/openwhisker.db] [--vault testdata/vault] [--date YYYY-MM-DD] [--organizer deterministic|openai-compatible] [--llm-model MODEL]
+  openwhisker ingest raw [--text TEXT] [--db data/openwhisker.db] [--vault testdata/vault] [--vault-profile generic|knowledge-vault]
+  openwhisker organize last [--db data/openwhisker.db] [--vault testdata/vault] [--organizer deterministic|openai-compatible] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault] [--llm-model MODEL]
+  openwhisker organize today [--db data/openwhisker.db] [--vault testdata/vault] [--date YYYY-MM-DD] [--organizer deterministic|openai-compatible] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault] [--llm-model MODEL]
+  openwhisker organize preview-context [--db data/openwhisker.db] [--vault testdata/vault] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault]
   openwhisker plan diff [--db data/openwhisker.db] [--vault testdata/vault] <plan_id|job_id>
-  openwhisker plan approve [--sync=auto|off|on] [--ob-bin ob] [--db data/openwhisker.db] [--vault testdata/vault] <plan_id|job_id>
+  openwhisker plan approve [--sync=auto|off|on] [--ob-bin ob] [--db data/openwhisker.db] [--vault testdata/vault] [--vault-profile generic|knowledge-vault] <plan_id|job_id>
   openwhisker plan reject [--db data/openwhisker.db] [--reason TEXT] <plan_id|job_id>
+  openwhisker vault profile preview [--vault-profile generic|knowledge-vault]
   openwhisker vault sync-status [--sync=off|on] [--ob-bin ob] [--db data/openwhisker.db] [--vault testdata/vault]
   openwhisker vault sync [--sync=off|on] [--ob-bin ob] [--db data/openwhisker.db] [--vault testdata/vault]
   openwhisker jobs show [--db data/openwhisker.db] <job_id>
-  openwhisker matrix poll-once [--db data/openwhisker.db] [--vault testdata/vault] [--homeserver URL] [--access-token TOKEN] [--user-id USER] [--room-id ROOM] [--since TOKEN] [--organizer deterministic|openai-compatible] [--llm-model MODEL]
-  openwhisker matrix daemon [--db data/openwhisker.db] [--vault testdata/vault] [--homeserver URL] [--access-token TOKEN] [--user-id USER] [--room-id ROOM] [--since-file data/matrix-since.token] [--organizer deterministic|openai-compatible] [--llm-model MODEL]`)
+  openwhisker matrix poll-once [--db data/openwhisker.db] [--vault testdata/vault] [--homeserver URL] [--access-token TOKEN] [--password PASSWORD] [--user-id USER] [--room-id ROOM] [--session-file data/matrix-session.json] [--since TOKEN] [--organizer deterministic|openai-compatible] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault] [--llm-model MODEL]
+  openwhisker matrix daemon [--db data/openwhisker.db] [--vault testdata/vault] [--homeserver URL] [--access-token TOKEN] [--password PASSWORD] [--user-id USER] [--room-id ROOM] [--since-file data/matrix-since.token] [--session-file data/matrix-session.json] [--organizer deterministic|openai-compatible] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault] [--llm-model MODEL]`)
 }
 
 func defaultOBBin() string {
@@ -678,6 +943,58 @@ func organizerDefault() string {
 		return value
 	}
 	return "deterministic"
+}
+
+func contextModeDefault() string {
+	if value := strings.TrimSpace(os.Getenv("OPENWHISKER_CONTEXT_MODE")); value != "" {
+		return value
+	}
+	return core.ContextModeMinimal
+}
+
+func vaultProfileDefault() string {
+	if value := strings.TrimSpace(os.Getenv("OPENWHISKER_VAULT_PROFILE")); value != "" {
+		return value
+	}
+	return "generic"
+}
+
+func vaultConventionsForProfile(profile string) (policy.Conventions, error) {
+	conventions, err := policy.ConventionsForProfile(profile)
+	if err != nil {
+		return policy.Conventions{}, err
+	}
+	if value := strings.TrimSpace(os.Getenv("OPENWHISKER_RAW_INBOX_DIR")); value != "" {
+		conventions.RawInboxDir = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OPENWHISKER_RAW_PROCESSED_DIR")); value != "" {
+		conventions.RawProcessedDir = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OPENWHISKER_KNOWLEDGE_DIR")); value != "" {
+		conventions.KnowledgeDir = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OPENWHISKER_KNOWLEDGE_DRAFT_DIR")); value != "" {
+		conventions.KnowledgeDraftDir = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OPENWHISKER_REQUIRED_DRAFT_TAGS")); value != "" {
+		conventions.RequiredDraftTags = splitCommaList(value)
+	}
+	return conventions.Normalize(), nil
+}
+
+func splitCommaList(value string) []string {
+	if strings.EqualFold(strings.TrimSpace(value), "none") {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func rawOrganizerForName(name, openAIModel string) (core.RawOrganizer, error) {

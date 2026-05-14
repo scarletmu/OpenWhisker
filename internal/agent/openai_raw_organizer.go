@@ -270,6 +270,7 @@ func rawOrganizerInstructions() string {
 	return strings.Join([]string{
 		"You are OpenWhisker Raw Organizer.",
 		"Return only the requested structured JSON.",
+		"Follow the task-specific Vault Skill documents in the provided context.",
 		"Generate a Chinese knowledge draft body by default.",
 		"Preserve source traceability and mark uncertain claims for review.",
 		"Do not ask to write files, run shell, call Obsidian CLI, or bypass approval.",
@@ -283,7 +284,7 @@ func renderRawOrganizerInput(req core.RawOrganizerRequest) string {
 	fmt.Fprintf(&b, "Raw path: %s\n", req.RawPath)
 	fmt.Fprintf(&b, "Plan job id: %s\n\n", req.Job.ID)
 	for _, doc := range req.VaultContext.Documents {
-		fmt.Fprintf(&b, "## Vault context: %s\n%s\n\n", doc.Path, limitString(doc.Content, 6000))
+		fmt.Fprintf(&b, "## Context: %s\n%s\n\n", doc.Path, limitString(doc.Content, 6000))
 	}
 	fmt.Fprintf(&b, "## Raw note\n%s\n", limitString(req.VaultContext.RawNote, 24000))
 	return b.String()
@@ -296,7 +297,7 @@ func renderRawTodayOrganizerInput(req core.RawTodayOrganizerRequest) string {
 	fmt.Fprintf(&b, "Plan job id: %s\n\n", req.Job.ID)
 	if len(req.VaultContext) > 0 {
 		for _, doc := range req.VaultContext[0].Documents {
-			fmt.Fprintf(&b, "## Vault context: %s\n%s\n\n", doc.Path, limitString(doc.Content, 6000))
+			fmt.Fprintf(&b, "## Context: %s\n%s\n\n", doc.Path, limitString(doc.Content, 6000))
 		}
 	}
 	for i, rawJob := range req.RawJobs {
@@ -372,11 +373,12 @@ func allowedRawKind(kind string) bool {
 }
 
 func buildLLMOrganizePlan(req core.RawOrganizerRequest, output rawOrganizerLLMOutput) (model.VaultPlan, error) {
+	conventions := req.Conventions.Normalize()
 	base := strings.TrimSuffix(filepath.Base(req.RawPath), filepath.Ext(req.RawPath))
-	knowledgePath := "Knowledge/Drafts/" + base + ".md"
-	processedPath := "Raw/Processed/" + base + ".md"
+	knowledgePath := joinVaultPath(conventions.KnowledgeDraftDir, base+".md")
+	processedPath := joinVaultPath(conventions.RawProcessedDir, base+".md")
 	createPayload, err := json.Marshal(model.CreateNotePayload{
-		Content: renderLLMKnowledgeDraft(req, output, processedPath),
+		Content: renderLLMKnowledgeDraft(req, output, processedPath, conventions.RequiredDraftTags),
 	})
 	if err != nil {
 		return model.VaultPlan{}, err
@@ -425,15 +427,16 @@ func buildLLMTodayPlan(req core.RawTodayOrganizerRequest, output rawOrganizerLLM
 	if len(req.RawJobs) == 0 || len(req.RawJobs) != len(req.RawPaths) {
 		return model.VaultPlan{}, errors.New("raw today plan requires matching raw jobs and paths")
 	}
+	conventions := req.Conventions.Normalize()
 	date := req.Day.Format("2006-01-02")
-	knowledgePath := fmt.Sprintf("Knowledge/Drafts/%s-raw-review-%s.md", date, req.Job.ID)
+	knowledgePath := joinVaultPath(conventions.KnowledgeDraftDir, fmt.Sprintf("%s-raw-review-%s.md", date, req.Job.ID))
 	var processedPaths []string
 	for _, rawPath := range req.RawPaths {
 		base := strings.TrimSuffix(filepath.Base(rawPath), filepath.Ext(rawPath))
-		processedPaths = append(processedPaths, "Raw/Processed/"+base+".md")
+		processedPaths = append(processedPaths, joinVaultPath(conventions.RawProcessedDir, base+".md"))
 	}
 	createPayload, err := json.Marshal(model.CreateNotePayload{
-		Content: renderLLMTodayKnowledgeDraft(req, output, processedPaths),
+		Content: renderLLMTodayKnowledgeDraft(req, output, processedPaths, conventions.RequiredDraftTags),
 	})
 	if err != nil {
 		return model.VaultPlan{}, err
@@ -482,7 +485,7 @@ func buildLLMTodayPlan(req core.RawTodayOrganizerRequest, output rawOrganizerLLM
 	}, nil
 }
 
-func renderLLMKnowledgeDraft(req core.RawOrganizerRequest, output rawOrganizerLLMOutput, processedPath string) string {
+func renderLLMKnowledgeDraft(req core.RawOrganizerRequest, output rawOrganizerLLMOutput, processedPath string, requiredTags []string) string {
 	reviewItems := output.ReviewItems
 	if len(reviewItems) == 0 {
 		reviewItems = []string{"核对从 raw 输入推断出的内容是否准确。"}
@@ -508,8 +511,7 @@ status: draft
 needs_review: true
 created_at: %s
 tags:
-  - knowledge/draft
-  - review/needed
+%s
 ---
 
 # %s
@@ -532,11 +534,11 @@ tags:
 - Raw path before approval: %s
 - Raw path after approval: %s
 `, req.Job.ID, req.Job.Type, req.RawJob.ID, req.RawPath, processedPath, output.RawKind,
-		req.Now.Format(time.RFC3339), strings.TrimSpace(output.Title), strings.TrimSpace(output.Summary),
+		req.Now.Format(time.RFC3339), renderYAMLList(requiredTags), strings.TrimSpace(output.Title), strings.TrimSpace(output.Summary),
 		strings.TrimSpace(output.DraftBody), strings.Join(reviewLines, "\n"), req.RawJob.ID, req.RawPath, processedPath)
 }
 
-func renderLLMTodayKnowledgeDraft(req core.RawTodayOrganizerRequest, output rawOrganizerLLMOutput, processedPaths []string) string {
+func renderLLMTodayKnowledgeDraft(req core.RawTodayOrganizerRequest, output rawOrganizerLLMOutput, processedPaths []string, requiredTags []string) string {
 	var rawJobLines, rawPathLines, processedPathLines, sourceLines []string
 	for i, rawJob := range req.RawJobs {
 		rawPath := req.RawPaths[i]
@@ -564,7 +566,7 @@ func renderLLMTodayKnowledgeDraft(req core.RawTodayOrganizerRequest, output rawO
 openwhisker_job_id: %s
 openwhisker_job_type: %s
 source_raw_job_id: batch
-source_raw_path: Raw/Inbox
+source_raw_path: %s
 source_processed_path: %s
 source_raw_job_ids:
 %s
@@ -577,8 +579,7 @@ status: draft
 needs_review: true
 created_at: %s
 tags:
-  - knowledge/draft
-  - review/needed
+%s
 ---
 
 # %s
@@ -598,8 +599,8 @@ tags:
 ## 待核查
 
 %s
-`, req.Job.ID, req.Job.Type, processedPaths[0], strings.Join(rawJobLines, "\n"), strings.Join(rawPathLines, "\n"),
-		strings.Join(processedPathLines, "\n"), output.RawKind, req.Now.Format(time.RFC3339),
+`, req.Job.ID, req.Job.Type, req.Conventions.RawInboxDir, processedPaths[0], strings.Join(rawJobLines, "\n"), strings.Join(rawPathLines, "\n"),
+		strings.Join(processedPathLines, "\n"), output.RawKind, req.Now.Format(time.RFC3339), renderYAMLList(requiredTags),
 		strings.TrimSpace(output.Title), strings.TrimSpace(output.Summary), strings.TrimSpace(output.DraftBody),
 		strings.Join(sourceLines, "\n"), strings.Join(reviewLines, "\n"))
 }
@@ -716,4 +717,34 @@ func limitString(value string, limit int) string {
 		return value
 	}
 	return value[:limit] + "\n...[truncated]"
+}
+
+func joinVaultPath(dir, name string) string {
+	dir = strings.Trim(strings.TrimSpace(filepath.ToSlash(dir)), "/")
+	name = strings.Trim(strings.TrimSpace(filepath.ToSlash(name)), "/")
+	if dir == "" {
+		return name
+	}
+	if name == "" {
+		return dir
+	}
+	return dir + "/" + name
+}
+
+func renderYAMLList(values []string) string {
+	if len(values) == 0 {
+		return "  []"
+	}
+	lines := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		lines = append(lines, "  - "+value)
+	}
+	if len(lines) == 0 {
+		return "  []"
+	}
+	return strings.Join(lines, "\n")
 }
