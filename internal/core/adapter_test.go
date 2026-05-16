@@ -26,7 +26,9 @@ func TestAdapterServiceHandlesMatrixRawDedupeAndApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	service := NewAdapterService(store, vaultRoot)
+	service := NewAdapterServiceWithOptions(store, vaultRoot, AdapterServiceOptions{
+		IntentRouterMode: "off",
+	})
 
 	raw, err := service.HandleText(context.Background(), AdapterRequest{
 		Adapter: model.AdapterMatrix,
@@ -86,7 +88,7 @@ func TestAdapterServiceHandlesMatrixRawDedupeAndApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"审批预览", "创建笔记", "移动笔记", "审批前重点看"} {
+	for _, want := range []string{"审批预览", "将写入的知识草稿", "将移动的 Raw", "审批动作", "创建笔记", "移动笔记"} {
 		if !strings.Contains(diff.Body, want) {
 			t.Fatalf("diff body = %q, want %q", diff.Body, want)
 		}
@@ -138,7 +140,9 @@ func TestAdapterServiceHandlesOrganizeToday(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	service := NewAdapterService(store, vaultRoot)
+	service := NewAdapterServiceWithOptions(store, vaultRoot, AdapterServiceOptions{
+		IntentRouterMode: "off",
+	})
 	for _, text := range []string{"today raw one", "today raw two"} {
 		if _, err := service.HandleText(context.Background(), AdapterRequest{
 			Adapter: model.AdapterMatrix,

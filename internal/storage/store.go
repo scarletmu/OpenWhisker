@@ -45,9 +45,9 @@ func (s *Store) Close() error {
 func (s *Store) CreateJob(job model.WikiJob) error {
 	_, err := s.db.Exec(`
 INSERT INTO wiki_jobs (
-  id, type, status, source, input_json, result_json, error, created_at, updated_at, attempts
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		job.ID, job.Type, job.Status, job.Source, job.InputJSON, job.ResultJSON, job.Error,
+  id, type, status, source, source_key, input_json, result_json, error, created_at, updated_at, attempts
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		job.ID, job.Type, job.Status, job.Source, job.SourceKey, job.InputJSON, job.ResultJSON, job.Error,
 		formatTime(job.CreatedAt), formatTime(job.UpdatedAt), job.Attempts)
 	return err
 }
@@ -153,9 +153,9 @@ func (s *Store) GetJob(id string) (model.WikiJob, error) {
 	var job model.WikiJob
 	var createdAt, updatedAt string
 	err := s.db.QueryRow(`
-SELECT id, type, status, source, input_json, result_json, error, created_at, updated_at, attempts
+SELECT id, type, status, source, source_key, input_json, result_json, error, created_at, updated_at, attempts
 FROM wiki_jobs
-WHERE id = ?`, id).Scan(&job.ID, &job.Type, &job.Status, &job.Source, &job.InputJSON,
+WHERE id = ?`, id).Scan(&job.ID, &job.Type, &job.Status, &job.Source, &job.SourceKey, &job.InputJSON,
 		&job.ResultJSON, &job.Error, &createdAt, &updatedAt, &job.Attempts)
 	if err != nil {
 		return model.WikiJob{}, err
@@ -169,12 +169,30 @@ func (s *Store) LatestDoneIngestRawJob() (model.WikiJob, error) {
 	var job model.WikiJob
 	var createdAt, updatedAt string
 	err := s.db.QueryRow(`
-SELECT id, type, status, source, input_json, result_json, error, created_at, updated_at, attempts
+SELECT id, type, status, source, source_key, input_json, result_json, error, created_at, updated_at, attempts
 FROM wiki_jobs
 WHERE type = ? AND status = ?
 ORDER BY created_at DESC
 LIMIT 1`, model.JobTypeIngestRaw, model.JobStatusDone).Scan(&job.ID, &job.Type, &job.Status,
-		&job.Source, &job.InputJSON, &job.ResultJSON, &job.Error, &createdAt, &updatedAt, &job.Attempts)
+		&job.Source, &job.SourceKey, &job.InputJSON, &job.ResultJSON, &job.Error, &createdAt, &updatedAt, &job.Attempts)
+	if err != nil {
+		return model.WikiJob{}, err
+	}
+	job.CreatedAt = parseTime(createdAt)
+	job.UpdatedAt = parseTime(updatedAt)
+	return job, nil
+}
+
+func (s *Store) LatestDoneIngestRawJobBySourceKey(sourceKey string) (model.WikiJob, error) {
+	var job model.WikiJob
+	var createdAt, updatedAt string
+	err := s.db.QueryRow(`
+SELECT id, type, status, source, source_key, input_json, result_json, error, created_at, updated_at, attempts
+FROM wiki_jobs
+WHERE type = ? AND status = ? AND source_key = ?
+ORDER BY created_at DESC
+LIMIT 1`, model.JobTypeIngestRaw, model.JobStatusDone, sourceKey).Scan(&job.ID, &job.Type, &job.Status,
+		&job.Source, &job.SourceKey, &job.InputJSON, &job.ResultJSON, &job.Error, &createdAt, &updatedAt, &job.Attempts)
 	if err != nil {
 		return model.WikiJob{}, err
 	}
@@ -188,7 +206,7 @@ func (s *Store) ListDoneIngestRawJobsCreatedBetween(start, end time.Time, limit 
 		limit = 100
 	}
 	rows, err := s.db.Query(`
-SELECT id, type, status, source, input_json, result_json, error, created_at, updated_at, attempts
+SELECT id, type, status, source, source_key, input_json, result_json, error, created_at, updated_at, attempts
 FROM wiki_jobs
 WHERE type = ? AND status = ? AND created_at >= ? AND created_at < ?
 ORDER BY created_at ASC
@@ -201,7 +219,39 @@ LIMIT ?`, model.JobTypeIngestRaw, model.JobStatusDone, formatTime(start), format
 	for rows.Next() {
 		var job model.WikiJob
 		var createdAt, updatedAt string
-		if err := rows.Scan(&job.ID, &job.Type, &job.Status, &job.Source, &job.InputJSON,
+		if err := rows.Scan(&job.ID, &job.Type, &job.Status, &job.Source, &job.SourceKey, &job.InputJSON,
+			&job.ResultJSON, &job.Error, &createdAt, &updatedAt, &job.Attempts); err != nil {
+			return nil, err
+		}
+		job.CreatedAt = parseTime(createdAt)
+		job.UpdatedAt = parseTime(updatedAt)
+		jobs = append(jobs, job)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return jobs, nil
+}
+
+func (s *Store) ListDoneIngestRawJobsCreatedBetweenBySourceKey(sourceKey string, start, end time.Time, limit int) ([]model.WikiJob, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.Query(`
+SELECT id, type, status, source, source_key, input_json, result_json, error, created_at, updated_at, attempts
+FROM wiki_jobs
+WHERE type = ? AND status = ? AND source_key = ? AND created_at >= ? AND created_at < ?
+ORDER BY created_at ASC
+LIMIT ?`, model.JobTypeIngestRaw, model.JobStatusDone, sourceKey, formatTime(start), formatTime(end), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var jobs []model.WikiJob
+	for rows.Next() {
+		var job model.WikiJob
+		var createdAt, updatedAt string
+		if err := rows.Scan(&job.ID, &job.Type, &job.Status, &job.Source, &job.SourceKey, &job.InputJSON,
 			&job.ResultJSON, &job.Error, &createdAt, &updatedAt, &job.Attempts); err != nil {
 			return nil, err
 		}
@@ -355,7 +405,7 @@ func (s *Store) ListRecentJobs(limit int) ([]model.WikiJob, error) {
 		limit = 10
 	}
 	rows, err := s.db.Query(`
-SELECT id, type, status, source, input_json, result_json, error, created_at, updated_at, attempts
+SELECT id, type, status, source, source_key, input_json, result_json, error, created_at, updated_at, attempts
 FROM wiki_jobs
 ORDER BY created_at DESC
 LIMIT ?`, limit)
@@ -367,7 +417,7 @@ LIMIT ?`, limit)
 	for rows.Next() {
 		var job model.WikiJob
 		var createdAt, updatedAt string
-		if err := rows.Scan(&job.ID, &job.Type, &job.Status, &job.Source, &job.InputJSON,
+		if err := rows.Scan(&job.ID, &job.Type, &job.Status, &job.Source, &job.SourceKey, &job.InputJSON,
 			&job.ResultJSON, &job.Error, &createdAt, &updatedAt, &job.Attempts); err != nil {
 			return nil, err
 		}
@@ -379,6 +429,101 @@ LIMIT ?`, limit)
 		return nil, err
 	}
 	return jobs, nil
+}
+
+func (s *Store) SaveCaptureBucket(bucket model.CaptureBucket) error {
+	_, err := s.db.Exec(`
+INSERT INTO capture_buckets (
+  bucket_id, source_key, raw_job_id, raw_plan_id, raw_path, status, topic_hint,
+  excerpt, append_count, raw_hash_after_last_append, started_at, updated_at,
+  expires_at, closed_at, close_reason
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(bucket_id) DO UPDATE SET
+  source_key = excluded.source_key,
+  raw_job_id = excluded.raw_job_id,
+  raw_plan_id = excluded.raw_plan_id,
+  raw_path = excluded.raw_path,
+  status = excluded.status,
+  topic_hint = excluded.topic_hint,
+  excerpt = excluded.excerpt,
+  append_count = excluded.append_count,
+  raw_hash_after_last_append = excluded.raw_hash_after_last_append,
+  updated_at = excluded.updated_at,
+  expires_at = excluded.expires_at,
+  closed_at = excluded.closed_at,
+  close_reason = excluded.close_reason`,
+		bucket.ID, bucket.SourceKey, bucket.RawJobID, bucket.RawPlanID, bucket.RawPath,
+		bucket.Status, bucket.TopicHint, bucket.Excerpt, bucket.AppendCount,
+		bucket.RawHashAfterLastAppend, formatTime(bucket.StartedAt), formatTime(bucket.UpdatedAt),
+		formatTime(bucket.ExpiresAt), nullableTime(bucket.ClosedAt), bucket.CloseReason)
+	return err
+}
+
+func (s *Store) GetCaptureBucket(sourceKey, bucketID string) (model.CaptureBucket, error) {
+	return s.scanCaptureBucket(s.db.QueryRow(`
+SELECT bucket_id, source_key, raw_job_id, raw_plan_id, raw_path, status, topic_hint,
+  excerpt, append_count, raw_hash_after_last_append, started_at, updated_at,
+  expires_at, closed_at, close_reason
+FROM capture_buckets
+WHERE bucket_id = ? AND source_key = ?`, bucketID, sourceKey))
+}
+
+func (s *Store) ActiveCaptureBucket(sourceKey string) (model.CaptureBucket, error) {
+	return s.scanCaptureBucket(s.db.QueryRow(`
+SELECT bucket_id, source_key, raw_job_id, raw_plan_id, raw_path, status, topic_hint,
+  excerpt, append_count, raw_hash_after_last_append, started_at, updated_at,
+  expires_at, closed_at, close_reason
+FROM capture_buckets
+WHERE source_key = ? AND status = ?
+ORDER BY updated_at DESC
+LIMIT 1`, sourceKey, model.CaptureBucketStatusActive))
+}
+
+func (s *Store) ListAwaitingApprovalPlansBySourceKey(sourceKey string) ([]model.VaultPlan, error) {
+	rows, err := s.db.Query(`
+SELECT p.id, p.job_id, p.purpose, p.risk_level, p.requires_approval, p.summary,
+  p.source_refs_json, p.target_paths_json, p.operations_json, p.diff_json,
+  p.status, p.created_at, p.prepared_at, p.approved_at, p.rejected_at,
+  p.applied_at, p.rejected_reason, p.error
+FROM vault_plans p
+JOIN wiki_jobs j ON j.id = p.job_id
+WHERE p.status = ? AND j.source_key = ?
+ORDER BY p.created_at DESC
+LIMIT 20`, model.PlanStatusAwaitingApproval, sourceKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var plans []model.VaultPlan
+	for rows.Next() {
+		plan, err := s.scanPlan(rows)
+		if err != nil {
+			return nil, err
+		}
+		plans = append(plans, plan)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return plans, nil
+}
+
+func (s *Store) scanCaptureBucket(row planScanner) (model.CaptureBucket, error) {
+	var bucket model.CaptureBucket
+	var startedAt, updatedAt, expiresAt string
+	var closedAt sql.NullString
+	err := row.Scan(&bucket.ID, &bucket.SourceKey, &bucket.RawJobID, &bucket.RawPlanID,
+		&bucket.RawPath, &bucket.Status, &bucket.TopicHint, &bucket.Excerpt,
+		&bucket.AppendCount, &bucket.RawHashAfterLastAppend, &startedAt, &updatedAt,
+		&expiresAt, &closedAt, &bucket.CloseReason)
+	if err != nil {
+		return model.CaptureBucket{}, err
+	}
+	bucket.StartedAt = parseTime(startedAt)
+	bucket.UpdatedAt = parseTime(updatedAt)
+	bucket.ExpiresAt = parseTime(expiresAt)
+	bucket.ClosedAt = parseNullableTime(closedAt)
+	return bucket, nil
 }
 
 func (s *Store) AcquireLocks(paths []string, planID string, acquiredAt time.Time) error {

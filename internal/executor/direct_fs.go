@@ -73,6 +73,8 @@ func (e DirectFS) applyOperation(plan model.VaultPlan, op model.VaultOperation) 
 		return e.createNote(plan, op)
 	case model.OperationAppendNote:
 		return e.appendNote(plan, op)
+	case model.OperationRewriteNote:
+		return e.rewriteNote(plan, op)
 	case model.OperationMoveNote:
 		return e.moveNote(plan, op)
 	default:
@@ -93,7 +95,7 @@ func (e DirectFS) preflightApply(plan model.VaultPlan) error {
 			} else if !os.IsNotExist(err) {
 				return err
 			}
-		case model.OperationAppendNote:
+		case model.OperationAppendNote, model.OperationRewriteNote:
 			if _, err := e.readGuarded(op.TargetPath, op.BeforeHash); err != nil {
 				return err
 			}
@@ -125,6 +127,8 @@ func (e DirectFS) prepareOperation(op model.VaultOperation) (model.DiffEntry, mo
 		return e.prepareCreate(op)
 	case model.OperationAppendNote:
 		return e.prepareAppend(op)
+	case model.OperationRewriteNote:
+		return e.prepareRewrite(op)
 	case model.OperationMoveNote:
 		return e.prepareMove(op)
 	default:
@@ -185,6 +189,35 @@ func (e DirectFS) prepareAppend(op model.VaultOperation) (model.DiffEntry, model
 		BeforeHash:  op.BeforeHash,
 		AfterHash:   sha256Hex(next),
 		Summary:     "append note",
+		Preview:     preview(payload.Content),
+	}, op, nil
+}
+
+func (e DirectFS) prepareRewrite(op model.VaultOperation) (model.DiffEntry, model.VaultOperation, error) {
+	fullPath, err := ResolveVaultPath(e.vaultRoot, op.TargetPath)
+	if err != nil {
+		return model.DiffEntry{}, model.VaultOperation{}, err
+	}
+	current, err := os.ReadFile(fullPath)
+	if err != nil {
+		return model.DiffEntry{}, model.VaultOperation{}, err
+	}
+	var payload model.CreateNotePayload
+	if err := json.Unmarshal([]byte(op.PayloadJSON), &payload); err != nil {
+		return model.DiffEntry{}, model.VaultOperation{}, fmt.Errorf("decode rewrite_note payload: %w", err)
+	}
+	if payload.Content == "" {
+		return model.DiffEntry{}, model.VaultOperation{}, fmt.Errorf("rewrite_note payload content is required")
+	}
+	op.BeforeHash = sha256Hex(current)
+	next := []byte(payload.Content)
+	return model.DiffEntry{
+		OperationID: op.ID,
+		Type:        op.Type,
+		TargetPath:  op.TargetPath,
+		BeforeHash:  op.BeforeHash,
+		AfterHash:   sha256Hex(next),
+		Summary:     "rewrite note",
 		Preview:     preview(payload.Content),
 	}, op, nil
 }
@@ -290,6 +323,25 @@ func (e DirectFS) appendNote(plan model.VaultPlan, op model.VaultOperation) (mod
 		return model.AppliedOperation{}, fmt.Errorf("decode append_note payload: %w", err)
 	}
 	next := append(append([]byte{}, current...), []byte(payload.Content)...)
+	if err := os.WriteFile(fullPath, next, 0o644); err != nil {
+		return model.AppliedOperation{}, err
+	}
+	return e.recordApplied(plan, op, sha256Hex(next))
+}
+
+func (e DirectFS) rewriteNote(plan model.VaultPlan, op model.VaultOperation) (model.AppliedOperation, error) {
+	if _, err := e.readGuarded(op.TargetPath, op.BeforeHash); err != nil {
+		return model.AppliedOperation{}, err
+	}
+	fullPath, err := ResolveVaultPath(e.vaultRoot, op.TargetPath)
+	if err != nil {
+		return model.AppliedOperation{}, err
+	}
+	var payload model.CreateNotePayload
+	if err := json.Unmarshal([]byte(op.PayloadJSON), &payload); err != nil {
+		return model.AppliedOperation{}, fmt.Errorf("decode rewrite_note payload: %w", err)
+	}
+	next := []byte(payload.Content)
 	if err := os.WriteFile(fullPath, next, 0o644); err != nil {
 		return model.AppliedOperation{}, err
 	}

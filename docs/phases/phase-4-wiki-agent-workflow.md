@@ -87,11 +87,13 @@ docs/skills/vault-profile-analyzer/SKILL.md
 
 ## 下一步真实环境验证顺序
 
-Phase 4 代码闭环已经可以进入真实环境验证，但验证顺序应保持保守：
+Phase 4 代码闭环已经进入真实环境验证。当前已完成真实 Matrix + test vault deterministic 闭环、真实 vault + deterministic diff/reject、test vault + OpenAI-compatible provider smoke，以及真实 vault + OpenAI-compatible LLM diff/reject。真实 vault + OpenAI-compatible LLM 的 approve/apply 闭环仍未验证。
+
+真实环境验证顺序保持保守：
 
 1. **真实 Matrix + test vault**：先运行 `matrix daemon --vault testdata/vault --organizer=deterministic`，验证 IM 收发、event 去重、outbox 投递、`/organize last`、`/organize today`、`/diff`、`/approve` 和 `since` token 持久化，不污染真实 vault。
 2. **真实 vault + deterministic organizer**：再切到 `/Users/wang/Documents/KnowLedge`，验证 `Raw/Inbox`、`Raw/Processed`、`Knowledge/Drafts`、approval apply 和 Headless Sync 行为，保持输出稳定可控。真实 vault 验证应使用独立本地 SQLite，例如 `OPENWHISKER_DEBUG_DB=data/openwhisker-real.db`，避免和 test vault 的 job / plan / operation log 混在一起。
-3. **真实 vault + OpenAI-compatible LLM**：最后启用 `--organizer=openai-compatible`，验证真实整理质量。中风险 plan 仍必须走 diff、approval、hash guard 和 `VaultExecutor`，不直接写正式 Knowledge note。
+3. **真实 vault + OpenAI-compatible LLM**：已完成 diff/reject 验证；后续如需完成真实写入闭环，再用低风险测试 raw approve 一次，验证真实 vault 下的 hash guard、Headless Sync、operation log、Knowledge draft 和 Raw/Processed processing note。中风险 plan 仍必须走 diff、approval、hash guard 和 `VaultExecutor`，不直接写正式 Knowledge note。
 
 本地 ignored debug 脚本可用于这三步验证：
 
@@ -121,24 +123,60 @@ go run ./cmd/openwhisker organize preview-context \
 
 Phase 4 默认不把完整 vault 规则全文发送给外部 LLM。OpenWhisker 只固定执行安全契约：source trace、plan-before-write、risk、approval、path safety 和 deterministic executor。具体 vault 的 raw inbox、processed raw、草稿区、tag 清单等属于 `VaultProfile`，并通过任务 `VaultSkill` 进入 LLM 上下文，不能硬编码成所有 vault 的通用 schema。当前 `knowledge-vault` profile 只是 `/Users/wang/Documents/KnowLedge` 的本地范式；默认 `generic` profile 保持更少假设。其他 vault 可以通过 `OPENWHISKER_RAW_INBOX_DIR`、`OPENWHISKER_RAW_PROCESSED_DIR`、`OPENWHISKER_KNOWLEDGE_DIR`、`OPENWHISKER_KNOWLEDGE_DRAFT_DIR` 和 `OPENWHISKER_REQUIRED_DRAFT_TAGS` 覆盖本地约定。
 
-这三步通过后，再继续推进 Knowledge Expander、high-risk proposal policy、真实 Matrix 部署固化和多房间 / room-scoped outbox。
+真实 vault + LLM 的规划链路已通。下一步可以二选一：先补真实 vault + LLM approve/apply 验证，或进入 Knowledge Expander、high-risk proposal policy、真实 Matrix 部署固化和多房间 / room-scoped outbox。
 
-## 未来方向：Command Detector
+## Phase 4B.5 planned：IM Intent Router
 
 Matrix 当前先保留 `/status`、`/jobs`、`/organize last`、`/diff`、`/approve` 等显式命令作为 debug / fallback。Element 对 slash command 的客户端拦截会影响体验，但短期不急于用更多固定前缀解决。
 
-后续可以在 Matrix Adapter 和 Core Adapter API 之间增加一个极小模型驱动的 `Command Detector`：
+基于真实使用反馈，Phase 4 内新增一个 planned 切片：在 Matrix Adapter 和 Core Adapter API 之间增加 `IM Intent Router`。它的目标是减少日常 Matrix 使用中的命令行感，让“整理刚才”“预览一下”“写进去”“先不写”这类自然语言可以归一化为现有受控命令。
 
 ```text
 Matrix text
-  -> Command Detector
-  -> raw_capture | command | unclear_intent
+  -> IM Intent Router
+  -> raw_capture | organize_request | diff_request | approve_request | reject_request | unclear
   -> Core Adapter API
 ```
 
-它只负责入口意图分类和参数抽取，例如把“帮我整理刚才那条”“看看最近任务”“批准这个计划”归一化为结构化 command。它不直接写 vault、不生成 `VaultPlan`、不调用 `VaultExecutor`、不绕过 policy / approval；所有执行仍由 Core、Plan、Policy 和 Executor 决定。
+第一版计划见：[Phase 4B.5 IM Intent Router](phase-4-im-intent-router.md)。
+
+核心收敛：
+
+- slash 命令继续 passthrough，作为 debug / fallback。
+- 非 slash Matrix 输入全部进入 intent 识别。
+- 规则优先，小模型补充；小模型使用独立 `OPENWHISKER_INTENT_*` 配置，不复用 Raw Organizer 的 `OPENWHISKER_LLM_*`。
+- 识别范围只覆盖 raw capture、organize last/today、diff、approve、reject 和 unclear。
+- 自然语言 diff / approve / reject 只在唯一 pending plan 时自动绑定，否则要求显式 plan id。
+- 低置信、不明确、普通讨论默认不写入、不执行。
+
+它只负责入口意图分类和参数归一化，例如把“帮我整理刚才那条”“预览一下”“批准这个计划”归一化为结构化 intent。它不直接写 vault、不生成 `VaultPlan`、不调用 `VaultExecutor`、不绕过 policy / approval；所有执行仍由 Core、Plan、Policy 和 Executor 决定。
 
 Phase 4 的目标不是绕过现有 executor，也不是先实现 desktop Obsidian CLI executor 或 scheduler，而是打通真实端到端 vertical slice：Matrix IM 作为首期核心交互入口，Wiki Agent Host 使用真实 LLM provider 生成结构化 `VaultPlan`，中风险变更继续经过 policy、diff、approval、hash guard 和 sync-aware executor。LLM 可以读取受控 vault context 并生成计划，但仍然不能直接写 vault、不能执行 shell、不能自由调用 Obsidian CLI；Matrix Adapter 也不能直接调用 LLM 或写 vault。
+
+## 当前 Phase 4B 使用反馈：Matrix diff 人类审批页
+
+真实 vault + OpenAI-compatible LLM 已验证到 diff/reject 后，当前最需要收敛的不是进入 Phase 4C，而是改善 Raw Organizer 的实际审批体验。
+
+原问题：Matrix `/diff` 偏工程化，展示的是 operation 清单和 executor preview，更适合调试，不适合人类判断“批准后 vault 里会写入什么”。
+
+当前状态：第一版 Matrix/Core adapter diff renderer 已实现。它不改 `VaultDiff` / executor 底层结构，而是从 `VaultOperation` payload 中提取 create / move 信息，生成面向人的审批页；底层 JSON diff 仍保留给 CLI / debug。
+
+已实现目标：
+
+- Matrix `/diff` 渲染为人类审批页。
+- 第一屏展示将写入的 Knowledge draft：路径、标题、tags、来源、正文预览和待核查项。
+- 再展示 Raw 会从哪里移动到哪里，以及 Raw/Processed processing note 会记录什么。
+- 底部展示 `//approve <plan_id>` 和 `//reject <plan_id>`。
+- 隐藏 `before_hash`、底层 payload、trace metadata 和 hash 语义等工程噪音。
+- 保留 CLI / debug 的底层 JSON diff 能力。
+- Matrix 输出必须继续同时支持 plain text fallback 和 `org.matrix.custom.html` formatted body，保证 Element 中标题、列表、代码块和转义内容正常渲染。
+- 本地 adapter 入口已预览输出效果，未经过 Matrix daemon；真实 Matrix `formatted_body` 视觉效果仍需在 Element 中确认。
+
+实现边界：
+
+- 修改 Core adapter 的 diff renderer。
+- 不改 `VaultDiff` 和 executor diff 数据结构。
+- 人类审批页从 `VaultOperation` payload 中提取 create / move 信息，不依赖截断后的 `DiffEntry.Preview` 作为主要内容来源。
 
 ## 本次推进结论
 

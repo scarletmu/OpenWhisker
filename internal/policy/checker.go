@@ -107,6 +107,28 @@ func (c Checker) Check(plan model.VaultPlan) error {
 			if !hasDirPrefix(op.TargetPath, conventions.RawInboxDir) {
 				return fmt.Errorf("create_note target %q is outside %s", op.TargetPath, conventions.RawInboxDir)
 			}
+		case model.OperationAppendNote:
+			if !hasDirPrefix(op.TargetPath, conventions.RawInboxDir) {
+				return fmt.Errorf("append_note target %q is outside %s", op.TargetPath, conventions.RawInboxDir)
+			}
+			var payload model.AppendNotePayload
+			if err := json.Unmarshal([]byte(op.PayloadJSON), &payload); err != nil {
+				return fmt.Errorf("decode append_note payload for %s: %w", op.ID, err)
+			}
+			if strings.TrimSpace(payload.Content) == "" {
+				return fmt.Errorf("append_note payload content is required for %s", op.ID)
+			}
+		case model.OperationRewriteNote:
+			if !hasDirPrefix(op.TargetPath, conventions.RawInboxDir) {
+				return fmt.Errorf("rewrite_note target %q is outside %s", op.TargetPath, conventions.RawInboxDir)
+			}
+			var payload model.CreateNotePayload
+			if err := json.Unmarshal([]byte(op.PayloadJSON), &payload); err != nil {
+				return fmt.Errorf("decode rewrite_note payload for %s: %w", op.ID, err)
+			}
+			if strings.TrimSpace(payload.Content) == "" {
+				return fmt.Errorf("rewrite_note payload content is required for %s", op.ID)
+			}
 		case model.OperationWriteAgentReport:
 			if !strings.HasPrefix(op.TargetPath, "Meta/Reports/") {
 				return fmt.Errorf("write_agent_report target %q is outside Meta/Reports", op.TargetPath)
@@ -239,7 +261,7 @@ func (c Checker) CheckApproved(plan model.VaultPlan) error {
 		return err
 	}
 	for _, op := range plan.Operations {
-		if (op.Type == model.OperationAppendNote || op.Type == model.OperationMoveNote) && op.BeforeHash == "" {
+		if (op.Type == model.OperationAppendNote || op.Type == model.OperationRewriteNote || op.Type == model.OperationMoveNote) && op.BeforeHash == "" {
 			return fmt.Errorf("%s operation %s requires before_hash", op.Type, op.ID)
 		}
 	}

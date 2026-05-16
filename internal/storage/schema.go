@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS wiki_jobs (
   type TEXT NOT NULL,
   status TEXT NOT NULL,
   source TEXT NOT NULL,
+  source_key TEXT NOT NULL DEFAULT '',
   input_json TEXT NOT NULL,
   result_json TEXT NOT NULL DEFAULT '',
   error TEXT NOT NULL DEFAULT '',
@@ -83,6 +84,43 @@ CREATE TABLE IF NOT EXISTS vault_locks (
   plan_id TEXT NOT NULL,
   acquired_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS capture_buckets (
+  bucket_id TEXT PRIMARY KEY,
+  source_key TEXT NOT NULL,
+  raw_job_id TEXT NOT NULL,
+  raw_plan_id TEXT NOT NULL,
+  raw_path TEXT NOT NULL,
+  status TEXT NOT NULL,
+  topic_hint TEXT NOT NULL DEFAULT '',
+  excerpt TEXT NOT NULL DEFAULT '',
+  append_count INTEGER NOT NULL DEFAULT 0,
+  raw_hash_after_last_append TEXT NOT NULL DEFAULT '',
+  started_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  closed_at TEXT,
+  close_reason TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_capture_buckets_source_status
+ON capture_buckets(source_key, status, updated_at);
+
+CREATE TABLE IF NOT EXISTS pending_clarifications (
+  clarification_id TEXT PRIMARY KEY,
+  source_key TEXT NOT NULL,
+  question_type TEXT NOT NULL,
+  original_message TEXT NOT NULL,
+  original_received_at TEXT NOT NULL,
+  candidate_actions_json TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  resolved_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_clarifications_source_status
+ON pending_clarifications(source_key, status, created_at);
 `)
 	if err != nil {
 		return err
@@ -98,6 +136,7 @@ CREATE TABLE IF NOT EXISTS vault_locks (
 		{"vault_plans", "rejected_at", "TEXT"},
 		{"vault_plans", "rejected_reason", "TEXT NOT NULL DEFAULT ''"},
 		{"vault_plans", "error", "TEXT NOT NULL DEFAULT ''"},
+		{"wiki_jobs", "source_key", "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := s.addColumnIfMissing(column.table, column.name, column.def); err != nil {
 			return err

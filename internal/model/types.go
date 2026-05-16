@@ -4,6 +4,7 @@ import "time"
 
 const (
 	JobTypeIngestRaw        = "ingest_raw"
+	JobTypeAppendRaw        = "append_raw"
 	JobTypeOrganizeRaw      = "organize_raw"
 	JobTypeOrganizeRawToday = "organize_raw_today"
 
@@ -28,6 +29,7 @@ const (
 
 	OperationCreateNote       = "create_note"
 	OperationAppendNote       = "append_note"
+	OperationRewriteNote      = "rewrite_note"
 	OperationMoveNote         = "move_note"
 	OperationWriteAgentReport = "write_agent_report"
 
@@ -56,6 +58,12 @@ const (
 	SyncPhaseManual = "manual"
 	SyncPhaseBefore = "before_apply"
 	SyncPhaseAfter  = "after_apply"
+
+	CaptureBucketStatusActive       = "active"
+	CaptureBucketStatusClosed       = "closed"
+	CaptureBucketStatusOrganized    = "organized"
+	CaptureBucketStatusHashMismatch = "hash_mismatch"
+	CaptureBucketStatusExpired      = "expired"
 )
 
 type WikiJob struct {
@@ -63,12 +71,31 @@ type WikiJob struct {
 	Type       string
 	Status     string
 	Source     string
+	SourceKey  string
 	InputJSON  string
 	ResultJSON string
 	Error      string
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 	Attempts   int
+}
+
+type CaptureBucket struct {
+	ID                     string
+	SourceKey              string
+	RawJobID               string
+	RawPlanID              string
+	RawPath                string
+	Status                 string
+	TopicHint              string
+	Excerpt                string
+	AppendCount            int
+	RawHashAfterLastAppend string
+	StartedAt              time.Time
+	UpdatedAt              time.Time
+	ExpiresAt              time.Time
+	ClosedAt               *time.Time
+	CloseReason            string
 }
 
 type VaultPlan struct {

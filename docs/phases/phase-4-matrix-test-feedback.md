@@ -105,3 +105,84 @@ scripts/local/matrix-debug.sh daemon
 - `AGENTS.md`、`Meta/README.md`、`Meta/Tagging.md`、`Raw/AGENTS.md` 和 `Knowledge/AGENTS.md` 仅在显式 `--context-mode=vault-rules` 调试模式下附带。
 - vault policy 的长期规则应先由 LLM 分析成本地候选 `VaultProfile`，经人工确认后再编译成 task-specific `VaultSkill`，并由本地 policy gate 强校验。OpenWhisker 不应把当前 vault 的目录、tag 或笔记组织方式当成所有 vault 的固定格式。
 - 已用合成 raw 复测 minimal context 下的 OpenAI-compatible organizer：不附带 vault 规则全文也能生成合规 medium-risk plan；测试 plan 已 reject，未 apply。
+
+## 2026-05-15 真实 vault + OpenAI-compatible LLM 验证
+
+真实 vault + OpenAI-compatible LLM 已完成一次保守端到端验证，流程走到 diff 后按预期 reject。
+
+当前结论：
+
+- Matrix -> Core -> OpenAI-compatible Raw Organizer -> Policy Gate -> Plan -> Diff -> Reject 路径正常。
+- 默认 `context-mode=minimal` 可用于真实 vault 验证，不需要默认外发完整 vault 规则全文。
+- LLM 能基于真实 vault raw/context 生成可审批 medium-risk plan。
+- reject 后没有 apply，不写 Knowledge draft，也不移动 raw 到 `Raw/Processed/`。
+- 真实 vault + LLM 的基础规划链路已通；真实 vault + LLM + approve/apply 闭环仍未验证。
+
+下一步：
+
+1. 若要完成 Phase 4B 的真实写入闭环，使用一条低风险测试 raw 再跑一次真实 vault + OpenAI-compatible LLM，并在人工确认 diff 后 approve，验证 hash guard、Headless Sync、operation log、Knowledge draft 和 Raw/Processed processing note。
+2. 如果暂时不希望 LLM 结果写入真实 vault，可以先进入 Phase 4C，推进 Knowledge Expander 和 high-risk proposal policy；后续再补一次 approve/apply 验证。
+
+## 2026-05-15 Matrix diff 人类审批体验反馈
+
+真实使用反馈：当前 Matrix `/diff` 虽然已经不是底层 JSON diff，但仍然太“机械”。它更像面向大模型或工程调试的 operation 清单，而不是给人类看的实际写入内容预览。
+
+问题判断：
+
+- 当前 diff 主体仍围绕 `create_note`、`move_note`、target path 和 executor preview 展开。
+- 人类审批时最关心的是批准后 vault 里会出现什么内容，而不是底层会执行哪些 `VaultOperation`。
+- `DiffEntry.Preview` 是工程截断预览，不适合作为 Matrix 审批页的主体。
+- Matrix 回执需要继续同时支持 plain text fallback 和 `org.matrix.custom.html` formatted body，不能为了更好的人类阅读而退回纯文本。
+
+改进方向：Matrix `/diff` 应渲染为“人类审批页”，底层 JSON diff 和工程 preview 仍保留给 CLI / debug。
+
+目标结构：
+
+```text
+## 将写入的知识草稿
+
+路径：Knowledge/Drafts/...
+标题：...
+标签：type/knowledge, status/draft, status/needs-review
+来源：Raw/Inbox/...
+
+### 正文预览
+
+展示将创建的笔记正文主要内容。不要把 frontmatter、trace metadata 或 hash 放在第一屏。
+
+### 待核查
+
+- ...
+
+## 将移动的 Raw
+
+Raw/Inbox/...
+-> Raw/Processed/...
+
+处理记录会追加：
+- 输出：Knowledge/Drafts/...
+- 状态：needs review
+- Plan：plan_...
+
+## 审批动作
+
+批准：//approve plan_...
+拒绝：//reject plan_...
+```
+
+渲染要求：
+
+- 第一屏优先展示实际产物：标题、路径、tags、来源和正文预览。
+- operation 清单降级为“将创建 / 将移动”，不要作为主体。
+- 默认隐藏 `before_hash`、`openwhisker_job_id`、底层 payload、trace metadata 等工程噪音。
+- frontmatter 只提炼关键信息，例如 tags、source、review 状态。
+- `move_note` 要解释 Raw 会移动到哪里，以及 processing note 会记录什么。
+- approval / reject 命令放在底部。
+- Matrix adapter 必须继续生成 `formatted_body`，保证标题、列表、代码块和转义内容在 Element 中能正常渲染；plain `body` 作为 fallback 保留。
+
+下一步：
+
+- 已实现第一版 Matrix/Core adapter diff renderer 改造，不改 `VaultDiff` / executor 底层数据结构。
+- Renderer 现在从 `VaultOperation` payload 中提取 create / move 信息，而不是依赖 `DiffEntry.Preview` 作为主要内容来源。
+- 本地 adapter 入口已预览输出效果：正文预览会跳过 `Source` / trace 段，优先展示实际草稿正文；底部保留 `//approve` / `//reject` 操作提示。
+- 后续真实 Matrix 验证时重点看 Element `formatted_body` 渲染效果，以及真实 LLM 输出下标题、来源、tags、待核查项的提取是否自然。

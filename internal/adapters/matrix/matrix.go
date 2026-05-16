@@ -95,10 +95,11 @@ func (a Adapter) PollOnce(ctx context.Context, since string, timeout time.Durati
 				continue
 			}
 			response, err := a.Core.HandleText(ctx, core.AdapterRequest{
-				Adapter: model.AdapterMatrix,
-				EventID: event.EventID,
-				Sender:  event.Sender,
-				Text:    event.Content.Body,
+				Adapter:   model.AdapterMatrix,
+				EventID:   event.EventID,
+				Sender:    event.Sender,
+				SourceKey: matrixSourceKey(roomID, event.Sender),
+				Text:      event.Content.Body,
 			})
 			if err != nil {
 				if sendErr := a.Client.SendText(ctx, roomID, "OpenWhisker error: "+err.Error()); sendErr != nil {
@@ -117,6 +118,10 @@ func (a Adapter) PollOnce(ctx context.Context, since string, timeout time.Durati
 		return "", err
 	}
 	return sync.NextBatch, nil
+}
+
+func matrixSourceKey(roomID, senderID string) string {
+	return model.AdapterMatrix + ":" + roomID + ":" + senderID
 }
 
 func (a Adapter) DeliverOutbox(ctx context.Context, roomID string) error {

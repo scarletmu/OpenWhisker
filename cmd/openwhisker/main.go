@@ -479,6 +479,7 @@ func runMatrixPollOnce(args []string, stdout, stderr io.Writer) error {
 	vaultProfile := fs.String("vault-profile", vaultProfileDefault(), "vault profile: generic or knowledge-vault")
 	llmModel := fs.String("llm-model", llmModelDefault(), "OpenAI-compatible model for --organizer=openai-compatible")
 	openAIModel := fs.String("openai-model", "", "deprecated alias for --llm-model")
+	intentRouter := fs.String("intent-router", intentRouterDefault(), "intent router mode: hybrid, rules, or off")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -498,7 +499,13 @@ func runMatrixPollOnce(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	intentClassifier, err := intentClassifierForMode(*intentRouter)
+	if err != nil {
+		return err
+	}
 	service := core.NewAdapterServiceWithOptions(store, *vaultRoot, core.AdapterServiceOptions{
+		IntentRouterMode: *intentRouter,
+		IntentClassifier: intentClassifier,
 		PlanOptions: core.PlanServiceOptions{
 			Organizer:   organizer,
 			ContextMode: *contextMode,
@@ -549,6 +556,7 @@ func runMatrixDaemon(args []string, stdout, stderr io.Writer) error {
 	vaultProfile := fs.String("vault-profile", vaultProfileDefault(), "vault profile: generic or knowledge-vault")
 	llmModel := fs.String("llm-model", llmModelDefault(), "OpenAI-compatible model for --organizer=openai-compatible")
 	openAIModel := fs.String("openai-model", "", "deprecated alias for --llm-model")
+	intentRouter := fs.String("intent-router", intentRouterDefault(), "intent router mode: hybrid, rules, or off")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -568,7 +576,13 @@ func runMatrixDaemon(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	intentClassifier, err := intentClassifierForMode(*intentRouter)
+	if err != nil {
+		return err
+	}
 	service := core.NewAdapterServiceWithOptions(store, *vaultRoot, core.AdapterServiceOptions{
+		IntentRouterMode: *intentRouter,
+		IntentClassifier: intentClassifier,
 		PlanOptions: core.PlanServiceOptions{
 			Organizer:   organizer,
 			ContextMode: *contextMode,
@@ -878,8 +892,8 @@ func printUsage(stderr io.Writer) {
   openwhisker vault sync-status [--sync=off|on] [--ob-bin ob] [--db data/openwhisker.db] [--vault testdata/vault]
   openwhisker vault sync [--sync=off|on] [--ob-bin ob] [--db data/openwhisker.db] [--vault testdata/vault]
   openwhisker jobs show [--db data/openwhisker.db] <job_id>
-  openwhisker matrix poll-once [--db data/openwhisker.db] [--vault testdata/vault] [--homeserver URL] [--access-token TOKEN] [--password PASSWORD] [--user-id USER] [--room-id ROOM] [--session-file data/matrix-session.json] [--since TOKEN] [--organizer deterministic|openai-compatible] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault] [--llm-model MODEL]
-  openwhisker matrix daemon [--db data/openwhisker.db] [--vault testdata/vault] [--homeserver URL] [--access-token TOKEN] [--password PASSWORD] [--user-id USER] [--room-id ROOM] [--since-file data/matrix-since.token] [--session-file data/matrix-session.json] [--organizer deterministic|openai-compatible] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault] [--llm-model MODEL]`)
+  openwhisker matrix poll-once [--db data/openwhisker.db] [--vault testdata/vault] [--homeserver URL] [--access-token TOKEN] [--password PASSWORD] [--user-id USER] [--room-id ROOM] [--session-file data/matrix-session.json] [--since TOKEN] [--intent-router hybrid|rules|off] [--organizer deterministic|openai-compatible] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault] [--llm-model MODEL]
+  openwhisker matrix daemon [--db data/openwhisker.db] [--vault testdata/vault] [--homeserver URL] [--access-token TOKEN] [--password PASSWORD] [--user-id USER] [--room-id ROOM] [--since-file data/matrix-since.token] [--session-file data/matrix-session.json] [--intent-router hybrid|rules|off] [--organizer deterministic|openai-compatible] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault] [--llm-model MODEL]`)
 }
 
 func defaultOBBin() string {
@@ -887,6 +901,13 @@ func defaultOBBin() string {
 		return value
 	}
 	return "ob"
+}
+
+func intentRouterDefault() string {
+	if value := strings.TrimSpace(os.Getenv("OPENWHISKER_INTENT_ROUTER")); value != "" {
+		return value
+	}
+	return "hybrid"
 }
 
 func parseLocalDate(value string) (time.Time, error) {
@@ -1020,6 +1041,30 @@ func rawOrganizerForName(name, openAIModel string) (core.RawOrganizer, error) {
 	}
 }
 
+func intentClassifierForMode(mode string) (core.IntentClassifier, error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "hybrid":
+		apiKey := intentAPIKey()
+		if apiKey == "" {
+			return nil, nil
+		}
+		return agent.OpenAIIntentClassifier{
+			Client: agent.OpenAIClient{
+				APIKey:       apiKey,
+				BaseURL:      intentBaseURL(),
+				Model:        intentModelDefault(),
+				MaxOutput:    700,
+				Organization: coalesce(os.Getenv("OPENWHISKER_INTENT_ORG_ID"), os.Getenv("OPENAI_ORG_ID")),
+				Project:      coalesce(os.Getenv("OPENWHISKER_INTENT_PROJECT_ID"), os.Getenv("OPENAI_PROJECT_ID")),
+			},
+		}, nil
+	case "rules", "off":
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("unsupported intent router mode %q; want hybrid, rules, or off", mode)
+	}
+}
+
 func llmAPIKey() string {
 	return coalesce(os.Getenv("OPENWHISKER_LLM_API_KEY"), os.Getenv("OPENWHISKER_OPENAI_API_KEY"), os.Getenv("OPENAI_API_KEY"))
 }
@@ -1030,6 +1075,18 @@ func llmBaseURL() string {
 
 func llmModelDefault() string {
 	return coalesce(os.Getenv("OPENWHISKER_LLM_MODEL"), os.Getenv("OPENWHISKER_OPENAI_MODEL"))
+}
+
+func intentAPIKey() string {
+	return strings.TrimSpace(os.Getenv("OPENWHISKER_INTENT_API_KEY"))
+}
+
+func intentBaseURL() string {
+	return strings.TrimSpace(os.Getenv("OPENWHISKER_INTENT_BASE_URL"))
+}
+
+func intentModelDefault() string {
+	return strings.TrimSpace(os.Getenv("OPENWHISKER_INTENT_MODEL"))
 }
 
 func coalesce(values ...string) string {

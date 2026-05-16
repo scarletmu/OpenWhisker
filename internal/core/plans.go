@@ -19,25 +19,27 @@ import (
 )
 
 type PlanService struct {
-	store       *storage.Store
-	checker     policy.Checker
-	executor    executor.DirectFS
-	syncClient  executor.SyncClient
-	syncMode    string
-	contextMode string
-	conventions policy.Conventions
-	vaultRoot   string
-	organizer   RawOrganizer
-	now         func() time.Time
+	store          *storage.Store
+	checker        policy.Checker
+	executor       executor.DirectFS
+	syncClient     executor.SyncClient
+	syncMode       string
+	contextMode    string
+	conventions    policy.Conventions
+	vaultRoot      string
+	organizer      RawOrganizer
+	suppressOutbox bool
+	now            func() time.Time
 }
 
 type PlanServiceOptions struct {
-	SyncMode    string
-	SyncBackend string
-	SyncClient  executor.SyncClient
-	Organizer   RawOrganizer
-	ContextMode string
-	Conventions policy.Conventions
+	SyncMode       string
+	SyncBackend    string
+	SyncClient     executor.SyncClient
+	Organizer      RawOrganizer
+	ContextMode    string
+	Conventions    policy.Conventions
+	SuppressOutbox bool
 }
 
 const (
@@ -142,16 +144,17 @@ func NewPlanServiceWithOptions(store *storage.Store, vaultRoot string, opts Plan
 	}
 	conventions := opts.Conventions.Normalize()
 	return PlanService{
-		store:       store,
-		checker:     policy.NewCheckerWithConventions(conventions),
-		executor:    executor.NewDirectFS(vaultRoot, store),
-		syncClient:  syncClient,
-		syncMode:    syncMode,
-		contextMode: normalizeContextMode(opts.ContextMode),
-		conventions: conventions,
-		vaultRoot:   vaultRoot,
-		organizer:   defaultRawOrganizer(opts.Organizer),
-		now:         func() time.Time { return time.Now().UTC() },
+		store:          store,
+		checker:        policy.NewCheckerWithConventions(conventions),
+		executor:       executor.NewDirectFS(vaultRoot, store),
+		syncClient:     syncClient,
+		syncMode:       syncMode,
+		contextMode:    normalizeContextMode(opts.ContextMode),
+		conventions:    conventions,
+		vaultRoot:      vaultRoot,
+		organizer:      defaultRawOrganizer(opts.Organizer),
+		suppressOutbox: opts.SuppressOutbox,
+		now:            func() time.Time { return time.Now().UTC() },
 	}
 }
 
@@ -326,6 +329,236 @@ func (s PlanService) OrganizeToday(ctx context.Context, day time.Time) (Organize
 	}, nil
 }
 
+func (s PlanService) OrganizeSourceLast(ctx context.Context, sourceKey string) (OrganizeRawResult, error) {
+	sourceKey = strings.TrimSpace(sourceKey)
+	if sourceKey == "" {
+		return OrganizeRawResult{}, errors.New("source_key is required")
+	}
+	rawJob, err := s.store.LatestDoneIngestRawJobBySourceKey(sourceKey)
+	if err != nil {
+		return OrganizeRawResult{}, err
+	}
+	return s.organizeOneRaw(ctx, rawJob, rawTargetPath(rawJob), sourceKey, map[string]string{
+		"raw_job_id": rawJob.ID,
+		"raw_path":   rawTargetPath(rawJob),
+		"planner":    "deterministic_phase_2",
+		"source_key": sourceKey,
+	})
+}
+
+func (s PlanService) OrganizeCaptureBucket(ctx context.Context, sourceKey, bucketID string) (OrganizeRawResult, error) {
+	sourceKey = strings.TrimSpace(sourceKey)
+	bucketID = strings.TrimSpace(bucketID)
+	if sourceKey == "" || bucketID == "" {
+		return OrganizeRawResult{}, errors.New("source_key and bucket_id are required")
+	}
+	bucket, err := s.store.GetCaptureBucket(sourceKey, bucketID)
+	if err != nil {
+		return OrganizeRawResult{}, err
+	}
+	now := s.now()
+	if bucket.Status != model.CaptureBucketStatusActive {
+		return OrganizeRawResult{}, fmt.Errorf("bucket %s is %s, cannot organize", bucket.ID, bucket.Status)
+	}
+	if !bucket.ExpiresAt.IsZero() && now.After(bucket.ExpiresAt) {
+		bucket.Status = model.CaptureBucketStatusExpired
+		bucket.UpdatedAt = now
+		closedAt := now
+		bucket.ClosedAt = &closedAt
+		bucket.CloseReason = "ttl expired"
+		_ = s.store.SaveCaptureBucket(bucket)
+		return OrganizeRawResult{}, fmt.Errorf("bucket %s expired", bucket.ID)
+	}
+	currentHash, err := s.currentVaultFileHash(bucket.RawPath)
+	if err != nil {
+		return OrganizeRawResult{}, err
+	}
+	if currentHash != bucket.RawHashAfterLastAppend {
+		bucket.Status = model.CaptureBucketStatusHashMismatch
+		bucket.UpdatedAt = now
+		closedAt := now
+		bucket.ClosedAt = &closedAt
+		bucket.CloseReason = "raw hash mismatch"
+		_ = s.store.SaveCaptureBucket(bucket)
+		return OrganizeRawResult{}, fmt.Errorf("bucket %s raw hash mismatch", bucket.ID)
+	}
+	rawJob, err := s.store.GetJob(bucket.RawJobID)
+	if err != nil {
+		return OrganizeRawResult{}, err
+	}
+	result, err := s.organizeOneRaw(ctx, rawJob, bucket.RawPath, sourceKey, map[string]string{
+		"raw_job_id": rawJob.ID,
+		"raw_path":   bucket.RawPath,
+		"bucket_id":  bucket.ID,
+		"planner":    "deterministic_phase_2",
+		"source_key": sourceKey,
+	})
+	if err != nil {
+		return OrganizeRawResult{}, err
+	}
+	bucket.Status = model.CaptureBucketStatusOrganized
+	bucket.UpdatedAt = s.now()
+	closedAt := bucket.UpdatedAt
+	bucket.ClosedAt = &closedAt
+	bucket.CloseReason = "organized"
+	if err := s.store.SaveCaptureBucket(bucket); err != nil {
+		return OrganizeRawResult{}, err
+	}
+	return result, nil
+}
+
+func (s PlanService) OrganizeTodayForSource(ctx context.Context, sourceKey string, day time.Time) (OrganizeRawResult, error) {
+	sourceKey = strings.TrimSpace(sourceKey)
+	if sourceKey == "" {
+		return OrganizeRawResult{}, errors.New("source_key is required")
+	}
+	day = normalizeDay(day)
+	start, end := dayBounds(day)
+	dayLabel := day.Format("2006-01-02")
+	rawJobs, err := s.store.ListDoneIngestRawJobsCreatedBetweenBySourceKey(sourceKey, start, end, 100)
+	if err != nil {
+		return OrganizeRawResult{}, err
+	}
+	rawJobs, rawPaths, err := s.filterExistingInboxRawJobs(rawJobs)
+	if err != nil {
+		return OrganizeRawResult{}, err
+	}
+	if len(rawJobs) == 0 {
+		return OrganizeRawResult{}, fmt.Errorf("no source-scoped raw captures found for %s", dayLabel)
+	}
+	now := s.now()
+	rawJobIDs := jobIDs(rawJobs)
+	inputJSON, err := json.Marshal(map[string]any{
+		"date":        dayLabel,
+		"raw_job_ids": rawJobIDs,
+		"raw_paths":   rawPaths,
+		"planner":     "raw_today_grouped",
+		"source_key":  sourceKey,
+	})
+	if err != nil {
+		return OrganizeRawResult{}, err
+	}
+	job := model.WikiJob{
+		ID:        model.NewID("job"),
+		Type:      model.JobTypeOrganizeRawToday,
+		Status:    model.JobStatusPending,
+		Source:    sourceKey,
+		SourceKey: sourceKey,
+		InputJSON: string(inputJSON),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := s.store.CreateJob(job); err != nil {
+		return OrganizeRawResult{}, err
+	}
+	var contexts []RawOrganizerContext
+	for _, rawPath := range rawPaths {
+		vaultContext, err := buildRawOrganizerContext(ctx, s.vaultRoot, rawPath, s.contextMode, s.conventions)
+		if err != nil {
+			_ = s.failPlanJob(job.ID, err)
+			return OrganizeRawResult{}, err
+		}
+		contexts = append(contexts, vaultContext)
+	}
+	organizer, ok := s.organizer.(RawTodayOrganizer)
+	if !ok {
+		organizer = deterministicRawOrganizer{}
+	}
+	plan, err := organizer.OrganizeRawToday(ctx, RawTodayOrganizerRequest{
+		Job:          job,
+		RawJobs:      rawJobs,
+		RawPaths:     rawPaths,
+		VaultRoot:    s.vaultRoot,
+		Conventions:  s.conventions,
+		VaultContext: contexts,
+		Day:          day,
+		Now:          now,
+	})
+	if err != nil {
+		_ = s.failPlanJob(job.ID, err)
+		return OrganizeRawResult{}, err
+	}
+	prepared, err := s.prepareApprovalPlan(ctx, job.ID, plan)
+	if err != nil {
+		return OrganizeRawResult{}, err
+	}
+	return OrganizeRawResult{
+		JobID:       job.ID,
+		PlanID:      prepared.ID,
+		Status:      prepared.Status,
+		RawJobIDs:   rawJobIDs,
+		TargetPaths: prepared.TargetPaths,
+		Diff:        prepared.Diff,
+		Messages:    []string{"source-scoped grouped plan prepared and awaiting approval"},
+	}, nil
+}
+
+func (s PlanService) organizeOneRaw(ctx context.Context, rawJob model.WikiJob, rawPath, sourceKey string, input any) (OrganizeRawResult, error) {
+	if strings.TrimSpace(rawPath) == "" {
+		return OrganizeRawResult{}, fmt.Errorf("raw job %s has no target path", rawJob.ID)
+	}
+	vaultContext, err := buildRawOrganizerContext(ctx, s.vaultRoot, rawPath, s.contextMode, s.conventions)
+	if err != nil {
+		return OrganizeRawResult{}, err
+	}
+	now := s.now()
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		return OrganizeRawResult{}, err
+	}
+	job := model.WikiJob{
+		ID:        model.NewID("job"),
+		Type:      model.JobTypeOrganizeRaw,
+		Status:    model.JobStatusPending,
+		Source:    coalesceSource(sourceKey, "cli"),
+		SourceKey: sourceKey,
+		InputJSON: string(inputJSON),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := s.store.CreateJob(job); err != nil {
+		return OrganizeRawResult{}, err
+	}
+	plan, err := s.organizer.OrganizeRaw(ctx, RawOrganizerRequest{
+		Job:          job,
+		RawJob:       rawJob,
+		RawPath:      rawPath,
+		VaultRoot:    s.vaultRoot,
+		Conventions:  s.conventions,
+		VaultContext: vaultContext,
+		Now:          now,
+	})
+	if err != nil {
+		_ = s.failPlanJob(job.ID, err)
+		return OrganizeRawResult{}, err
+	}
+	prepared, err := s.prepareApprovalPlan(ctx, job.ID, plan)
+	if err != nil {
+		return OrganizeRawResult{}, err
+	}
+	return OrganizeRawResult{
+		JobID:       job.ID,
+		PlanID:      prepared.ID,
+		Status:      prepared.Status,
+		RawJobIDs:   []string{rawJob.ID},
+		TargetPaths: prepared.TargetPaths,
+		Diff:        prepared.Diff,
+		Messages:    []string{"plan prepared and awaiting approval"},
+	}, nil
+}
+
+func (s PlanService) currentVaultFileHash(rawPath string) (string, error) {
+	fullPath, err := executor.ResolveVaultPath(s.vaultRoot, rawPath)
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(fullPath)
+	if err != nil {
+		return "", err
+	}
+	return sha256String(string(data)), nil
+}
+
 func (s PlanService) prepareApprovalPlan(ctx context.Context, jobID string, plan model.VaultPlan) (model.VaultPlan, error) {
 	if err := s.checker.CheckForApproval(plan); err != nil {
 		_ = s.failPlanJob(jobID, err)
@@ -351,15 +584,17 @@ func (s PlanService) prepareApprovalPlan(ctx context.Context, jobID string, plan
 	if err := s.store.UpdateJobStatus(jobID, model.JobStatusAwaitingApproval, "", ""); err != nil {
 		return model.VaultPlan{}, err
 	}
-	if err := s.store.AddOutboxMessage(model.OutboxMessage{
-		ID:        model.NewID("out"),
-		JobID:     jobID,
-		Kind:      model.OutboxKindApproval,
-		Body:      fmt.Sprintf("Plan %s awaits approval: %s", prepared.ID, prepared.Summary),
-		Status:    model.OutboxStatusPending,
-		CreatedAt: s.now(),
-	}); err != nil {
-		return model.VaultPlan{}, err
+	if !s.suppressOutbox {
+		if err := s.store.AddOutboxMessage(model.OutboxMessage{
+			ID:        model.NewID("out"),
+			JobID:     jobID,
+			Kind:      model.OutboxKindApproval,
+			Body:      fmt.Sprintf("Plan %s awaits approval: %s", prepared.ID, prepared.Summary),
+			Status:    model.OutboxStatusPending,
+			CreatedAt: s.now(),
+		}); err != nil {
+			return model.VaultPlan{}, err
+		}
 	}
 	return prepared, nil
 }
@@ -412,14 +647,16 @@ func (s PlanService) Approve(ctx context.Context, identifier string) (PlanAction
 			_ = s.store.MarkPlanFailed(plan.ID, model.PlanStatusFailed, err.Error())
 			resultJSON, _ := json.Marshal(model.VaultApplyResult{SyncBefore: syncBefore})
 			_ = s.store.UpdateJobStatus(plan.JobID, model.JobStatusFailed, string(resultJSON), err.Error())
-			_ = s.store.AddOutboxMessage(model.OutboxMessage{
-				ID:        model.NewID("out"),
-				JobID:     plan.JobID,
-				Kind:      model.OutboxKindError,
-				Body:      fmt.Sprintf("Pre-sync failed for plan %s: %s", plan.ID, err.Error()),
-				Status:    model.OutboxStatusPending,
-				CreatedAt: s.now(),
-			})
+			if !s.suppressOutbox {
+				_ = s.store.AddOutboxMessage(model.OutboxMessage{
+					ID:        model.NewID("out"),
+					JobID:     plan.JobID,
+					Kind:      model.OutboxKindError,
+					Body:      fmt.Sprintf("Pre-sync failed for plan %s: %s", plan.ID, err.Error()),
+					Status:    model.OutboxStatusPending,
+					CreatedAt: s.now(),
+				})
+			}
 			return PlanActionResult{}, err
 		}
 	}
@@ -434,14 +671,16 @@ func (s PlanService) Approve(ctx context.Context, identifier string) (PlanAction
 		}
 		_ = s.store.MarkPlanFailed(plan.ID, status, err.Error())
 		_ = s.store.UpdateJobStatus(plan.JobID, model.JobStatusFailed, "", err.Error())
-		_ = s.store.AddOutboxMessage(model.OutboxMessage{
-			ID:        model.NewID("out"),
-			JobID:     plan.JobID,
-			Kind:      kind,
-			Body:      err.Error(),
-			Status:    model.OutboxStatusPending,
-			CreatedAt: s.now(),
-		})
+		if !s.suppressOutbox {
+			_ = s.store.AddOutboxMessage(model.OutboxMessage{
+				ID:        model.NewID("out"),
+				JobID:     plan.JobID,
+				Kind:      kind,
+				Body:      err.Error(),
+				Status:    model.OutboxStatusPending,
+				CreatedAt: s.now(),
+			})
+		}
 		return PlanActionResult{}, err
 	}
 	var syncAfter *model.SyncResult
@@ -463,15 +702,17 @@ func (s PlanService) Approve(ctx context.Context, identifier string) (PlanAction
 	if err := s.store.UpdateJobStatus(plan.JobID, model.JobStatusDone, string(resultJSON), ""); err != nil {
 		return PlanActionResult{}, err
 	}
-	if err := s.store.AddOutboxMessage(model.OutboxMessage{
-		ID:        model.NewID("out"),
-		JobID:     plan.JobID,
-		Kind:      model.OutboxKindResult,
-		Body:      planAppliedMessage(plan.ID, warning),
-		Status:    model.OutboxStatusPending,
-		CreatedAt: s.now(),
-	}); err != nil {
-		return PlanActionResult{}, err
+	if !s.suppressOutbox {
+		if err := s.store.AddOutboxMessage(model.OutboxMessage{
+			ID:        model.NewID("out"),
+			JobID:     plan.JobID,
+			Kind:      model.OutboxKindResult,
+			Body:      planAppliedMessage(plan.ID, warning),
+			Status:    model.OutboxStatusPending,
+			CreatedAt: s.now(),
+		}); err != nil {
+			return PlanActionResult{}, err
+		}
 	}
 	messages := []string{"plan approved and applied"}
 	if warning != "" {
@@ -505,15 +746,17 @@ func (s PlanService) Reject(identifier, reason string) (PlanActionResult, error)
 	if err := s.store.UpdateJobStatus(plan.JobID, model.JobStatusRejected, "", reason); err != nil {
 		return PlanActionResult{}, err
 	}
-	if err := s.store.AddOutboxMessage(model.OutboxMessage{
-		ID:        model.NewID("out"),
-		JobID:     plan.JobID,
-		Kind:      model.OutboxKindRejected,
-		Body:      fmt.Sprintf("Plan %s rejected: %s", plan.ID, reason),
-		Status:    model.OutboxStatusPending,
-		CreatedAt: s.now(),
-	}); err != nil {
-		return PlanActionResult{}, err
+	if !s.suppressOutbox {
+		if err := s.store.AddOutboxMessage(model.OutboxMessage{
+			ID:        model.NewID("out"),
+			JobID:     plan.JobID,
+			Kind:      model.OutboxKindRejected,
+			Body:      fmt.Sprintf("Plan %s rejected: %s", plan.ID, reason),
+			Status:    model.OutboxStatusPending,
+			CreatedAt: s.now(),
+		}); err != nil {
+			return PlanActionResult{}, err
+		}
 	}
 	return PlanActionResult{
 		JobID:    plan.JobID,
