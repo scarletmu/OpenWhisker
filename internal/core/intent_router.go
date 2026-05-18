@@ -3,10 +3,12 @@ package core
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/scarletmu/openwhisker/internal/model"
 )
@@ -22,6 +24,23 @@ type intentRuleResult struct {
 	displayAction string
 	payload       string
 	target        string
+}
+
+type intentAuditEvent struct {
+	TS              time.Time `json:"ts"`
+	Mode            string    `json:"mode"`
+	SourceKind      string    `json:"source_kind"`
+	RulesIntent     string    `json:"rules_intent,omitempty"`
+	ClassifierUsed  bool      `json:"classifier_used"`
+	ModelIntent     string    `json:"model_intent,omitempty"`
+	Target          string    `json:"target,omitempty"`
+	CaptureAction   string    `json:"capture_action,omitempty"`
+	BucketRelation  string    `json:"bucket_relation,omitempty"`
+	ConfidenceLabel string    `json:"confidence_label,omitempty"`
+	Confidence      float64   `json:"confidence,omitempty"`
+	AcceptedIntent  string    `json:"accepted_intent,omitempty"`
+	Accepted        bool      `json:"accepted"`
+	Error           string    `json:"error,omitempty"`
 }
 
 func (s AdapterService) handleIntentText(ctx context.Context, req AdapterRequest) (AdapterResponse, error) {
@@ -51,14 +70,57 @@ func (s AdapterService) handleIntentText(ctx context.Context, req AdapterRequest
 
 func (s AdapterService) classifyIntent(ctx context.Context, req AdapterRequest) intentRuleResult {
 	result := classifyIntentRules(req.Text)
-	if result.intent != "unclear" || s.intentRouterMode != intentRouterModeHybrid || s.intentClassifier == nil {
+	if result.intent != "" && result.intent != "unclear" {
+		s.writeIntentAudit(intentAuditEvent{
+			TS:             s.now(),
+			Mode:           s.intentRouterMode,
+			SourceKind:     adapterSourceKind(req.Adapter),
+			RulesIntent:    result.intent,
+			AcceptedIntent: result.intent,
+			Accepted:       true,
+		})
+		return result
+	}
+	if s.intentRouterMode != intentRouterModeHybrid || s.intentClassifier == nil {
+		s.writeIntentAudit(intentAuditEvent{
+			TS:          s.now(),
+			Mode:        s.intentRouterMode,
+			SourceKind:  adapterSourceKind(req.Adapter),
+			RulesIntent: result.intent,
+			Accepted:    false,
+		})
 		return result
 	}
 	classified, err := s.intentClassifier.ClassifyIntent(ctx, s.intentClassifierRequest(req))
 	if err != nil {
+		s.writeIntentAudit(intentAuditEvent{
+			TS:             s.now(),
+			Mode:           s.intentRouterMode,
+			SourceKind:     adapterSourceKind(req.Adapter),
+			RulesIntent:    result.intent,
+			ClassifierUsed: true,
+			Accepted:       false,
+			Error:          err.Error(),
+		})
 		return result
 	}
-	return s.modelIntentToRuleResult(req, classified)
+	mapped := s.modelIntentToRuleResult(req, classified)
+	s.writeIntentAudit(intentAuditEvent{
+		TS:              s.now(),
+		Mode:            s.intentRouterMode,
+		SourceKind:      adapterSourceKind(req.Adapter),
+		RulesIntent:     result.intent,
+		ClassifierUsed:  true,
+		ModelIntent:     classified.Intent,
+		Target:          classified.Target,
+		CaptureAction:   classified.CaptureAction,
+		BucketRelation:  classified.BucketRelation,
+		ConfidenceLabel: classified.ConfidenceLabel,
+		Confidence:      classified.Confidence,
+		AcceptedIntent:  mapped.intent,
+		Accepted:        mapped.intent != "",
+	})
+	return mapped
 }
 
 func (s AdapterService) intentClassifierRequest(req AdapterRequest) IntentClassifierRequest {
@@ -125,6 +187,23 @@ func (s AdapterService) modelIntentToRuleResult(req AdapterRequest, classified I
 		return intentRuleResult{intent: "reject", displayAction: "拒绝当前计划"}
 	}
 	return intentRuleResult{}
+}
+
+func (s AdapterService) writeIntentAudit(event intentAuditEvent) {
+	path := strings.TrimSpace(os.Getenv("OPENWHISKER_INTENT_AUDIT_FILE"))
+	if path == "" {
+		return
+	}
+	data, err := json.Marshal(event)
+	if err != nil {
+		return
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	_, _ = file.Write(append(data, '\n'))
 }
 
 func (s AdapterService) handleIntentRawCreate(ctx context.Context, req AdapterRequest, result intentRuleResult) (AdapterResponse, error) {
@@ -331,7 +410,7 @@ func classifyIntentRules(text string) intentRuleResult {
 	if exactAny(lower, "先不写", "不写", "不要写", "拒绝", "reject", "这版不行") {
 		return intentRuleResult{intent: "reject", displayAction: "拒绝当前 plan"}
 	}
-	return intentRuleResult{intent: "unclear", displayAction: "无法判断"}
+	return intentRuleResult{}
 }
 
 func stripIntentPrefix(text string, prefixes []string) (string, bool) {

@@ -1,6 +1,6 @@
 # Intent Router 小模型 Contract
 
-状态：partial implementation。Stage 1 已实现 rules-only fallback；OpenAI-compatible 小模型 classifier 已接入第一版，当前仅在 `hybrid` 且配置 `OPENWHISKER_INTENT_API_KEY` 时作为 rules miss fallback 使用；pending clarification reply extraction 尚未接入。
+状态：partial implementation。Stage 1 已实现 rules-only fallback；OpenAI-compatible 小模型 classifier 已接入第一版，当前仅在 `hybrid` 且配置 `OPENWHISKER_INTENT_API_KEY` 时作为 rules miss fallback 使用；intent audit jsonl 已接入分类摘要记录；pending clarification reply extraction 尚未接入。
 
 本文定义 Phase 4B.5 Intent Router 使用的小模型 contract。小模型只用于入口意图识别和 bucket 关系判断，不参与知识组织和 vault 写入。
 

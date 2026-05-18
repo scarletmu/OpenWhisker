@@ -1,6 +1,6 @@
 # OpenWhisker 当前进度与交接说明
 
-更新时间：2026-05-16
+更新时间：2026-05-18
 
 本文用于在不同机器之间切换开发时快速恢复上下文。长期架构仍以 `docs/architecture/` 和 `docs/phases/` 为准；本文只记录当前实施进度、验证状态和下一步优先级。
 
@@ -11,6 +11,8 @@
 Phase 4B 已完成 Matrix 私聊入口、approval/diff/reject 的基本闭环，并根据真实使用反馈改进了面向人类的 diff 预览格式。
 
 Phase 4B.5 已提升为独立入口层能力：IM Intent Router。它位于 adapter 入站和 Core Adapter API 之间，目标是把自然语言 IM 输入归一化为受控结构化意图，降低 slash command 使用成本。
+
+当前代码状态：Stage 1 rules/bucket 主路径已落地；Stage 2 OpenAI-compatible intent classifier、hybrid rules-miss fallback、hard guard 测试和 intent audit jsonl 已落地。真实 Matrix 和真实 intent 小模型 smoke 仍待环境配置后验证。
 
 ## 已落地能力
 
@@ -33,12 +35,18 @@ Phase 4B.5 已提升为独立入口层能力：IM Intent Router。它位于 adap
   - 输入只包含当前消息、source kind、active bucket 摘要、当前 source 待审批 plan 数量。
   - 不发送 vault note、raw note 全文、diff、完整 source_key、room id 或 sender id。
   - 模型输出只作为候选意图，仍必须通过 hard guard。
+- Stage 2 intent audit jsonl 已接入：
+  - 通过 `OPENWHISKER_INTENT_AUDIT_FILE` 启用。
+  - 记录 mode、source kind、rules/model intent、confidence、accepted intent 和错误摘要。
+  - 不记录消息全文、完整 source_key、room id、sender id 或 payload text。
 
 ## 验证状态
 
 - `go test ./...` 在 Stage 2 OpenAI-compatible intent classifier 骨架接入后已于 2026-05-16 在当前 Mac 上通过。
 - `OpenAIIntentClassifier` 和 Core model hard guard 单元测试已于 2026-05-16 补齐；同时修正了 `hybrid` 模式 rules miss 后不会调用小模型 fallback 的问题。
 - 真实 Matrix + test vault 已于 2026-05-16 验证 `hybrid` 未配置 `OPENWHISKER_INTENT_API_KEY` 时的 rules-only raw bucket 创建路径：`记录一下：...` 成功写入 `testdata/vault/Raw/Inbox/`，并创建 source-scoped active bucket。
+- 已补充 classifier、Core hard guard 和 audit privacy 单元测试，覆盖 structured output、非法枚举拒绝、hybrid rules miss fallback、append 无 active bucket 拦截和 audit 不泄露 source_key/message。
+- 本机 2026-05-18 检查：`OPENWHISKER_MATRIX_HOMESERVER`、`OPENWHISKER_MATRIX_ACCESS_TOKEN`、`OPENWHISKER_MATRIX_PASSWORD`、`OPENWHISKER_MATRIX_USER_ID`、`OPENWHISKER_MATRIX_ROOM_ID`、`OPENWHISKER_INTENT_API_KEY` 均未配置，因此未执行真实 Matrix / 小模型 smoke。
 - 尚未做真实 Matrix + intent classifier 视觉验证。
 - 尚未做真实 vault + LLM approve/apply 闭环验证。
 
@@ -56,11 +64,12 @@ Phase 4B.5 已提升为独立入口层能力：IM Intent Router。它位于 adap
 1. 配置 `OPENWHISKER_INTENT_API_KEY` 后，用小模型验证 rules miss 场景。
 2. 接入 pending clarification 状态机，处理 `medium` classifier 输出。
 3. 做真实 vault + LLM approve/apply 闭环验证。
+4. 根据真实使用反馈扩展 rules-only 短句词表。
 
 ## 当前已知限制
 
 - `pending_clarifications` 目前只有表结构，尚未接入运行流程。
 - 小模型 `medium` 输出目前不会生成定向澄清，只会降级为 unclear。
-- Stage 2 classifier 当前没有专门 audit jsonl。
+- Stage 2 classifier audit jsonl 只记录分类摘要，尚未接入更完整的运行状态观测面板。
 - Natural language approve/reject 只绑定当前 source 下唯一 pending plan；多个 pending plan 时必须回到显式 slash 命令。
 - 图片、文件、多模态 bucket 输入尚未实现。

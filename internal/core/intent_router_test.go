@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -192,6 +193,55 @@ func TestIntentRouterModelApproveRequiresConfidenceAndSourceScopedPendingPlan(t 
 	}
 	if plan.Status != model.PlanStatusAwaitingApproval {
 		t.Fatalf("plan status = %q, want still awaiting approval after other source approve", plan.Status)
+	}
+}
+
+func TestIntentRouterWritesPrivacySafeAuditJSONL(t *testing.T) {
+	service, cleanup := newIntentRouterTestService(t, fakeIntentClassifier{
+		result: IntentClassifierResult{
+			Intent:          "raw_capture",
+			Target:          "new_bucket",
+			CaptureAction:   "create",
+			BucketRelation:  "new_topic",
+			PayloadText:     "audit payload",
+			ConfidenceLabel: "high",
+			Confidence:      0.93,
+		},
+	})
+	defer cleanup()
+	auditPath := filepath.Join(t.TempDir(), "intent-router.jsonl")
+	t.Setenv("OPENWHISKER_INTENT_AUDIT_FILE", auditPath)
+
+	_, err := service.HandleText(context.Background(), AdapterRequest{
+		Adapter:   model.AdapterMatrix,
+		EventID:   "$intent-audit",
+		Sender:    "@user:example.test",
+		SourceKey: "matrix:room:user",
+		Text:      "帮我记一下 audit payload",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("audit lines = %d, want 1", len(lines))
+	}
+	var event map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &event); err != nil {
+		t.Fatal(err)
+	}
+	if event["classifier_used"] != true || event["accepted_intent"] != "raw_create" {
+		t.Fatalf("audit event = %+v, want accepted classifier result", event)
+	}
+	if _, ok := event["source_key"]; ok {
+		t.Fatalf("audit event leaks source_key: %+v", event)
+	}
+	if _, ok := event["message"]; ok {
+		t.Fatalf("audit event leaks message text: %+v", event)
 	}
 }
 

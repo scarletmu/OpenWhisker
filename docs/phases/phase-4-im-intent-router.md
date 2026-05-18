@@ -203,7 +203,7 @@ Phase 4B.5 先按两阶段推进：先完成 rules-only + bucket state + source_
 - Stage 2 intent 小模型已接入第一版 OpenAI-compatible classifier：`hybrid` 在配置 `OPENWHISKER_INTENT_API_KEY` 时会在 rules-only 未命中后调用小模型；未配置时仍自动降级 rules-only。
 - 小模型第一版只接受 `confidence_label=high` 的结果并套 hard guard；`medium` 定向澄清尚未接入 pending clarification 状态机。
 - `pending_clarifications` 只完成表结构，澄清状态机未接入。
-- Stage 2 classifier 新增代码尚未二次运行 `go test ./...` 或真实 Matrix 验证。
+- Stage 2 classifier 已补充单元测试并通过 `go test ./...`；尚未真实 Matrix 验证。
 
 ### 2026-05-15 Stage 2 小模型接入骨架
 
@@ -215,5 +215,8 @@ Phase 4B.5 先按两阶段推进：先完成 rules-only + bucket state + source_
 - classifier 输入只包含当前消息、`source_kind`、active bucket 短摘要和当前 source 待审批 plan 数量，不发送完整 `source_key`、vault note、raw note 全文或 diff。
 - Core dispatch 仍先走 deterministic rules；只有 rules 未命中且 `hybrid` 配置了 classifier 时才调用模型。
 - 模型输出只作为候选意图，必须继续通过 hard guard：append 必须有 active bucket 且 `bucket_relation=same_topic`，approve 必须 `confidence>=0.85` 且后续 source-scoped unique pending plan guard 通过。
+- 已修复 rules miss 返回 `unclear` 阻断 hybrid fallback 的问题；当前只有明确 rules 命中会跳过模型。
+- 已接入 `OPENWHISKER_INTENT_AUDIT_FILE` jsonl audit，记录分类摘要和接受结果，不记录消息全文、完整 `source_key`、room id、sender id 或 payload text。
+- 已补充 `OpenAIIntentClassifier` structured output/validation 测试，以及 Core hybrid fallback / append hard guard / audit privacy 测试。
 
-本节点尚未执行测试；下一步需要跑 `go test ./...` 做编译验证，并补充 classifier 单元测试。
+本节点已执行 `go test ./...` 并通过。下一步需要做真实 Matrix rules-only 视觉验证和配置 `OPENWHISKER_INTENT_API_KEY` 后的小模型 rules miss smoke。
