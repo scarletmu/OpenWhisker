@@ -51,7 +51,7 @@ func (s AdapterService) handleIntentText(ctx context.Context, req AdapterRequest
 
 func (s AdapterService) classifyIntent(ctx context.Context, req AdapterRequest) intentRuleResult {
 	result := classifyIntentRules(req.Text)
-	if result.intent != "" || s.intentRouterMode != intentRouterModeHybrid || s.intentClassifier == nil {
+	if result.intent != "unclear" || s.intentRouterMode != intentRouterModeHybrid || s.intentClassifier == nil {
 		return result
 	}
 	classified, err := s.intentClassifier.ClassifyIntent(ctx, s.intentClassifierRequest(req))

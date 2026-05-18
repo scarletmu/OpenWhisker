@@ -1,6 +1,7 @@
 data/
 .env.local
 scripts/local/
+.DS_Store
 testdata/vault/**/*.md
 testdata/vault/**/*.db
 *.db

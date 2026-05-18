@@ -1,0 +1,90 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/scarletmu/openwhisker/internal/core"
+	"github.com/scarletmu/openwhisker/internal/model"
+)
+
+func TestOpenAIIntentClassifierBuildsMinimalStructuredRequest(t *testing.T) {
+	client := &fakeCompatibleClient{output: `{
+		"intent": "raw_capture",
+		"target": "active_bucket",
+		"capture_action": "append",
+		"bucket_relation": "same_topic",
+		"payload_text": "补充 RPC retry 的一个边界条件",
+		"additional_payload_text": "",
+		"confidence_label": "high",
+		"confidence": 0.91,
+		"reason": "user asks to add to the current capture"
+	}`}
+	started := time.Date(2026, 5, 16, 10, 0, 0, 0, time.UTC)
+	req := core.IntentClassifierRequest{
+		Message:    "这个也补进去：RPC retry 的边界条件",
+		SourceKind: model.AdapterMatrix,
+		ActiveBucket: &core.IntentActiveBucketSummary{
+			Status:      model.CaptureBucketStatusActive,
+			StartedAt:   started,
+			UpdatedAt:   started.Add(2 * time.Minute),
+			TopicHint:   "RPC retry",
+			Excerpt:     "已有关于 RPC retry 的记录",
+			AppendCount: 2,
+		},
+		PendingPlanCount: 1,
+	}
+
+	result, err := (OpenAIIntentClassifier{Client: client}).ClassifyIntent(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Intent != "raw_capture" || result.CaptureAction != "append" || result.BucketRelation != "same_topic" {
+		t.Fatalf("classifier result = %+v, want append same_topic raw_capture", result)
+	}
+	if client.request.MaxOutputTokens != 700 || client.request.Store {
+		t.Fatalf("request token/store = %d/%v, want 700/false", client.request.MaxOutputTokens, client.request.Store)
+	}
+	if client.request.Text.Format.Type != "json_schema" ||
+		client.request.Text.Format.Name != "openwhisker_intent_router" ||
+		!client.request.Text.Format.Strict {
+		t.Fatalf("response format = %+v, want strict intent json schema", client.request.Text.Format)
+	}
+	var sent core.IntentClassifierRequest
+	if err := json.Unmarshal([]byte(client.request.Input), &sent); err != nil {
+		t.Fatal(err)
+	}
+	if sent.Message != req.Message || sent.SourceKind != model.AdapterMatrix || sent.PendingPlanCount != 1 {
+		t.Fatalf("sent request = %+v, want minimal classifier input", sent)
+	}
+	if sent.ActiveBucket == nil || sent.ActiveBucket.Excerpt != "已有关于 RPC retry 的记录" {
+		t.Fatalf("sent active bucket = %+v, want summary only", sent.ActiveBucket)
+	}
+	if strings.Contains(client.request.Input, "source_key") ||
+		strings.Contains(client.request.Input, "room_id") ||
+		strings.Contains(client.request.Input, "before_hash") {
+		t.Fatalf("classifier input leaks forbidden execution context: %s", client.request.Input)
+	}
+}
+
+func TestOpenAIIntentClassifierRejectsInvalidStructuredOutput(t *testing.T) {
+	client := &fakeCompatibleClient{output: `{
+		"intent": "shell_command",
+		"target": "none",
+		"capture_action": "none",
+		"bucket_relation": "unclear",
+		"payload_text": "",
+		"additional_payload_text": "",
+		"confidence_label": "high",
+		"confidence": 0.99,
+		"reason": "invalid"
+	}`}
+
+	_, err := (OpenAIIntentClassifier{Client: client}).ClassifyIntent(context.Background(), core.IntentClassifierRequest{})
+	if err == nil || !strings.Contains(err.Error(), "invalid intent") {
+		t.Fatalf("ClassifyIntent error = %v, want invalid intent validation error", err)
+	}
+}

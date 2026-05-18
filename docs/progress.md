@@ -36,8 +36,9 @@ Phase 4B.5 已提升为独立入口层能力：IM Intent Router。它位于 adap
 
 ## 验证状态
 
-- `go test ./...` 在 Stage 1 rules/bucket/outbox suppression/frontmatter rewrite 收敛后已通过。
-- Stage 2 OpenAI-compatible intent classifier 骨架接入后尚未重新运行 `go test ./...`。
+- `go test ./...` 在 Stage 2 OpenAI-compatible intent classifier 骨架接入后已于 2026-05-16 在当前 Mac 上通过。
+- `OpenAIIntentClassifier` 和 Core model hard guard 单元测试已于 2026-05-16 补齐；同时修正了 `hybrid` 模式 rules miss 后不会调用小模型 fallback 的问题。
+- 真实 Matrix + test vault 已于 2026-05-16 验证 `hybrid` 未配置 `OPENWHISKER_INTENT_API_KEY` 时的 rules-only raw bucket 创建路径：`记录一下：...` 成功写入 `testdata/vault/Raw/Inbox/`，并创建 source-scoped active bucket。
 - 尚未做真实 Matrix + intent classifier 视觉验证。
 - 尚未做真实 vault + LLM approve/apply 闭环验证。
 
@@ -52,12 +53,9 @@ Phase 4B.5 已提升为独立入口层能力：IM Intent Router。它位于 adap
 
 ## 下一步优先级
 
-1. 重新运行 `go test ./...`，优先确认 Stage 2 classifier 接入没有编译或测试回归。
-2. 为 `OpenAIIntentClassifier` 和 Core model hard guard 补单元测试。
-3. 用真实 Matrix + test vault 验证 `hybrid` 未配置 API key 时的 rules-only 体验。
-4. 配置 `OPENWHISKER_INTENT_API_KEY` 后，用小模型验证 rules miss 场景。
-5. 接入 pending clarification 状态机，处理 `medium` classifier 输出。
-6. 做真实 vault + LLM approve/apply 闭环验证。
+1. 配置 `OPENWHISKER_INTENT_API_KEY` 后，用小模型验证 rules miss 场景。
+2. 接入 pending clarification 状态机，处理 `medium` classifier 输出。
+3. 做真实 vault + LLM approve/apply 闭环验证。
 
 ## 当前已知限制
 
