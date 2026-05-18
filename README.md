@@ -1,149 +1,144 @@
 # OpenWhisker
 
-OpenWhisker 是一个本地优先的 Obsidian 知识库处理 agent。
+OpenWhisker 是一个住在你本机上的 Obsidian 知识库助手。
 
-这个项目从 FlashBang 的经验出发，但 FlashBang 之后只作为历史起点和实现参考。OpenWhisker 的目标是构建一个 wiki-first、plan-before-write 的知识处理系统：先可靠捕获原始输入，再由 agent 生成可审计的 VaultPlan，对有风险的改动进行人工确认，最后由受控的 VaultExecutor 执行写入。
+你在微信式的 IM 里随手扔一段话，它帮你记进 Obsidian；你说一句"整理一下"，它把零碎输入整理成一篇 Knowledge 草稿，并先把改动摆给你看，你点头它才写。
 
-## 当前能力
+它的核心立场是：**让 agent 帮你动笔，但不许它越过你写字**。
 
-OpenWhisker 当前提供一条最小可运行的本地捕获、审批和 sync-aware 执行流程：
+## 你能用它做什么
 
-- 通过 CLI 接收一段原始文本。
-- 为输入创建可追踪的 `WikiJob`。
-- 生成结构化的 `VaultPlan`。
-- 在写入前执行低风险 policy check。
-- 通过受控的 filesystem executor 写入本地 test vault。
-- 记录 operation log 和用户可见的 outbox 结果。
-- 为最近一条 raw capture 生成中风险整理计划。
-- 在 approval 前准备 diff 和 `before_hash`。
-- 通过 CLI 执行 `diff`、`approve` 和 `reject`。
-- `approve` 后创建 `Knowledge/Drafts/` 草稿，并将 raw note 移到 `Raw/Processed/`。
-- 提供受控 Headless Sync client，只允许执行 `ob sync-status --path <vault>` 和 `ob sync --path <vault>`。
-- 提供 `vault sync-status` 和 `vault sync` 手动同步命令。
-- `plan approve --sync=auto` 对默认 test vault 关闭同步，对显式真实 vault 默认执行 apply 前后 one-shot sync。
+### 1. 随手说一句，它帮你存进知识库
 
-默认只写入本地 test vault，路径是 `testdata/vault`，不会直接修改真实 Obsidian vault。真实 vault 必须通过 `--vault` 显式传入；此时审批执行默认启用 Headless Sync，除非传入 `--sync=off`。
+在 Matrix 里直接发：
 
-## 快速开始
-
-本地配置可以放在 `.env.local`，该文件已被 git ignore，并会在 CLI 启动时自动加载。可以从模板开始：
-
-```sh
-cp .env.local.example .env.local
+```text
+记录一下：今天和 X 聊到 OAuth2 的 PKCE，关键点是 code_verifier
 ```
 
-`.env.local` 适合放 Matrix token、OpenAI-compatible LLM endpoint、本机 `ob` 路径等配置；当前 shell 里已经设置的环境变量优先级更高。
+OpenWhisker 会在你 vault 的 `Raw/Inbox/` 下创建一条带 frontmatter 的 raw note，记下时间、来源和原文。下一句继续：
 
-LLM 配置优先使用通用 OpenAI-compatible 变量：
-
-```sh
-OPENWHISKER_LLM_API_KEY=
-OPENWHISKER_LLM_BASE_URL=
-OPENWHISKER_LLM_MODEL=
+```text
+补充：还有 device flow 的对比
 ```
 
-```sh
-go run ./cmd/openwhisker ingest raw \
-  --text "需要整理的一段原始输入"
+它会把这一句追加到刚才那条 raw note，而不是新开一个文件。等你说"结束记录"或者超时，这一组就关闭。
+
+这一步是**自动写入**——因为风险低（只在 `Raw/Inbox/` 下新增 / 追加，不会动你既有的 Knowledge 笔记）。
+
+### 2. 说"整理一下"，它先给你看 diff
+
+```text
+整理刚才
 ```
 
-默认会使用：
+OpenWhisker 会读这一组 raw 输入，调 LLM 生成一份 Knowledge 草稿，然后**不写入**，而是回你一份人类可读的预览：将创建哪个文件、文件里写什么、原 raw note 会被移到哪。
 
-- SQLite 数据库：`data/openwhisker.db`
-- Test vault：`testdata/vault`
+你回 `写进去` 才真的执行；回 `先不写` 就丢弃。也可以用 `/diff <plan_id>` 查看更早的待审批计划。
 
-也可以显式指定：
+### 3. 听不懂的时候，它问你
 
-```sh
-go run ./cmd/openwhisker ingest raw \
-  --db /tmp/openwhisker.db \
-  --vault /tmp/openwhisker-vault \
-  --text "raw input"
+如果你的输入模糊（比如"那个事儿再补一句"，但当前有多个 active 话题），OpenWhisker 不会乱猜，而是给你编号选项：
+
+```text
+你是想——
+1) 接着上一组（OAuth2 笔记）
+2) 新开一组
+3) 都不用
 ```
 
-从 stdin 读取：
+你回 `1` 或者 `选 1` 或者 `第一个` 都行。
+
+### 4. 真实 vault 不会被偷偷写
+
+- 默认只写本机 test vault (`testdata/vault`)，不会碰你真实的 Obsidian vault。
+- 真实 vault 必须显式 `--vault <path>` 才会被写入，并且默认会在 apply 前后调用 Obsidian Headless Sync 做一次 one-shot 同步，避免和手机端冲突。
+- 每个被改写的文件都带 `before_hash` 校验，并发改动会被拒绝而不是覆盖。
+
+### 5. 不想用 IM 也可以纯 CLI
 
 ```sh
-printf 'raw input\n' | go run ./cmd/openwhisker ingest raw
-```
-
-生成最近一条 raw capture 的整理计划：
-
-```sh
+go run ./cmd/openwhisker ingest raw --text "需要整理的一段原始输入"
 go run ./cmd/openwhisker organize last
-```
-
-生成当天未处理 raw capture 的 grouped 整理计划：
-
-```sh
-go run ./cmd/openwhisker organize today
-```
-
-查看、批准或拒绝待审批计划：
-
-```sh
 go run ./cmd/openwhisker plan diff <plan_id>
 go run ./cmd/openwhisker plan approve <plan_id>
 go run ./cmd/openwhisker plan reject <plan_id> --reason "暂不整理"
 ```
 
-对真实 vault 执行审批时，`--sync=auto` 会在 apply 前后调用 Headless `ob` 做 one-shot sync：
+## 快速开始
 
 ```sh
-go run ./cmd/openwhisker plan approve \
-  --vault /Users/wang/Documents/KnowLedge \
-  <plan_id>
+cp .env.local.example .env.local
 ```
 
-手动查看或触发 vault sync：
+按需填 LLM 和 Matrix 配置（`.env.local` 已被 git ignore，CLI 启动自动加载）：
 
 ```sh
-go run ./cmd/openwhisker vault sync-status \
-  --vault /Users/wang/Documents/KnowLedge
+# 用来生成 Knowledge 草稿的 LLM（OpenAI-compatible，DeepSeek 等都可以）
+OPENWHISKER_LLM_API_KEY=
+OPENWHISKER_LLM_BASE_URL=
+OPENWHISKER_LLM_MODEL=
 
-go run ./cmd/openwhisker vault sync \
-  --vault /Users/wang/Documents/KnowLedge
+# IM 自然语言入口要不要启用小模型 fallback
+OPENWHISKER_INTENT_ROUTER=hybrid      # off / rules / hybrid
+OPENWHISKER_INTENT_API_KEY=
+OPENWHISKER_INTENT_BASE_URL=
+OPENWHISKER_INTENT_MODEL=
+
+# Matrix 入口
+OPENWHISKER_MATRIX_HOMESERVER=
+OPENWHISKER_MATRIX_USER_ID=
+OPENWHISKER_MATRIX_PASSWORD=
+OPENWHISKER_MATRIX_ROOM_ID=
 ```
 
-运行测试：
+跑起来：
+
+```sh
+# 单纯本地 CLI 玩一下，不需要 IM
+go run ./cmd/openwhisker ingest raw --text "raw input"
+
+# 长期 Matrix 监听
+go run ./cmd/openwhisker matrix daemon
+```
+
+默认数据库 `data/openwhisker.db`，默认 test vault `testdata/vault`。
+
+跑测试：
 
 ```sh
 go test ./...
 ```
 
-## 文档
+## 它为什么不会乱来
+
+- **LLM 只生成计划，不动文件**：LLM 输出的是结构化 `VaultPlan`，由本机受控的 executor 执行，并经过 policy check（必须有 source refs、target paths、合规的 frontmatter / tags 等）。
+- **没有 shell、没有 Obsidian CLI**：LLM 拿不到任意命令执行权限。OpenWhisker 自己调用 `ob` 时也只允许 `ob sync-status` 和 `ob sync` 两条白名单命令。
+- **路径硬约束**：严格阻止绝对路径、`..` 穿越、symlink 逃逸、写出 vault root、动 hidden file。
+- **写入前 hash 校验**：任何 rewrite / move 操作都带 `before_hash`，并发或手动改动会让 plan 失败而不是覆盖。
+- **隐私 audit 不泄露内容**：IM intent 分类的 audit 日志只记录类型、置信度、是否被采纳，不写入消息正文、room id、sender id 或 source key。
+
+## 想了解更深
 
 - [Project Guide](AGENTS.md)：面向 LLM agent 的项目规则、参考源关系和工作边界。
-- [文档索引](docs/README.md)：当前文档结构和阅读顺序。
-- [设计哲学](docs/architecture/design-philosophy.md)：VaultPlan / VaultExecutor 架构理念和核心约束。
-- [架构概览](docs/architecture/overview.md)：当前架构边界和后续方向。
+- [文档索引](docs/README.md)：当前文档结构和推荐阅读顺序。
+- [当前进度与交接说明](docs/progress.md)：当前状态、验证状态和下一步优先级。
 - [项目决策](docs/project-decisions.md)：已收敛的长期架构决策和阶段默认值。
-- [Phase 1 最小切片](docs/phases/phase-1-minimal-slice.md)：低风险 raw capture 基线。
-- [Phase 2 审批与 Diff](docs/phases/phase-2-approval-diff.md)：中风险计划的 diff、approval、hash guard 和执行闭环。
-- [Phase 3 Sync-Aware Approval Execution](docs/phases/phase-3-headless-sync-executor.md)：通过受控 Headless `ob` backend 提供 sync-aware approval execution。
-- [Matrix Adapter 实践](docs/adapters/matrix-private-im.md)：Matrix / Synapse 作为 OpenWhisker 核心 IM 入口的 adapter 实践、部署基线和审批边界。
-- [Changelog](CHANGELOG.md)：面向人的版本变化记录。
+- [设计哲学](docs/architecture/design-philosophy.md)：VaultPlan / VaultExecutor 架构理念。
+- [架构概览](docs/architecture/overview.md)：当前架构边界和后续方向。
+- [IM Intent Router 架构规格](docs/architecture/im-intent-router.md)
+- [Capture Bucket 规格](docs/architecture/capture-bucket.md)
+- [Intent Router 小模型 Contract](docs/architecture/intent-router-model-contract.md)
+- [Matrix Adapter 实践](docs/adapters/matrix-private-im.md)
+- [Changelog](CHANGELOG.md)
 
-## 设计方向
+## 一句话架构
 
 ```text
-Capture / Command
-  -> WikiJob
-  -> Wiki Agent Host
-  -> VaultPlan
-  -> Policy Check / Diff / Risk Classification
-  -> Human Approval or Low-Risk Auto-Allow
-  -> VaultExecutor
-  -> Local Vault Files
-  -> Obsidian Sync
-  -> Operation Log / User Notification
+你说的话 (IM / CLI)
+  → 听懂意图（规则优先，听不懂才问小模型，仍听不懂就反问你）
+  → 生成计划（LLM 写 VaultPlan，不写文件）
+  → 给你看 diff（低风险跳过，中风险等你点头）
+  → 受控执行（路径 / hash / lock / sync 全程把关）
+  → 写进 Obsidian vault
 ```
-
-## 安全边界
-
-- LLM 不直接写 vault 文件。
-- LLM 不执行任意 shell。
-- LLM 不自由调用 Obsidian CLI。
-- Headless `ob` 只作为受控 sync client 使用，不作为通用 shell 或 LLM 工具。
-- 真实 Obsidian vault 写入需要用户显式指定 `--vault`，中风险变更仍需 approval。
-- 高风险知识库重构默认不自动执行。
