@@ -1,6 +1,6 @@
 # Intent Router 小模型 Contract
 
-状态：partial implementation。Stage 1 已实现 rules-only fallback；OpenAI-compatible 小模型 classifier 已接入第一版，当前仅在 `hybrid` 且配置 `OPENWHISKER_INTENT_API_KEY` 时作为 rules miss fallback 使用；intent audit jsonl 已接入分类摘要记录；pending clarification reply extraction 尚未接入。
+状态：partial implementation。Stage 1 已实现 rules-only fallback；OpenAI-compatible 小模型 classifier 已接入第一版，当前仅在 `hybrid` 且配置 `OPENWHISKER_INTENT_API_KEY` 时作为 rules miss fallback 使用；intent audit jsonl 已接入分类摘要记录；`confidence_label=medium` 触发的 pending clarification 创建 / 规则回复匹配 / 自动 cancel 已落地（候选目前由 OW 客户端基于 raw_capture+active_bucket 合成，模型暂不直接产出 `candidate_actions`）；澄清回复中 `additional_payload_text` 的抽取尚未接入。
 
 实现备注（2026-05-18）：classifier 请求体使用 `response_format: {"type": "json_object"}`，不依赖 OpenAI 的 strict `json_schema` 类型，以兼容 DeepSeek 等仅支持 `json_object` 的 OpenAI-compatible 端点。enum 与字段约束放在 system prompt 显式声明，并依赖客户端 `validateIntentClassifierOutput` 做硬校验；非法 enum / 缺字段 / 非法 JSON 仍按下文"Invalid output handling"降级。Core hard guard 不受影响，仍是最外层兜底。
 
@@ -244,9 +244,13 @@ plan_rejected                  - reject handler 拒绝了 plan
 rejected_no_active_bucket      - raw_append / raw_close handler 因无 active bucket 拒绝
 rejected_no_pending_plan       - diff / approve / reject 因 source 无 pending plan 拒绝
 rejected_ambiguous_pending_plan- diff / approve / reject 因 source 有多个 pending plan 拒绝
+clarification_requested        - medium classifier 输出触发,router 已写入 pending_clarifications 并发出 IM 数字编号提示
+clarification_cancelled        - 用户回复匹配到 cancel 候选,旧 clarification 被标记为 cancelled
 not_executed                   - intent 未被采纳(unclear / 分类器低置信度 / 缺 active bucket guard 等),无 handler 运行
 failed                         - handler 返回 error
 ```
+
+回复解析路径不写新枚举值:用户回复匹配到非 cancel 候选时,audit 行的 `executed_action` 与所选动作执行结果一致(`appended` / `created` 等),并额外携带 `clarification_id` 与 `clarification_resolution=resolved`。新消息无法匹配候选时旧 clarification 被自动取消,audit 行携带 `clarification_id` 与 `clarification_resolution=cancelled_superseded`,`executed_action` 反映新消息自身的执行结果。
 
 每次 `HandleText` 只写入一行 audit,在 handler 返回后一次性附加 `executed_action`,不重复写入分类摘要。`accepted` / `accepted_intent` 仍保留旧语义,与 `executed_action` 联合解读:`accepted=true && executed_action=appended` 是成功路径;`accepted=true && executed_action=rejected_*` 表示 router 采纳了意图但 deterministic guard / handler 拒绝了执行。
 

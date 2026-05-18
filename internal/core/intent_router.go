@@ -30,8 +30,15 @@ const (
 	intentExecutedRejectedNoActiveBucket   = "rejected_no_active_bucket"
 	intentExecutedRejectedNoPendingPlan    = "rejected_no_pending_plan"
 	intentExecutedRejectedAmbiguousPlan    = "rejected_ambiguous_pending_plan"
+	intentExecutedClarificationRequested   = "clarification_requested"
+	intentExecutedClarificationCancelled   = "clarification_cancelled"
 	intentExecutedNotExecuted              = "not_executed"
 	intentExecutedFailed                   = "failed"
+)
+
+const (
+	intentClarificationTTL     = 5 * time.Minute
+	intentClarificationRequest = "clarification_request"
 )
 
 type intentRuleResult struct {
@@ -39,24 +46,32 @@ type intentRuleResult struct {
 	displayAction string
 	payload       string
 	target        string
+	clarification *clarificationProposal
+}
+
+type clarificationProposal struct {
+	questionType string
+	candidates   []model.CandidateAction
 }
 
 type intentAuditEvent struct {
-	TS              time.Time `json:"ts"`
-	Mode            string    `json:"mode"`
-	SourceKind      string    `json:"source_kind"`
-	RulesIntent     string    `json:"rules_intent,omitempty"`
-	ClassifierUsed  bool      `json:"classifier_used"`
-	ModelIntent     string    `json:"model_intent,omitempty"`
-	Target          string    `json:"target,omitempty"`
-	CaptureAction   string    `json:"capture_action,omitempty"`
-	BucketRelation  string    `json:"bucket_relation,omitempty"`
-	ConfidenceLabel string    `json:"confidence_label,omitempty"`
-	Confidence      float64   `json:"confidence,omitempty"`
-	AcceptedIntent  string    `json:"accepted_intent,omitempty"`
-	Accepted        bool      `json:"accepted"`
-	ExecutedAction  string    `json:"executed_action,omitempty"`
-	Error           string    `json:"error,omitempty"`
+	TS                      time.Time `json:"ts"`
+	Mode                    string    `json:"mode"`
+	SourceKind              string    `json:"source_kind"`
+	RulesIntent             string    `json:"rules_intent,omitempty"`
+	ClassifierUsed          bool      `json:"classifier_used"`
+	ModelIntent             string    `json:"model_intent,omitempty"`
+	Target                  string    `json:"target,omitempty"`
+	CaptureAction           string    `json:"capture_action,omitempty"`
+	BucketRelation          string    `json:"bucket_relation,omitempty"`
+	ConfidenceLabel         string    `json:"confidence_label,omitempty"`
+	Confidence              float64   `json:"confidence,omitempty"`
+	AcceptedIntent          string    `json:"accepted_intent,omitempty"`
+	Accepted                bool      `json:"accepted"`
+	ExecutedAction          string    `json:"executed_action,omitempty"`
+	ClarificationID         string    `json:"clarification_id,omitempty"`
+	ClarificationResolution string    `json:"clarification_resolution,omitempty"`
+	Error                   string    `json:"error,omitempty"`
 }
 
 type intentClassification struct {
@@ -77,6 +92,17 @@ func (s AdapterService) handleIntentText(ctx context.Context, req AdapterRequest
 
 func (s AdapterService) dispatchIntent(ctx context.Context, req AdapterRequest, result intentRuleResult) (AdapterResponse, string, error) {
 	switch result.intent {
+	case intentClarificationRequest:
+		resp, err := s.handleIntentClarificationRequest(req, result)
+		if err != nil {
+			return resp, intentExecutedFailed, err
+		}
+		return resp, intentExecutedClarificationRequested, nil
+	case "clarification_cancel":
+		return AdapterResponse{
+			Status: "clarification_cancelled",
+			Body:   "已取消上一次的待确认动作。",
+		}, intentExecutedClarificationCancelled, nil
 	case "raw_create":
 		resp, err := s.handleIntentRawCreate(ctx, req, result)
 		if err != nil {
@@ -157,6 +183,35 @@ func (s AdapterService) classifyIntent(ctx context.Context, req AdapterRequest) 
 		Mode:       s.intentRouterMode,
 		SourceKind: adapterSourceKind(req.Adapter),
 	}
+	if _, err := s.store.ExpirePendingClarifications(req.SourceKey, s.now()); err != nil {
+		audit.Error = err.Error()
+	}
+	if pending, ok, err := s.pendingClarification(req.SourceKey); err != nil {
+		audit.Error = err.Error()
+	} else if ok {
+		if matched, action, ok := matchClarificationReply(req.Text, pending); ok {
+			audit.ClarificationID = pending.ID
+			audit.ClarificationResolution = "resolved"
+			if action == model.ClarificationActionCancel {
+				_ = s.store.UpdatePendingClarificationStatus(pending.ID, model.PendingClarificationStatusCancelled, s.now())
+				audit.ClarificationResolution = "cancelled_by_user"
+				audit.AcceptedIntent = ""
+				audit.Accepted = false
+				return intentClassification{
+					result: intentRuleResult{intent: "clarification_cancel", displayAction: matched.Label},
+					audit:  audit,
+				}
+			}
+			_ = s.store.UpdatePendingClarificationStatus(pending.ID, model.PendingClarificationStatusResolved, s.now())
+			result := buildResultFromClarificationAction(action, pending.OriginalMessage)
+			audit.AcceptedIntent = result.intent
+			audit.Accepted = result.intent != ""
+			return intentClassification{result: result, audit: audit}
+		}
+		_ = s.store.UpdatePendingClarificationStatus(pending.ID, model.PendingClarificationStatusCancelled, s.now())
+		audit.ClarificationID = pending.ID
+		audit.ClarificationResolution = "cancelled_superseded"
+	}
 	result := classifyIntentRules(req.Text)
 	audit.RulesIntent = result.intent
 	if result.intent != "" && result.intent != "unclear" {
@@ -173,16 +228,134 @@ func (s AdapterService) classifyIntent(ctx context.Context, req AdapterRequest) 
 		audit.Error = err.Error()
 		return intentClassification{result: result, audit: audit}
 	}
-	mapped := s.modelIntentToRuleResult(req, classified)
 	audit.ModelIntent = classified.Intent
 	audit.Target = classified.Target
 	audit.CaptureAction = classified.CaptureAction
 	audit.BucketRelation = classified.BucketRelation
 	audit.ConfidenceLabel = classified.ConfidenceLabel
 	audit.Confidence = classified.Confidence
-	audit.AcceptedIntent = mapped.intent
-	audit.Accepted = mapped.intent != ""
-	return intentClassification{result: mapped, audit: audit}
+	mapped := s.modelIntentToRuleResult(req, classified)
+	if mapped.intent != "" {
+		audit.AcceptedIntent = mapped.intent
+		audit.Accepted = true
+		return intentClassification{result: mapped, audit: audit}
+	}
+	if classified.ConfidenceLabel == "medium" {
+		if proposal, ok := s.synthesizeClarification(req, classified); ok {
+			result := intentRuleResult{
+				intent:        intentClarificationRequest,
+				displayAction: "请确认这条消息的处理方式",
+				payload:       strings.TrimSpace(req.Text),
+				clarification: &proposal,
+			}
+			audit.AcceptedIntent = intentClarificationRequest
+			audit.Accepted = true
+			return intentClassification{result: result, audit: audit}
+		}
+	}
+	audit.AcceptedIntent = ""
+	audit.Accepted = false
+	return intentClassification{result: intentRuleResult{}, audit: audit}
+}
+
+func (s AdapterService) pendingClarification(sourceKey string) (model.PendingClarification, bool, error) {
+	pending, err := s.store.ActivePendingClarification(sourceKey, s.now())
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.PendingClarification{}, false, nil
+	}
+	if err != nil {
+		return model.PendingClarification{}, false, err
+	}
+	return pending, true, nil
+}
+
+func buildResultFromClarificationAction(action, originalMessage string) intentRuleResult {
+	payload := strings.TrimSpace(originalMessage)
+	switch action {
+	case model.ClarificationActionRawAppend:
+		return intentRuleResult{intent: "raw_append", displayAction: "追加当前记录组", payload: payload, target: "active_bucket"}
+	case model.ClarificationActionRawCreate:
+		return intentRuleResult{intent: "raw_create", displayAction: "创建当前记录组", payload: payload, target: "new_bucket"}
+	}
+	return intentRuleResult{}
+}
+
+func matchClarificationReply(text string, pending model.PendingClarification) (model.CandidateAction, string, bool) {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return model.CandidateAction{}, "", false
+	}
+	if idx, ok := parseCandidateNumber(trimmed); ok {
+		if idx >= 1 && idx <= len(pending.CandidateActions) {
+			c := pending.CandidateActions[idx-1]
+			return c, c.Action, true
+		}
+	}
+	lower := strings.ToLower(trimmed)
+	if exactAny(lower, "取消", "算了", "cancel", "不用", "都不要") {
+		return model.CandidateAction{Action: model.ClarificationActionCancel, Label: "取消"}, model.ClarificationActionCancel, true
+	}
+	for _, c := range pending.CandidateActions {
+		if labelMatchesReply(trimmed, c) {
+			return c, c.Action, true
+		}
+	}
+	return model.CandidateAction{}, "", false
+}
+
+func parseCandidateNumber(text string) (int, bool) {
+	stripped := strings.TrimRight(text, ".．、 ")
+	switch stripped {
+	case "1", "①", "一":
+		return 1, true
+	case "2", "②", "二":
+		return 2, true
+	case "3", "③", "三":
+		return 3, true
+	case "4", "④", "四":
+		return 4, true
+	}
+	return 0, false
+}
+
+func labelMatchesReply(text string, c model.CandidateAction) bool {
+	switch c.Action {
+	case model.ClarificationActionRawAppend:
+		return exactAny(text, "补充", "并入", "加上去", "加到上一组", "补到上一组")
+	case model.ClarificationActionRawCreate:
+		return exactAny(text, "新建", "新建一组", "另开", "另起一组", "新开一组")
+	case model.ClarificationActionCancel:
+		return exactAny(text, "取消", "算了", "都不要")
+	}
+	return false
+}
+
+func (s AdapterService) synthesizeClarification(req AdapterRequest, classified IntentClassifierResult) (clarificationProposal, bool) {
+	if strings.TrimSpace(req.Text) == "" {
+		return clarificationProposal{}, false
+	}
+	if len(req.Text) > model.PendingClarificationOriginalMax {
+		return clarificationProposal{}, false
+	}
+	bucket, hasActive, err := s.activeBucket(req.SourceKey)
+	if err != nil {
+		return clarificationProposal{}, false
+	}
+	if classified.Intent != "raw_capture" {
+		return clarificationProposal{}, false
+	}
+	if !hasActive || bucket.Status != model.CaptureBucketStatusActive {
+		return clarificationProposal{}, false
+	}
+	candidates := []model.CandidateAction{
+		{Action: model.ClarificationActionRawAppend, Label: "补充到上一组"},
+		{Action: model.ClarificationActionRawCreate, Label: "新建一组"},
+		{Action: model.ClarificationActionCancel, Label: "取消"},
+	}
+	return clarificationProposal{
+		questionType: model.ClarificationQuestionBucketRelation,
+		candidates:   candidates,
+	}, true
 }
 
 func (s AdapterService) intentClassifierRequest(req AdapterRequest) IntentClassifierRequest {
@@ -266,6 +439,39 @@ func (s AdapterService) writeIntentAudit(event intentAuditEvent) {
 	}
 	defer file.Close()
 	_, _ = file.Write(append(data, '\n'))
+}
+
+func (s AdapterService) handleIntentClarificationRequest(req AdapterRequest, result intentRuleResult) (AdapterResponse, error) {
+	if result.clarification == nil || len(result.clarification.candidates) == 0 {
+		return AdapterResponse{}, fmt.Errorf("clarification proposal missing")
+	}
+	now := s.now()
+	clarification := model.PendingClarification{
+		ID:                 model.NewID("clar"),
+		SourceKey:          req.SourceKey,
+		QuestionType:       result.clarification.questionType,
+		OriginalMessage:    result.payload,
+		OriginalReceivedAt: now,
+		CandidateActions:   result.clarification.candidates,
+		Status:             model.PendingClarificationStatusPending,
+		CreatedAt:          now,
+		ExpiresAt:          now.Add(intentClarificationTTL),
+	}
+	if err := s.store.SavePendingClarification(clarification); err != nil {
+		return AdapterResponse{}, err
+	}
+	var lines []string
+	lines = append(lines, "刚才那条不太确定要怎么处理，想确认下：")
+	lines = append(lines, "")
+	for i, c := range clarification.CandidateActions {
+		lines = append(lines, fmt.Sprintf("%d. %s", i+1, c.Label))
+	}
+	lines = append(lines, "")
+	lines = append(lines, "回数字或对应短语都行。")
+	return AdapterResponse{
+		Status: "clarification_requested",
+		Body:   strings.Join(lines, "\n"),
+	}, nil
 }
 
 func (s AdapterService) handleIntentRawCreate(ctx context.Context, req AdapterRequest, result intentRuleResult) (AdapterResponse, error) {

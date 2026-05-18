@@ -201,9 +201,9 @@ Phase 4B.5 先按两阶段推进：先完成 rules-only + bucket state + source_
 本阶段已知限制：
 
 - Stage 2 intent 小模型已接入第一版 OpenAI-compatible classifier：`hybrid` 在配置 `OPENWHISKER_INTENT_API_KEY` 时会在 rules-only 未命中后调用小模型；未配置时仍自动降级 rules-only。
-- 小模型第一版只接受 `confidence_label=high` 的结果并套 hard guard；`medium` 定向澄清尚未接入 pending clarification 状态机。
-- `pending_clarifications` 只完成表结构，澄清状态机未接入。
-- Stage 2 classifier 已补充单元测试并通过 `go test ./...`；尚未真实 Matrix 验证。
+- `medium` 定向澄清已接入 pending clarification 状态机（2026-05-18）：classifier 返回 `medium` + 当前 source 存在 active bucket 时，OW 合成 `bucket_relation` 候选写入 `pending_clarifications` 并发出带数字编号的中文 IM 提示；澄清回复通过规则匹配（数字 / 候选短语 / 取消词）解析，新消息非澄清回复则自动 cancel 旧 clarification。TTL 固定 5 分钟，由下次 `HandleText` 入口惰性 expire。
+- 澄清回复中 `additional_payload_text` 抽取尚未实现；当前回复只选择候选动作，将保存的 `original_message` 重新分发到对应 handler。
+- Stage 2 classifier + pending clarification 已补充单元测试并通过 `go test ./...`；medium 路径尚未真实 Matrix 验证。
 
 ### 2026-05-15 Stage 2 小模型接入骨架
 

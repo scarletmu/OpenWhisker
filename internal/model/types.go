@@ -64,6 +64,18 @@ const (
 	CaptureBucketStatusOrganized    = "organized"
 	CaptureBucketStatusHashMismatch = "hash_mismatch"
 	CaptureBucketStatusExpired      = "expired"
+
+	PendingClarificationStatusPending   = "pending"
+	PendingClarificationStatusResolved  = "resolved"
+	PendingClarificationStatusExpired   = "expired"
+	PendingClarificationStatusCancelled = "cancelled"
+
+	ClarificationQuestionBucketRelation = "bucket_relation"
+
+	ClarificationActionRawAppend    = "raw_append"
+	ClarificationActionRawCreate    = "raw_create"
+	ClarificationActionCancel       = "cancel"
+	PendingClarificationOriginalMax = 8 * 1024
 )
 
 type WikiJob struct {
@@ -78,6 +90,24 @@ type WikiJob struct {
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 	Attempts   int
+}
+
+type CandidateAction struct {
+	Action string `json:"action"`
+	Label  string `json:"label"`
+}
+
+type PendingClarification struct {
+	ID                 string
+	SourceKey          string
+	QuestionType       string
+	OriginalMessage    string
+	OriginalReceivedAt time.Time
+	CandidateActions   []CandidateAction
+	Status             string
+	CreatedAt          time.Time
+	ExpiresAt          time.Time
+	ResolvedAt         *time.Time
 }
 
 type CaptureBucket struct {

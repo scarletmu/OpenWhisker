@@ -56,6 +56,7 @@ Phase 4B.5 已提升为独立入口层能力：IM Intent Router。它位于 adap
   - 切换后取得首条成功 round-trip：audit 行 `model_intent=raw_capture, target=active_bucket, capture_action=append, bucket_relation=same_topic, confidence_label=high, confidence=0.95, accepted_intent=raw_append, accepted=true`，证明 Matrix → adapter → intent router → DeepSeek classifier → audit 全链路打通。
   - 已知 DeepSeek `json_object` 偶发返回空 `content`（官方文档列为 known issue），目前由 classifier 当作普通失败写入 audit 并按 `unclear` 降级，未做重试，符合"先暴露后决策"原则。
 - 2026-05-18 已为 audit 加入 `executed_action` 字段,区分"router 采纳的意图"与"executor 实际结果"。枚举见 `docs/architecture/intent-router-model-contract.md#audit-executed_action`:`created` / `appended` / `closed` / `organized_pending_approval` / `diff_shown` / `approved` / `plan_rejected` 表示 handler 成功;`rejected_no_active_bucket` / `rejected_no_pending_plan` / `rejected_ambiguous_pending_plan` 表示 handler 拒绝;`not_executed` / `failed` 覆盖未采纳和异常路径。每次 `HandleText` 仍只写一行 audit,在 handler 返回后填入。单测 `TestIntentRouterAuditExecutedActionRejectedNoActiveBucket` 覆盖 accepted=true 但 handler 拒绝的关键场景,`go test ./...` 全绿。
+- 2026-05-18 已接入 pending clarification 状态机。classifier 在 `confidence_label=medium` 且当前 source 存在 active bucket 时,合成 `bucket_relation` 候选（补充到上一组 / 新建一组 / 取消）写入 `pending_clarifications` 表,IM 端给出带数字编号的中文澄清提示。澄清回复优先级最高:`HandleText` 入口先 lazy expire 当前 source 的过期 clarification,然后尝试规则匹配数字 / 候选短语 / 取消词,命中即以保存的 `original_message` 套用所选动作并标记 `resolved`;若新消息不像澄清回复则自动 cancel 旧 clarification,新消息走完整 rules + classifier 流程。新增 `executed_action` 枚举值:`clarification_requested` / `clarification_cancelled`,audit 行额外携带 `clarification_id` 与 `clarification_resolution`,仍不写入 message 全文 / source_key。单测 `TestIntentRouterClassifierMediumCreatesPendingClarification` / `TestIntentRouterReplyResolvesPendingClarificationAndAppends` / `TestIntentRouterNewMessageAutoCancelsPendingClarification` 覆盖创建 / 回复解析 / 自动取消三条路径,`go test ./...` 全绿。当前 TTL 固定 5 分钟,过期由下次 `HandleText` 入口惰性清理。
 - 尚未做真实 vault + LLM approve/apply 闭环验证。
 
 ## 关键文档
@@ -69,15 +70,15 @@ Phase 4B.5 已提升为独立入口层能力：IM Intent Router。它位于 adap
 
 ## 下一步优先级
 
-1. 接入 pending clarification 状态机,处理 `medium` classifier 输出。
-2. 做真实 vault + LLM approve/apply 闭环验证。
+1. 做真实 vault + LLM approve/apply 闭环验证。
+2. 真实 Matrix + DeepSeek 验证 medium clarification 闭环（同 topic / 新 topic 模糊消息）。
 3. （可选）针对 DeepSeek `json_object` 偶发空 content 做一次轻量重试；当前无证据表明频率值得专门兜底。
-4. 根据真实使用反馈扩展 rules-only 短句词表。
+4. 根据真实使用反馈扩展 rules-only 短句词表与 clarification 回复词表。
 
 ## 当前已知限制
 
-- `pending_clarifications` 目前只有表结构，尚未接入运行流程。
-- 小模型 `medium` 输出目前不会生成定向澄清，只会降级为 unclear。
+- clarification 合成目前只覆盖 `raw_capture` + 存在 active bucket 的 `bucket_relation` 模糊场景；其它 medium 情形仍降级为 unclear。
+- clarification reply 不抽取 `additional_payload_text`，澄清回复中携带的新内容会和保存的 `original_message` 一并丢失；rules-only 路径短期不计划实现，hybrid 路径要等 classifier prompt 升级再补。
 - Stage 2 classifier audit jsonl 只记录分类摘要，尚未接入更完整的运行状态观测面板。
 - Natural language approve/reject 只绑定当前 source 下唯一 pending plan；多个 pending plan 时必须回到显式 slash 命令。
 - 图片、文件、多模态 bucket 输入尚未实现。

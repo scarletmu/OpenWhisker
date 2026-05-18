@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/scarletmu/openwhisker/internal/model"
 	"github.com/scarletmu/openwhisker/internal/storage"
@@ -283,6 +284,153 @@ func TestIntentRouterAuditExecutedActionRejectedNoActiveBucket(t *testing.T) {
 	}
 	if event["executed_action"] != "rejected_no_active_bucket" {
 		t.Fatalf("executed_action = %v, want rejected_no_active_bucket; event=%+v", event["executed_action"], event)
+	}
+}
+
+func TestIntentRouterClassifierMediumCreatesPendingClarification(t *testing.T) {
+	service, cleanup := newIntentRouterTestService(t, fakeIntentClassifier{})
+	defer cleanup()
+	if _, err := service.HandleText(context.Background(), AdapterRequest{
+		Adapter:   model.AdapterMatrix,
+		SourceKey: "matrix:room:user",
+		Text:      "记录一下：第一条材料",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	service.intentClassifier = fakeIntentClassifier{
+		result: IntentClassifierResult{
+			Intent:          "raw_capture",
+			Target:          "active_bucket",
+			CaptureAction:   "append",
+			BucketRelation:  "unclear",
+			PayloadText:     "另一段材料",
+			ConfidenceLabel: "medium",
+			Confidence:      0.55,
+		},
+	}
+	response, err := service.HandleText(context.Background(), AdapterRequest{
+		Adapter:   model.AdapterMatrix,
+		SourceKey: "matrix:room:user",
+		Text:      "另一段材料，可能相关",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Status != "clarification_requested" {
+		t.Fatalf("response = %+v, want clarification_requested", response)
+	}
+	for _, want := range []string{"1. 补充到上一组", "2. 新建一组", "3. 取消"} {
+		if !strings.Contains(response.Body, want) {
+			t.Fatalf("response body = %q, missing %q", response.Body, want)
+		}
+	}
+	pending, err := service.store.ActivePendingClarification("matrix:room:user", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("expected pending clarification, got err = %v", err)
+	}
+	if pending.OriginalMessage != "另一段材料，可能相关" {
+		t.Fatalf("original_message = %q, want preserved user text", pending.OriginalMessage)
+	}
+	if len(pending.CandidateActions) != 3 {
+		t.Fatalf("candidates = %+v, want 3", pending.CandidateActions)
+	}
+}
+
+func TestIntentRouterReplyResolvesPendingClarificationAndAppends(t *testing.T) {
+	service, cleanup := newIntentRouterTestService(t, fakeIntentClassifier{})
+	defer cleanup()
+	if _, err := service.HandleText(context.Background(), AdapterRequest{
+		Adapter:   model.AdapterMatrix,
+		SourceKey: "matrix:room:user",
+		Text:      "记录一下：第一条材料",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service.intentClassifier = fakeIntentClassifier{
+		result: IntentClassifierResult{
+			Intent:          "raw_capture",
+			Target:          "active_bucket",
+			CaptureAction:   "append",
+			BucketRelation:  "unclear",
+			ConfidenceLabel: "medium",
+			Confidence:      0.55,
+		},
+	}
+	if _, err := service.HandleText(context.Background(), AdapterRequest{
+		Adapter:   model.AdapterMatrix,
+		SourceKey: "matrix:room:user",
+		Text:      "继续这条线索的另一段",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	service.intentClassifier = fakeIntentClassifier{}
+	response, err := service.HandleText(context.Background(), AdapterRequest{
+		Adapter:   model.AdapterMatrix,
+		SourceKey: "matrix:room:user",
+		Text:      "1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Status != model.JobStatusDone || !strings.Contains(response.Body, "追加当前记录组") {
+		t.Fatalf("reply response = %+v, want bucket append", response)
+	}
+	bucket, err := service.store.ActiveCaptureBucket("matrix:room:user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bucket.AppendCount != 2 {
+		t.Fatalf("append count = %d, want 2 after clarification append", bucket.AppendCount)
+	}
+	if _, err := service.store.ActivePendingClarification("matrix:room:user", time.Now().UTC()); err == nil {
+		t.Fatalf("expected pending clarification resolved, but it still active")
+	}
+}
+
+func TestIntentRouterNewMessageAutoCancelsPendingClarification(t *testing.T) {
+	service, cleanup := newIntentRouterTestService(t, fakeIntentClassifier{})
+	defer cleanup()
+	if _, err := service.HandleText(context.Background(), AdapterRequest{
+		Adapter:   model.AdapterMatrix,
+		SourceKey: "matrix:room:user",
+		Text:      "记录一下：第一条材料",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service.intentClassifier = fakeIntentClassifier{
+		result: IntentClassifierResult{
+			Intent:          "raw_capture",
+			Target:          "active_bucket",
+			CaptureAction:   "append",
+			BucketRelation:  "unclear",
+			ConfidenceLabel: "medium",
+			Confidence:      0.55,
+		},
+	}
+	if _, err := service.HandleText(context.Background(), AdapterRequest{
+		Adapter:   model.AdapterMatrix,
+		SourceKey: "matrix:room:user",
+		Text:      "可能相关的另一段",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	service.intentClassifier = fakeIntentClassifier{}
+	response, err := service.HandleText(context.Background(), AdapterRequest{
+		Adapter:   model.AdapterMatrix,
+		SourceKey: "matrix:room:user",
+		Text:      "结束记录",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(response.Body, "结束当前记录组") {
+		t.Fatalf("response = %+v, want bucket close after auto-cancel", response)
+	}
+	if _, err := service.store.ActivePendingClarification("matrix:room:user", time.Now().UTC()); err == nil {
+		t.Fatalf("expected pending clarification auto-cancelled, but still active")
 	}
 }
 

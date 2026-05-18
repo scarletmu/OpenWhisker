@@ -292,6 +292,8 @@ bucket id 不是任意文件入口，只能指向系统自己创建的 Raw/Inbox
 
 ## Pending clarification
 
+实现状态 (2026-05-18)：已落地最小可用闭环。Stage 2 classifier 在 `confidence_label=medium` 且当前 source 存在 active bucket 时，由 OW 客户端合成 `bucket_relation` 候选（"补充到上一组" / "新建一组" / "取消"）并写入 `pending_clarifications`；IM 端返回带数字编号的中文提示。Router 入口先 lazy expire 已超期 clarification，再依次尝试规则匹配数字 / 候选短语 / 取消词，命中即以保存的 `original_message` 套用所选动作并将 clarification 标记为 `resolved`；新消息不像澄清回复则自动 `cancelled` 旧 clarification，新消息走完整 rules + classifier 流程。`additional_payload_text` 抽取尚未接入。
+
 当 Router 不能安全判断，但存在候选动作时，创建短期 clarification 状态。
 
 默认 TTL：

@@ -1,6 +1,6 @@
 # IM Intent Router 架构规格
 
-状态：partial implementation。Stage 1 rules-only 入口、`source_key` 绑定、Matrix 接入、source-scoped approval guard、raw bucket append metadata rewrite、intent-triggered create/organize/approve/reject outbox suppression、Stage 2 OpenAI-compatible classifier 骨架和 intent audit jsonl 已落代码；pending clarification 状态机未实现。
+状态：partial implementation。Stage 1 rules-only 入口、`source_key` 绑定、Matrix 接入、source-scoped approval guard、raw bucket append metadata rewrite、intent-triggered create/organize/approve/reject outbox suppression、Stage 2 OpenAI-compatible classifier、intent audit jsonl，以及 `medium` 触发的 pending clarification 状态机（创建 / 数字+短语规则匹配回复 / 新消息自动 cancel / 5 分钟 TTL 惰性 expire）已落代码；澄清回复抽取 `additional_payload_text` 尚未实现。
 
 本文定义 OpenWhisker 的通用 IM Intent Router 边界。它是 adapter 入站消息和 Core Adapter API 之间的中间件，用于把自然语言入口归一化成受控结构化意图。
 

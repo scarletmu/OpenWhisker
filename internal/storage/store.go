@@ -508,6 +508,75 @@ LIMIT 20`, model.PlanStatusAwaitingApproval, sourceKey)
 	return plans, nil
 }
 
+func (s *Store) SavePendingClarification(c model.PendingClarification) error {
+	candidates, err := json.Marshal(c.CandidateActions)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`
+INSERT INTO pending_clarifications (
+  clarification_id, source_key, question_type, original_message, original_received_at,
+  candidate_actions_json, status, created_at, expires_at, resolved_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		c.ID, c.SourceKey, c.QuestionType, c.OriginalMessage, formatTime(c.OriginalReceivedAt),
+		string(candidates), c.Status, formatTime(c.CreatedAt), formatTime(c.ExpiresAt),
+		nullableTime(c.ResolvedAt))
+	return err
+}
+
+func (s *Store) ActivePendingClarification(sourceKey string, now time.Time) (model.PendingClarification, error) {
+	return s.scanPendingClarification(s.db.QueryRow(`
+SELECT clarification_id, source_key, question_type, original_message, original_received_at,
+  candidate_actions_json, status, created_at, expires_at, resolved_at
+FROM pending_clarifications
+WHERE source_key = ? AND status = ? AND expires_at > ?
+ORDER BY created_at DESC
+LIMIT 1`, sourceKey, model.PendingClarificationStatusPending, formatTime(now)))
+}
+
+func (s *Store) UpdatePendingClarificationStatus(id, status string, resolvedAt time.Time) error {
+	_, err := s.db.Exec(`
+UPDATE pending_clarifications
+SET status = ?, resolved_at = ?
+WHERE clarification_id = ?`, status, formatTime(resolvedAt), id)
+	return err
+}
+
+func (s *Store) ExpirePendingClarifications(sourceKey string, now time.Time) (int64, error) {
+	result, err := s.db.Exec(`
+UPDATE pending_clarifications
+SET status = ?, resolved_at = ?
+WHERE source_key = ? AND status = ? AND expires_at <= ?`,
+		model.PendingClarificationStatusExpired, formatTime(now), sourceKey,
+		model.PendingClarificationStatusPending, formatTime(now))
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+func (s *Store) scanPendingClarification(row planScanner) (model.PendingClarification, error) {
+	var c model.PendingClarification
+	var receivedAt, createdAt, expiresAt string
+	var resolvedAt sql.NullString
+	var candidatesJSON string
+	err := row.Scan(&c.ID, &c.SourceKey, &c.QuestionType, &c.OriginalMessage, &receivedAt,
+		&candidatesJSON, &c.Status, &createdAt, &expiresAt, &resolvedAt)
+	if err != nil {
+		return model.PendingClarification{}, err
+	}
+	if candidatesJSON != "" {
+		if err := json.Unmarshal([]byte(candidatesJSON), &c.CandidateActions); err != nil {
+			return model.PendingClarification{}, err
+		}
+	}
+	c.OriginalReceivedAt = parseTime(receivedAt)
+	c.CreatedAt = parseTime(createdAt)
+	c.ExpiresAt = parseTime(expiresAt)
+	c.ResolvedAt = parseNullableTime(resolvedAt)
+	return c, nil
+}
+
 func (s *Store) scanCaptureBucket(row planScanner) (model.CaptureBucket, error) {
 	var bucket model.CaptureBucket
 	var startedAt, updatedAt, expiresAt string
