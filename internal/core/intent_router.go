@@ -19,6 +19,21 @@ const (
 	intentRouterModeOff    = "off"
 )
 
+const (
+	intentExecutedCreated                  = "created"
+	intentExecutedAppended                 = "appended"
+	intentExecutedClosed                   = "closed"
+	intentExecutedOrganizedPendingApproval = "organized_pending_approval"
+	intentExecutedDiffShown                = "diff_shown"
+	intentExecutedApproved                 = "approved"
+	intentExecutedPlanRejected             = "plan_rejected"
+	intentExecutedRejectedNoActiveBucket   = "rejected_no_active_bucket"
+	intentExecutedRejectedNoPendingPlan    = "rejected_no_pending_plan"
+	intentExecutedRejectedAmbiguousPlan    = "rejected_ambiguous_pending_plan"
+	intentExecutedNotExecuted              = "not_executed"
+	intentExecutedFailed                   = "failed"
+)
+
 type intentRuleResult struct {
 	intent        string
 	displayAction string
@@ -40,87 +55,134 @@ type intentAuditEvent struct {
 	Confidence      float64   `json:"confidence,omitempty"`
 	AcceptedIntent  string    `json:"accepted_intent,omitempty"`
 	Accepted        bool      `json:"accepted"`
+	ExecutedAction  string    `json:"executed_action,omitempty"`
 	Error           string    `json:"error,omitempty"`
 }
 
+type intentClassification struct {
+	result intentRuleResult
+	audit  intentAuditEvent
+}
+
 func (s AdapterService) handleIntentText(ctx context.Context, req AdapterRequest) (AdapterResponse, error) {
-	result := s.classifyIntent(ctx, req)
+	classification := s.classifyIntent(ctx, req)
+	response, executedAction, err := s.dispatchIntent(ctx, req, classification.result)
+	classification.audit.ExecutedAction = executedAction
+	if err != nil && classification.audit.Error == "" {
+		classification.audit.Error = err.Error()
+	}
+	s.writeIntentAudit(classification.audit)
+	return response, err
+}
+
+func (s AdapterService) dispatchIntent(ctx context.Context, req AdapterRequest, result intentRuleResult) (AdapterResponse, string, error) {
 	switch result.intent {
 	case "raw_create":
-		return s.handleIntentRawCreate(ctx, req, result)
+		resp, err := s.handleIntentRawCreate(ctx, req, result)
+		if err != nil {
+			return resp, intentExecutedFailed, err
+		}
+		return resp, intentExecutedCreated, nil
 	case "raw_append":
-		return s.handleIntentRawAppend(ctx, req, result)
+		resp, err := s.handleIntentRawAppend(ctx, req, result)
+		if err != nil {
+			return resp, intentExecutedFailed, err
+		}
+		if resp.Status == "no_active_bucket" {
+			return resp, intentExecutedRejectedNoActiveBucket, nil
+		}
+		return resp, intentExecutedAppended, nil
 	case "raw_close":
-		return s.handleIntentRawClose(req, result)
+		resp, err := s.handleIntentRawClose(req, result)
+		if err != nil {
+			return resp, intentExecutedFailed, err
+		}
+		if resp.Status == "no_active_bucket" {
+			return resp, intentExecutedRejectedNoActiveBucket, nil
+		}
+		return resp, intentExecutedClosed, nil
 	case "organize":
-		return s.handleIntentOrganize(ctx, req, result)
+		resp, err := s.handleIntentOrganize(ctx, req, result)
+		if err != nil {
+			return resp, intentExecutedFailed, err
+		}
+		return resp, intentExecutedOrganizedPendingApproval, nil
 	case "diff":
-		return s.handleIntentDiff(result, req.SourceKey)
+		resp, err := s.handleIntentDiff(result, req.SourceKey)
+		if err != nil {
+			return resp, intentExecutedFailed, err
+		}
+		switch resp.Status {
+		case "no_pending_plan":
+			return resp, intentExecutedRejectedNoPendingPlan, nil
+		case "ambiguous_pending_plan":
+			return resp, intentExecutedRejectedAmbiguousPlan, nil
+		}
+		return resp, intentExecutedDiffShown, nil
 	case "approve":
-		return s.handleIntentApprove(ctx, result, req.SourceKey)
+		resp, err := s.handleIntentApprove(ctx, result, req.SourceKey)
+		if err != nil {
+			return resp, intentExecutedFailed, err
+		}
+		switch resp.Status {
+		case "no_pending_plan":
+			return resp, intentExecutedRejectedNoPendingPlan, nil
+		case "ambiguous_pending_plan":
+			return resp, intentExecutedRejectedAmbiguousPlan, nil
+		}
+		return resp, intentExecutedApproved, nil
 	case "reject":
-		return s.handleIntentReject(result, req.SourceKey)
+		resp, err := s.handleIntentReject(result, req.SourceKey)
+		if err != nil {
+			return resp, intentExecutedFailed, err
+		}
+		switch resp.Status {
+		case "no_pending_plan":
+			return resp, intentExecutedRejectedNoPendingPlan, nil
+		case "ambiguous_pending_plan":
+			return resp, intentExecutedRejectedAmbiguousPlan, nil
+		}
+		return resp, intentExecutedPlanRejected, nil
 	default:
 		return AdapterResponse{
 			Status: "unclear",
 			Body:   "无法安全判断这条消息要记录、整理还是审批；未写入 Raw，也未执行任何计划。请使用“记录一下：...”或 slash 命令。",
-		}, nil
+		}, intentExecutedNotExecuted, nil
 	}
 }
 
-func (s AdapterService) classifyIntent(ctx context.Context, req AdapterRequest) intentRuleResult {
+func (s AdapterService) classifyIntent(ctx context.Context, req AdapterRequest) intentClassification {
+	audit := intentAuditEvent{
+		TS:         s.now(),
+		Mode:       s.intentRouterMode,
+		SourceKind: adapterSourceKind(req.Adapter),
+	}
 	result := classifyIntentRules(req.Text)
+	audit.RulesIntent = result.intent
 	if result.intent != "" && result.intent != "unclear" {
-		s.writeIntentAudit(intentAuditEvent{
-			TS:             s.now(),
-			Mode:           s.intentRouterMode,
-			SourceKind:     adapterSourceKind(req.Adapter),
-			RulesIntent:    result.intent,
-			AcceptedIntent: result.intent,
-			Accepted:       true,
-		})
-		return result
+		audit.AcceptedIntent = result.intent
+		audit.Accepted = true
+		return intentClassification{result: result, audit: audit}
 	}
 	if s.intentRouterMode != intentRouterModeHybrid || s.intentClassifier == nil {
-		s.writeIntentAudit(intentAuditEvent{
-			TS:          s.now(),
-			Mode:        s.intentRouterMode,
-			SourceKind:  adapterSourceKind(req.Adapter),
-			RulesIntent: result.intent,
-			Accepted:    false,
-		})
-		return result
+		return intentClassification{result: result, audit: audit}
 	}
+	audit.ClassifierUsed = true
 	classified, err := s.intentClassifier.ClassifyIntent(ctx, s.intentClassifierRequest(req))
 	if err != nil {
-		s.writeIntentAudit(intentAuditEvent{
-			TS:             s.now(),
-			Mode:           s.intentRouterMode,
-			SourceKind:     adapterSourceKind(req.Adapter),
-			RulesIntent:    result.intent,
-			ClassifierUsed: true,
-			Accepted:       false,
-			Error:          err.Error(),
-		})
-		return result
+		audit.Error = err.Error()
+		return intentClassification{result: result, audit: audit}
 	}
 	mapped := s.modelIntentToRuleResult(req, classified)
-	s.writeIntentAudit(intentAuditEvent{
-		TS:              s.now(),
-		Mode:            s.intentRouterMode,
-		SourceKind:      adapterSourceKind(req.Adapter),
-		RulesIntent:     result.intent,
-		ClassifierUsed:  true,
-		ModelIntent:     classified.Intent,
-		Target:          classified.Target,
-		CaptureAction:   classified.CaptureAction,
-		BucketRelation:  classified.BucketRelation,
-		ConfidenceLabel: classified.ConfidenceLabel,
-		Confidence:      classified.Confidence,
-		AcceptedIntent:  mapped.intent,
-		Accepted:        mapped.intent != "",
-	})
-	return mapped
+	audit.ModelIntent = classified.Intent
+	audit.Target = classified.Target
+	audit.CaptureAction = classified.CaptureAction
+	audit.BucketRelation = classified.BucketRelation
+	audit.ConfidenceLabel = classified.ConfidenceLabel
+	audit.Confidence = classified.Confidence
+	audit.AcceptedIntent = mapped.intent
+	audit.Accepted = mapped.intent != ""
+	return intentClassification{result: mapped, audit: audit}
 }
 
 func (s AdapterService) intentClassifierRequest(req AdapterRequest) IntentClassifierRequest {

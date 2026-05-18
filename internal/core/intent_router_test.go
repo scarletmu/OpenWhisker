@@ -237,11 +237,52 @@ func TestIntentRouterWritesPrivacySafeAuditJSONL(t *testing.T) {
 	if event["classifier_used"] != true || event["accepted_intent"] != "raw_create" {
 		t.Fatalf("audit event = %+v, want accepted classifier result", event)
 	}
+	if event["executed_action"] != "created" {
+		t.Fatalf("audit event executed_action = %v, want created", event["executed_action"])
+	}
 	if _, ok := event["source_key"]; ok {
 		t.Fatalf("audit event leaks source_key: %+v", event)
 	}
 	if _, ok := event["message"]; ok {
 		t.Fatalf("audit event leaks message text: %+v", event)
+	}
+}
+
+func TestIntentRouterAuditExecutedActionRejectedNoActiveBucket(t *testing.T) {
+	service, cleanup := newIntentRouterTestService(t, fakeIntentClassifier{})
+	defer cleanup()
+	auditPath := filepath.Join(t.TempDir(), "intent-router.jsonl")
+	t.Setenv("OPENWHISKER_INTENT_AUDIT_FILE", auditPath)
+
+	// Rules-driven raw_append with no active bucket: dispatcher reaches
+	// handleIntentRawAppend which returns no_active_bucket status. The audit row
+	// should record accepted=true (router adopted the intent) but
+	// executed_action=rejected_no_active_bucket (handler refused to write).
+	if _, err := service.HandleText(context.Background(), AdapterRequest{
+		Adapter:   model.AdapterMatrix,
+		SourceKey: "matrix:room:user",
+		Text:      "补充：第一条补充",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("audit lines = %d, want 1; lines=%v", len(lines), lines)
+	}
+	var event map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &event); err != nil {
+		t.Fatal(err)
+	}
+	if event["accepted"] != true || event["accepted_intent"] != "raw_append" {
+		t.Fatalf("audit event = %+v, want accepted raw_append", event)
+	}
+	if event["executed_action"] != "rejected_no_active_bucket" {
+		t.Fatalf("executed_action = %v, want rejected_no_active_bucket; event=%+v", event["executed_action"], event)
 	}
 }
 

@@ -4,6 +4,8 @@
 
 实现备注（2026-05-18）：classifier 请求体使用 `response_format: {"type": "json_object"}`，不依赖 OpenAI 的 strict `json_schema` 类型，以兼容 DeepSeek 等仅支持 `json_object` 的 OpenAI-compatible 端点。enum 与字段约束放在 system prompt 显式声明，并依赖客户端 `validateIntentClassifierOutput` 做硬校验；非法 enum / 缺字段 / 非法 JSON 仍按下文"Invalid output handling"降级。Core hard guard 不受影响，仍是最外层兜底。
 
+实现备注 (2026-05-18, audit executed_action)：audit 行新增 `executed_action` 字段,在 handler 返回后填入,反映 executor 实际结果而非 router 采纳决策。`accepted=true && executed_action=rejected_*` 表示 router 采纳意图但 deterministic guard / handler 拒绝执行。枚举完整列表见 "Audit executed_action" 一节。
+
 本文定义 Phase 4B.5 Intent Router 使用的小模型 contract。小模型只用于入口意图识别和 bucket 关系判断，不参与知识组织和 vault 写入。
 
 ## 配置
@@ -224,6 +226,29 @@ missing confidence_label -> unclear
 missing required field -> unclear
 model timeout/error -> fallback to rules result if any, else unclear
 ```
+
+## Audit executed_action
+
+`accepted_intent` 表示 router 采纳了哪个意图,不表示 executor 实际写入了 vault。例如分类器返回合法的 `raw_append` + `same_topic` + `high`,router 采纳但运行时 active bucket 已不存在,append handler 仍会返回 `no_active_bucket`,此时 audit 行 `accepted=true` 但实际未写入。
+
+为了让 audit 反映执行结果,每条 audit 在 handler 返回后写入 `executed_action`,枚举范围:
+
+```text
+created                        - raw_create handler 成功写入 vault
+appended                       - raw_append handler 成功追加 active bucket
+closed                         - raw_close handler 成功关闭 active bucket
+organized_pending_approval     - organize handler 生成 plan,等待审批
+diff_shown                     - diff handler 展示当前 source 唯一 plan diff
+approved                       - approve handler 应用了 plan
+plan_rejected                  - reject handler 拒绝了 plan
+rejected_no_active_bucket      - raw_append / raw_close handler 因无 active bucket 拒绝
+rejected_no_pending_plan       - diff / approve / reject 因 source 无 pending plan 拒绝
+rejected_ambiguous_pending_plan- diff / approve / reject 因 source 有多个 pending plan 拒绝
+not_executed                   - intent 未被采纳(unclear / 分类器低置信度 / 缺 active bucket guard 等),无 handler 运行
+failed                         - handler 返回 error
+```
+
+每次 `HandleText` 只写入一行 audit,在 handler 返回后一次性附加 `executed_action`,不重复写入分类摘要。`accepted` / `accepted_intent` 仍保留旧语义,与 `executed_action` 联合解读:`accepted=true && executed_action=appended` 是成功路径;`accepted=true && executed_action=rejected_*` 表示 router 采纳了意图但 deterministic guard / handler 拒绝了执行。
 
 ## Clarification
 

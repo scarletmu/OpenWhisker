@@ -55,7 +55,7 @@ Phase 4B.5 已提升为独立入口层能力：IM Intent Router。它位于 adap
   - 随后切换到 DeepSeek (`https://api.deepseek.com/v1`) 作为 classifier 端点时暴露出 protocol-level 不兼容：DeepSeek 仅支持 `response_format: {"type":"json_object"}`，对 OpenAI 的 `json_schema` 直接返回 `400 invalid_request_error: "This response_format type is unavailable now"`。考虑到 DeepSeek 是 OpenWhisker 的官方目标 provider，classifier 改为 `json_object` 模式 + 客户端 `validateIntentClassifierOutput` 硬校验（详见 `docs/architecture/intent-router-model-contract.md` 实现备注 2026-05-18），Core hard guard 保持不变。
   - 切换后取得首条成功 round-trip：audit 行 `model_intent=raw_capture, target=active_bucket, capture_action=append, bucket_relation=same_topic, confidence_label=high, confidence=0.95, accepted_intent=raw_append, accepted=true`，证明 Matrix → adapter → intent router → DeepSeek classifier → audit 全链路打通。
   - 已知 DeepSeek `json_object` 偶发返回空 `content`（官方文档列为 known issue），目前由 classifier 当作普通失败写入 audit 并按 `unclear` 降级，未做重试，符合"先暴露后决策"原则。
-- audit 字段语义遗留：当前 `accepted=true` 仅表示 classifier 输出结构合法并被路由器采纳，并不代表 executor 实际写入 vault（例如 bucket 已过期会被 append hard guard 拦截但 audit 仍为 accepted）。后续若需要在 audit 反映执行结果，需要新增 `executed_action`/`operation_outcome` 字段并同步更新合同文档。
+- 2026-05-18 已为 audit 加入 `executed_action` 字段,区分"router 采纳的意图"与"executor 实际结果"。枚举见 `docs/architecture/intent-router-model-contract.md#audit-executed_action`:`created` / `appended` / `closed` / `organized_pending_approval` / `diff_shown` / `approved` / `plan_rejected` 表示 handler 成功;`rejected_no_active_bucket` / `rejected_no_pending_plan` / `rejected_ambiguous_pending_plan` 表示 handler 拒绝;`not_executed` / `failed` 覆盖未采纳和异常路径。每次 `HandleText` 仍只写一行 audit,在 handler 返回后填入。单测 `TestIntentRouterAuditExecutedActionRejectedNoActiveBucket` 覆盖 accepted=true 但 handler 拒绝的关键场景,`go test ./...` 全绿。
 - 尚未做真实 vault + LLM approve/apply 闭环验证。
 
 ## 关键文档
@@ -69,11 +69,10 @@ Phase 4B.5 已提升为独立入口层能力：IM Intent Router。它位于 adap
 
 ## 下一步优先级
 
-1. 区分 audit `accepted_intent` 与 executor 实际结果：评估加入 `executed_action`（例如 `appended` / `created` / `rejected_expired_bucket` / `rejected_no_active_bucket`）并同步更新 `intent-router-model-contract.md` Invalid output handling 一节。
-2. 接入 pending clarification 状态机，处理 `medium` classifier 输出。
-3. 做真实 vault + LLM approve/apply 闭环验证。
-4. （可选）针对 DeepSeek `json_object` 偶发空 content 做一次轻量重试；当前无证据表明频率值得专门兜底。
-5. 根据真实使用反馈扩展 rules-only 短句词表。
+1. 接入 pending clarification 状态机,处理 `medium` classifier 输出。
+2. 做真实 vault + LLM approve/apply 闭环验证。
+3. （可选）针对 DeepSeek `json_object` 偶发空 content 做一次轻量重试；当前无证据表明频率值得专门兜底。
+4. 根据真实使用反馈扩展 rules-only 短句词表。
 
 ## 当前已知限制
 
