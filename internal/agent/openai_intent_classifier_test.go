@@ -73,6 +73,60 @@ func TestOpenAIIntentClassifierBuildsMinimalStructuredRequest(t *testing.T) {
 	}
 }
 
+func TestOpenAIIntentClassifierRetriesOnceOnEmptyContent(t *testing.T) {
+	client := &sequenceCompatibleClient{outputs: []string{
+		"",
+		`{
+			"intent": "raw_capture",
+			"target": "active_bucket",
+			"capture_action": "append",
+			"bucket_relation": "same_topic",
+			"payload_text": "ok",
+			"additional_payload_text": "",
+			"confidence_label": "high",
+			"confidence": 0.9,
+			"reason": "ok"
+		}`,
+	}}
+
+	result, err := (OpenAIIntentClassifier{Client: client}).ClassifyIntent(context.Background(), core.IntentClassifierRequest{Message: "hi"})
+	if err != nil {
+		t.Fatalf("ClassifyIntent err = %v, want success after retry", err)
+	}
+	if client.calls != 2 {
+		t.Fatalf("client.calls = %d, want exactly 2", client.calls)
+	}
+	if result.Intent != "raw_capture" || result.ConfidenceLabel != "high" {
+		t.Fatalf("result = %+v, want valid raw_capture/high", result)
+	}
+}
+
+func TestOpenAIIntentClassifierFailsAfterTwoEmptyContents(t *testing.T) {
+	client := &sequenceCompatibleClient{outputs: []string{"", "   "}}
+
+	_, err := (OpenAIIntentClassifier{Client: client}).ClassifyIntent(context.Background(), core.IntentClassifierRequest{Message: "hi"})
+	if err == nil || !strings.Contains(err.Error(), "empty content after one retry") {
+		t.Fatalf("err = %v, want empty-content-after-retry error", err)
+	}
+	if client.calls != 2 {
+		t.Fatalf("client.calls = %d, want exactly 2", client.calls)
+	}
+}
+
+type sequenceCompatibleClient struct {
+	outputs []string
+	calls   int
+}
+
+func (c *sequenceCompatibleClient) CreateResponse(_ context.Context, _ openAIResponseRequest) (string, error) {
+	if c.calls >= len(c.outputs) {
+		return "", nil
+	}
+	out := c.outputs[c.calls]
+	c.calls++
+	return out, nil
+}
+
 func TestOpenAIIntentClassifierRejectsInvalidStructuredOutput(t *testing.T) {
 	client := &fakeCompatibleClient{output: `{
 		"intent": "shell_command",

@@ -292,7 +292,7 @@ func matchClarificationReply(text string, pending model.PendingClarification) (m
 		}
 	}
 	lower := strings.ToLower(trimmed)
-	if exactAny(lower, "取消", "算了", "cancel", "不用", "都不要") {
+	if exactAny(lower, "取消", "算了", "cancel", "不用", "都不要", "都不用", "都不写", "先不处理") {
 		return model.CandidateAction{Action: model.ClarificationActionCancel, Label: "取消"}, model.ClarificationActionCancel, true
 	}
 	for _, c := range pending.CandidateActions {
@@ -304,8 +304,19 @@ func matchClarificationReply(text string, pending model.PendingClarification) (m
 }
 
 func parseCandidateNumber(text string) (int, bool) {
-	stripped := strings.TrimRight(text, ".．、 ")
-	switch stripped {
+	t := strings.TrimSpace(text)
+	const punctuation = ".．、 。,，:：;；!！?？)）】]"
+	const openers = "(（[【"
+	t = strings.Trim(t, punctuation)
+	t = strings.TrimLeft(t, openers)
+	for _, prefix := range []string{"我选", "选项", "选", "要", "第"} {
+		if after, ok := strings.CutPrefix(t, prefix); ok {
+			t = strings.TrimSpace(after)
+			break
+		}
+	}
+	t = strings.Trim(t, punctuation)
+	switch t {
 	case "1", "①", "一":
 		return 1, true
 	case "2", "②", "二":
@@ -321,11 +332,19 @@ func parseCandidateNumber(text string) (int, bool) {
 func labelMatchesReply(text string, c model.CandidateAction) bool {
 	switch c.Action {
 	case model.ClarificationActionRawAppend:
-		return exactAny(text, "补充", "并入", "加上去", "加到上一组", "补到上一组")
+		return exactAny(text,
+			"补充", "补充上", "并入", "加上", "加上去",
+			"加到上一组", "补到上一组", "加进上一组",
+			"合并", "接着上一组", "续上", "接着上面",
+		)
 	case model.ClarificationActionRawCreate:
-		return exactAny(text, "新建", "新建一组", "另开", "另起一组", "新开一组")
+		return exactAny(text,
+			"新建", "新建一组", "新的一组",
+			"另开", "另开一组", "另起", "另起一组",
+			"新开", "新开一组", "单独一组", "单独开一组",
+		)
 	case model.ClarificationActionCancel:
-		return exactAny(text, "取消", "算了", "都不要")
+		return exactAny(text, "取消", "算了", "都不要", "都不用", "都不写", "先不处理")
 	}
 	return false
 }
@@ -337,21 +356,22 @@ func (s AdapterService) synthesizeClarification(req AdapterRequest, classified I
 	if len(req.Text) > model.PendingClarificationOriginalMax {
 		return clarificationProposal{}, false
 	}
+	if classified.Intent != "raw_capture" {
+		return clarificationProposal{}, false
+	}
 	bucket, hasActive, err := s.activeBucket(req.SourceKey)
 	if err != nil {
 		return clarificationProposal{}, false
 	}
-	if classified.Intent != "raw_capture" {
-		return clarificationProposal{}, false
+	activeBucket := hasActive && bucket.Status == model.CaptureBucketStatusActive
+	candidates := []model.CandidateAction{}
+	if activeBucket {
+		candidates = append(candidates, model.CandidateAction{Action: model.ClarificationActionRawAppend, Label: "补充到上一组"})
 	}
-	if !hasActive || bucket.Status != model.CaptureBucketStatusActive {
-		return clarificationProposal{}, false
-	}
-	candidates := []model.CandidateAction{
-		{Action: model.ClarificationActionRawAppend, Label: "补充到上一组"},
-		{Action: model.ClarificationActionRawCreate, Label: "新建一组"},
-		{Action: model.ClarificationActionCancel, Label: "取消"},
-	}
+	candidates = append(candidates,
+		model.CandidateAction{Action: model.ClarificationActionRawCreate, Label: "新建一组"},
+		model.CandidateAction{Action: model.ClarificationActionCancel, Label: "取消"},
+	)
 	return clarificationProposal{
 		questionType: model.ClarificationQuestionBucketRelation,
 		candidates:   candidates,
@@ -653,29 +673,60 @@ func (s AdapterService) resolveUniquePendingPlan(sourceKey, action string) (mode
 
 func classifyIntentRules(text string) intentRuleResult {
 	trimmed := strings.TrimSpace(text)
-	if payload, ok := stripIntentPrefix(trimmed, []string{"记录一下：", "记录一下:", "开始记录：", "开始记录:", "帮我收一下这个材料：", "帮我收一下这个材料:"}); ok {
+	if payload, ok := stripIntentPrefix(trimmed, []string{
+		"记录一下：", "记录一下:",
+		"开始记录：", "开始记录:",
+		"帮我收一下这个材料：", "帮我收一下这个材料:",
+		"记一下：", "记一下:",
+		"写下来：", "写下来:",
+		"存一下：", "存一下:",
+		"记下：", "记下:",
+	}); ok {
 		return intentRuleResult{intent: "raw_create", displayAction: "创建当前记录组", payload: payload}
 	}
-	if payload, ok := stripIntentPrefix(trimmed, []string{"补充：", "补充:", "继续：", "继续:", "还有：", "还有:"}); ok {
+	if payload, ok := stripIntentPrefix(trimmed, []string{
+		"补充：", "补充:",
+		"继续：", "继续:",
+		"还有：", "还有:",
+		"再加：", "再加:",
+		"再补充：", "再补充:",
+		"后面还有：", "后面还有:",
+		"另外：", "另外:",
+	}); ok {
 		return intentRuleResult{intent: "raw_append", displayAction: "追加当前记录组", payload: payload}
 	}
-	if exactAny(trimmed, "结束记录", "这组结束", "先到这里") {
+	if exactAny(trimmed,
+		"结束记录", "这组结束", "先到这里",
+		"结束这组", "到这里", "就这些", "先这些",
+	) {
 		return intentRuleResult{intent: "raw_close", displayAction: "结束当前记录组"}
 	}
-	if exactAny(trimmed, "整理刚才", "处理这组", "整理这组", "处理刚才") {
+	if exactAny(trimmed,
+		"整理刚才", "处理这组", "整理这组", "处理刚才",
+		"整理一下", "处理一下", "组织一下",
+	) {
 		return intentRuleResult{intent: "organize", displayAction: "整理当前记录组", target: "active"}
 	}
-	if exactAny(trimmed, "处理今天", "整理今天") {
+	if exactAny(trimmed, "处理今天", "整理今天", "整理今天的", "处理今天的") {
 		return intentRuleResult{intent: "organize", displayAction: "整理今天当前 source 的 Raw", target: "today"}
 	}
-	if exactAny(trimmed, "预览一下", "预览", "看看diff", "diff") {
+	if exactAny(strings.ToLower(trimmed),
+		"预览一下", "预览", "看看diff", "diff",
+		"看一下", "看看", "看下", "看一下 diff", "看看 diff", "看下 diff",
+	) {
 		return intentRuleResult{intent: "diff", displayAction: "预览当前 plan"}
 	}
-	if exactAny(strings.ToLower(trimmed), "写进去", "确认写入", "批准", "批准这个", "approve", "apply") {
+	if exactAny(strings.ToLower(trimmed),
+		"写进去", "确认写入", "批准", "批准这个", "approve", "apply",
+		"同意", "确认", "通过", "可以写", "写吧",
+	) {
 		return intentRuleResult{intent: "approve", displayAction: "批准当前 plan"}
 	}
 	lower := strings.ToLower(trimmed)
-	if exactAny(lower, "先不写", "不写", "不要写", "拒绝", "reject", "这版不行") {
+	if exactAny(lower,
+		"先不写", "不写", "不要写", "拒绝", "reject", "这版不行",
+		"驳回", "撤回", "这版重来", "这版不要",
+	) {
 		return intentRuleResult{intent: "reject", displayAction: "拒绝当前 plan"}
 	}
 	return intentRuleResult{}

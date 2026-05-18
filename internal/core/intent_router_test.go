@@ -337,6 +337,92 @@ func TestIntentRouterClassifierMediumCreatesPendingClarification(t *testing.T) {
 	}
 }
 
+func TestIntentRouterClassifierMediumWithoutActiveBucketOffersTwoCandidates(t *testing.T) {
+	service, cleanup := newIntentRouterTestService(t, fakeIntentClassifier{
+		result: IntentClassifierResult{
+			Intent:          "raw_capture",
+			Target:          "new_bucket",
+			CaptureAction:   "create",
+			BucketRelation:  "unclear",
+			PayloadText:     "可能是要记录",
+			ConfidenceLabel: "medium",
+			Confidence:      0.5,
+		},
+	})
+	defer cleanup()
+
+	response, err := service.HandleText(context.Background(), AdapterRequest{
+		Adapter:   model.AdapterMatrix,
+		SourceKey: "matrix:room:user",
+		Text:      "这句话也许该记录下来",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Status != "clarification_requested" {
+		t.Fatalf("response = %+v, want clarification_requested", response)
+	}
+	if !strings.Contains(response.Body, "1. 新建一组") || !strings.Contains(response.Body, "2. 取消") {
+		t.Fatalf("response body = %q, want 2 candidates (new/cancel)", response.Body)
+	}
+	if strings.Contains(response.Body, "补充到上一组") {
+		t.Fatalf("response body = %q, must not offer append without active bucket", response.Body)
+	}
+	pending, err := service.store.ActivePendingClarification("matrix:room:user", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("expected pending clarification, got err = %v", err)
+	}
+	if len(pending.CandidateActions) != 2 {
+		t.Fatalf("candidates = %+v, want 2", pending.CandidateActions)
+	}
+	if pending.CandidateActions[0].Action != model.ClarificationActionRawCreate ||
+		pending.CandidateActions[1].Action != model.ClarificationActionCancel {
+		t.Fatalf("candidates = %+v, want [raw_create, cancel]", pending.CandidateActions)
+	}
+}
+
+func TestIntentRouterClarificationReplyCreatesBucketWhenNoActiveBucket(t *testing.T) {
+	service, cleanup := newIntentRouterTestService(t, fakeIntentClassifier{
+		result: IntentClassifierResult{
+			Intent:          "raw_capture",
+			Target:          "new_bucket",
+			CaptureAction:   "create",
+			BucketRelation:  "unclear",
+			ConfidenceLabel: "medium",
+			Confidence:      0.5,
+		},
+	})
+	defer cleanup()
+
+	if _, err := service.HandleText(context.Background(), AdapterRequest{
+		Adapter:   model.AdapterMatrix,
+		SourceKey: "matrix:room:user",
+		Text:      "也许该记下这一段",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	service.intentClassifier = fakeIntentClassifier{}
+	response, err := service.HandleText(context.Background(), AdapterRequest{
+		Adapter:   model.AdapterMatrix,
+		SourceKey: "matrix:room:user",
+		Text:      "1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Status != model.JobStatusDone || !strings.Contains(response.Body, "创建当前记录组") {
+		t.Fatalf("reply response = %+v, want bucket create", response)
+	}
+	bucket, err := service.store.ActiveCaptureBucket("matrix:room:user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bucket.AppendCount != 1 {
+		t.Fatalf("append count = %d, want 1 for fresh create", bucket.AppendCount)
+	}
+}
+
 func TestIntentRouterReplyResolvesPendingClarificationAndAppends(t *testing.T) {
 	service, cleanup := newIntentRouterTestService(t, fakeIntentClassifier{})
 	defer cleanup()
@@ -464,4 +550,179 @@ type fakeIntentClassifier struct {
 
 func (c fakeIntentClassifier) ClassifyIntent(context.Context, IntentClassifierRequest) (IntentClassifierResult, error) {
 	return c.result, c.err
+}
+
+func TestClassifyIntentRulesCoversCommonPhrasings(t *testing.T) {
+	type expect struct {
+		intent  string
+		payload string
+		target  string
+	}
+	cases := map[string]expect{
+		"记一下：今天的灵感": {intent: "raw_create", payload: "今天的灵感"},
+		"写下来：一个想法":  {intent: "raw_create", payload: "一个想法"},
+		"存一下：会议要点":  {intent: "raw_create", payload: "会议要点"},
+		"再加：还有一点":   {intent: "raw_append", payload: "还有一点"},
+		"再补充：另一个角度": {intent: "raw_append", payload: "另一个角度"},
+		"后面还有：补一句":  {intent: "raw_append", payload: "补一句"},
+		"另外：单独说明":   {intent: "raw_append", payload: "单独说明"},
+		"结束这组":      {intent: "raw_close"},
+		"就这些":       {intent: "raw_close"},
+		"到这里":       {intent: "raw_close"},
+		"整理一下":      {intent: "organize", target: "active"},
+		"处理一下":      {intent: "organize", target: "active"},
+		"整理今天的":     {intent: "organize", target: "today"},
+		"看一下":       {intent: "diff"},
+		"看看":        {intent: "diff"},
+		"看一下 diff":  {intent: "diff"},
+		"同意":        {intent: "approve"},
+		"通过":        {intent: "approve"},
+		"写吧":        {intent: "approve"},
+		"驳回":        {intent: "reject"},
+		"这版重来":      {intent: "reject"},
+	}
+	for in, want := range cases {
+		got := classifyIntentRules(in)
+		if got.intent != want.intent {
+			t.Errorf("classifyIntentRules(%q).intent = %q, want %q", in, got.intent, want.intent)
+			continue
+		}
+		if want.payload != "" && got.payload != want.payload {
+			t.Errorf("classifyIntentRules(%q).payload = %q, want %q", in, got.payload, want.payload)
+		}
+		if want.target != "" && got.target != want.target {
+			t.Errorf("classifyIntentRules(%q).target = %q, want %q", in, got.target, want.target)
+		}
+	}
+
+	misses := []string{"", "你好", "今天天气怎么样", "随便聊聊", "记录一下", "补充："}
+	for _, in := range misses {
+		got := classifyIntentRules(in)
+		if got.intent != "" {
+			t.Errorf("classifyIntentRules(%q).intent = %q, want empty", in, got.intent)
+		}
+	}
+}
+
+func TestParseCandidateNumberAcceptsCommonVariants(t *testing.T) {
+	cases := map[string]int{
+		"1":     1,
+		"1.":    1,
+		"1。":    1,
+		"1)":    1,
+		"1）":    1,
+		"(1)":   1,
+		"（1）":   1,
+		"[1]":   1,
+		"【1】":   1,
+		"①":     1,
+		"一":     1,
+		"选1":    1,
+		"我选 1":  1,
+		"我选 1.": 1,
+		"第 1":   1,
+		"第1.":   1,
+		"要 1":   1,
+		"选项1":   1,
+		"2":     2,
+		"2、":    2,
+		"②":     2,
+		"二":     2,
+		"3":     3,
+		"3.":    3,
+		"③":     3,
+		"4":     4,
+		"④":     4,
+		" 1 ":   1,
+		"\t1\n": 1,
+		"我选 3。": 3,
+	}
+	for in, want := range cases {
+		got, ok := parseCandidateNumber(in)
+		if !ok || got != want {
+			t.Errorf("parseCandidateNumber(%q) = (%d, %v), want (%d, true)", in, got, ok, want)
+		}
+	}
+
+	rejects := []string{"", "5", "0", "选", "我选 5", "10", "1a", "选项", "abc"}
+	for _, in := range rejects {
+		if got, ok := parseCandidateNumber(in); ok {
+			t.Errorf("parseCandidateNumber(%q) = (%d, true), want rejection", in, got)
+		}
+	}
+}
+
+func TestLabelMatchesReplyKnownSynonyms(t *testing.T) {
+	appendCand := model.CandidateAction{Action: model.ClarificationActionRawAppend, Label: "补充到上一组"}
+	createCand := model.CandidateAction{Action: model.ClarificationActionRawCreate, Label: "新建一组"}
+	cancelCand := model.CandidateAction{Action: model.ClarificationActionCancel, Label: "取消"}
+
+	appendOK := []string{"补充", "补充上", "加上", "加上去", "并入", "加到上一组", "补到上一组", "加进上一组", "合并", "接着上一组", "续上", "接着上面"}
+	for _, s := range appendOK {
+		if !labelMatchesReply(s, appendCand) {
+			t.Errorf("labelMatchesReply(%q, append) = false, want true", s)
+		}
+	}
+
+	createOK := []string{"新建", "新建一组", "新的一组", "另开", "另开一组", "另起", "另起一组", "新开", "新开一组", "单独一组", "单独开一组"}
+	for _, s := range createOK {
+		if !labelMatchesReply(s, createCand) {
+			t.Errorf("labelMatchesReply(%q, create) = false, want true", s)
+		}
+	}
+
+	cancelOK := []string{"取消", "算了", "都不要", "都不用", "都不写", "先不处理"}
+	for _, s := range cancelOK {
+		if !labelMatchesReply(s, cancelCand) {
+			t.Errorf("labelMatchesReply(%q, cancel) = false, want true", s)
+		}
+	}
+
+	if labelMatchesReply("补充", createCand) {
+		t.Errorf("append phrase should not match create candidate")
+	}
+	if labelMatchesReply("新建", appendCand) {
+		t.Errorf("create phrase should not match append candidate")
+	}
+	if labelMatchesReply("不相关的话", appendCand) || labelMatchesReply("不相关的话", createCand) || labelMatchesReply("不相关的话", cancelCand) {
+		t.Errorf("unrelated text should match none")
+	}
+}
+
+func TestMatchClarificationReplyHandlesNumberAndPhraseAndCancel(t *testing.T) {
+	pending := model.PendingClarification{
+		ID: "clar_x",
+		CandidateActions: []model.CandidateAction{
+			{Action: model.ClarificationActionRawAppend, Label: "补充到上一组"},
+			{Action: model.ClarificationActionRawCreate, Label: "新建一组"},
+			{Action: model.ClarificationActionCancel, Label: "取消"},
+		},
+	}
+	cases := map[string]string{
+		"1":     model.ClarificationActionRawAppend,
+		"1)":    model.ClarificationActionRawAppend,
+		"我选 1.": model.ClarificationActionRawAppend,
+		"加上去":   model.ClarificationActionRawAppend,
+		"补充":    model.ClarificationActionRawAppend,
+		"2":     model.ClarificationActionRawCreate,
+		"②":     model.ClarificationActionRawCreate,
+		"另起一组":  model.ClarificationActionRawCreate,
+		"3":     model.ClarificationActionCancel,
+		"取消":    model.ClarificationActionCancel,
+		"算了":    model.ClarificationActionCancel,
+		"都不用":   model.ClarificationActionCancel,
+	}
+	for in, want := range cases {
+		_, action, ok := matchClarificationReply(in, pending)
+		if !ok || action != want {
+			t.Errorf("matchClarificationReply(%q) = (%q, %v), want (%q, true)", in, action, ok, want)
+		}
+	}
+
+	rejects := []string{"", "5", "随便", "不知道", "明天再说"}
+	for _, in := range rejects {
+		if _, action, ok := matchClarificationReply(in, pending); ok {
+			t.Errorf("matchClarificationReply(%q) = (%q, true), want rejection", in, action)
+		}
+	}
 }

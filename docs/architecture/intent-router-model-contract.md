@@ -2,7 +2,7 @@
 
 状态：partial implementation。Stage 1 已实现 rules-only fallback；OpenAI-compatible 小模型 classifier 已接入第一版，当前仅在 `hybrid` 且配置 `OPENWHISKER_INTENT_API_KEY` 时作为 rules miss fallback 使用；intent audit jsonl 已接入分类摘要记录；`confidence_label=medium` 触发的 pending clarification 创建 / 规则回复匹配 / 自动 cancel 已落地（候选目前由 OW 客户端基于 raw_capture+active_bucket 合成，模型暂不直接产出 `candidate_actions`）；澄清回复中 `additional_payload_text` 的抽取尚未接入。
 
-实现备注（2026-05-18）：classifier 请求体使用 `response_format: {"type": "json_object"}`，不依赖 OpenAI 的 strict `json_schema` 类型，以兼容 DeepSeek 等仅支持 `json_object` 的 OpenAI-compatible 端点。enum 与字段约束放在 system prompt 显式声明，并依赖客户端 `validateIntentClassifierOutput` 做硬校验；非法 enum / 缺字段 / 非法 JSON 仍按下文"Invalid output handling"降级。Core hard guard 不受影响，仍是最外层兜底。
+实现备注（2026-05-18）：classifier 请求体使用 `response_format: {"type": "json_object"}`，不依赖 OpenAI 的 strict `json_schema` 类型，以兼容 DeepSeek 等仅支持 `json_object` 的 OpenAI-compatible 端点。enum 与字段约束放在 system prompt 显式声明，并依赖客户端 `validateIntentClassifierOutput` 做硬校验；非法 enum / 缺字段 / 非法 JSON 仍按下文"Invalid output handling"降级。Core hard guard 不受影响，仍是最外层兜底。`OpenAIIntentClassifier.ClassifyIntent` 在响应 `content` 为空字符串（含纯空白）时做一次同请求体重试（无指数退避），两次都空则返回 `empty content after one retry` 错误并由 router 按 unclear 降级——这是针对 DeepSeek `json_object` 已知偶发空 content 的轻量兜底，单测 `TestOpenAIIntentClassifierRetriesOnceOnEmptyContent` / `TestOpenAIIntentClassifierFailsAfterTwoEmptyContents` 覆盖。
 
 实现备注 (2026-05-18, audit executed_action)：audit 行新增 `executed_action` 字段,在 handler 返回后填入,反映 executor 实际结果而非 router 采纳决策。`accepted=true && executed_action=rejected_*` 表示 router 采纳意图但 deterministic guard / handler 拒绝执行。枚举完整列表见 "Audit executed_action" 一节。
 

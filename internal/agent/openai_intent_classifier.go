@@ -22,15 +22,25 @@ func (c OpenAIIntentClassifier) ClassifyIntent(ctx context.Context, req core.Int
 	if err != nil {
 		return core.IntentClassifierResult{}, err
 	}
-	outputText, err := c.Client.CreateResponse(ctx, openAIResponseRequest{
+	request := openAIResponseRequest{
 		Instructions:    intentClassifierInstructions(),
 		Input:           string(input),
 		Text:            openAITextSpec{Format: intentClassifierJSONObjectFormat()},
 		MaxOutputTokens: 700,
 		Store:           false,
-	})
+	}
+	outputText, err := c.Client.CreateResponse(ctx, request)
 	if err != nil {
 		return core.IntentClassifierResult{}, err
+	}
+	if strings.TrimSpace(outputText) == "" {
+		outputText, err = c.Client.CreateResponse(ctx, request)
+		if err != nil {
+			return core.IntentClassifierResult{}, fmt.Errorf("intent classifier retry after empty content failed: %w", err)
+		}
+		if strings.TrimSpace(outputText) == "" {
+			return core.IntentClassifierResult{}, errors.New("intent classifier returned empty content after one retry")
+		}
 	}
 	var output core.IntentClassifierResult
 	if err := json.Unmarshal([]byte(outputText), &output); err != nil {
