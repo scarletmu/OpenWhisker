@@ -164,6 +164,14 @@ Human-facing project documents such as `README.md`, architecture review notes, r
 - Do not write outside approved project or vault roots.
 - Do not modify `.obsidian`, `.git`, secrets, tokens, local databases, or machine-specific configuration unless explicitly requested.
 - Do not silently let active architecture drafts and vault reference copies diverge after a design decision is accepted.
+- In any file that will be committed to git (docs, code comments, commit messages, PR descriptions), obfuscate identifying details from local development and smoke testing. Examples that must not appear verbatim:
+  - private or internal hostnames and gateway domains (e.g. an upstream model endpoint, a self-hosted Matrix homeserver, an employer's internal API URL);
+  - personal or work email addresses;
+  - Matrix user IDs, room IDs, sender IDs, access tokens, session files;
+  - API keys, bearer tokens, passwords, signed URLs;
+  - machine-specific absolute paths beyond the standard project / vault roots already documented in this file;
+  - real third-party account names tied to the user.
+  Use generic placeholders instead: "upstream OpenAI-compatible gateway", "the configured Matrix homeserver", "<bot user>", "<room>", `${OPENWHISKER_*}` env var names, etc. Public service names that are already widely advertised (e.g. `api.deepseek.com`, `api.openai.com`) and OpenWhisker's own public namespaces are fine. When unsure, prefer the abstracted form and surface the question. Before any `git add` or commit, scan staged changes for these patterns; if a leak slips through and the commit is not yet pushed, prefer `git reset --soft HEAD~1` + scrub + recommit over leaving it in local history.
 
 ## External Verification
 

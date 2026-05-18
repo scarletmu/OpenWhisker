@@ -48,10 +48,13 @@ func TestOpenAIIntentClassifierBuildsMinimalStructuredRequest(t *testing.T) {
 	if client.request.MaxOutputTokens != 700 || client.request.Store {
 		t.Fatalf("request token/store = %d/%v, want 700/false", client.request.MaxOutputTokens, client.request.Store)
 	}
-	if client.request.Text.Format.Type != "json_schema" ||
-		client.request.Text.Format.Name != "openwhisker_intent_router" ||
-		!client.request.Text.Format.Strict {
-		t.Fatalf("response format = %+v, want strict intent json schema", client.request.Text.Format)
+	if client.request.Text.Format.Type != "json_object" {
+		t.Fatalf("response format = %+v, want json_object (no server-side schema)", client.request.Text.Format)
+	}
+	if !strings.Contains(client.request.Instructions, "JSON object") ||
+		!strings.Contains(client.request.Instructions, "raw_capture") ||
+		!strings.Contains(client.request.Instructions, "confidence_label") {
+		t.Fatalf("instructions = %q, want enum list and JSON guidance in prompt", client.request.Instructions)
 	}
 	var sent core.IntentClassifierRequest
 	if err := json.Unmarshal([]byte(client.request.Input), &sent); err != nil {

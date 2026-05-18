@@ -8,12 +8,12 @@
 
 环境：
 
-- Matrix homeserver：`https://matrix.scarletmu.com`
-- Matrix 服务端部署对象：VPS `scm-tencent`
+- Matrix homeserver：`https://matrix.example.com`（配置见 `${OPENWHISKER_MATRIX_HOMESERVER}`）
+- Matrix 服务端部署对象：用户自托管 VPS
 - OpenWhisker daemon：本地 Mac
 - Vault：`testdata/vault`
 - Organizer：`deterministic`
-- 房间：非 E2EE 房间，使用 bot 账号 `@openwhisker-bot:matrix.scarletmu.com`
+- 房间：非 E2EE 房间，使用 bot 账号 `@openwhisker-bot:matrix.example.com`
 
 已验证：
 

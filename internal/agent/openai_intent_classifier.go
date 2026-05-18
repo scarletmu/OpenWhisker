@@ -25,7 +25,7 @@ func (c OpenAIIntentClassifier) ClassifyIntent(ctx context.Context, req core.Int
 	outputText, err := c.Client.CreateResponse(ctx, openAIResponseRequest{
 		Instructions:    intentClassifierInstructions(),
 		Input:           string(input),
-		Text:            openAITextSpec{Format: intentClassifierResponseFormat()},
+		Text:            openAITextSpec{Format: intentClassifierJSONObjectFormat()},
 		MaxOutputTokens: 700,
 		Store:           false,
 	})
@@ -43,9 +43,24 @@ func (c OpenAIIntentClassifier) ClassifyIntent(ctx context.Context, req core.Int
 }
 
 func intentClassifierInstructions() string {
-	return strings.TrimSpace(`You classify one inbound message for OpenWhisker.
+	return strings.TrimSpace(`You classify one inbound message for OpenWhisker IM input.
 
-Return only JSON that matches the schema.
+Return ONLY a single JSON object. No prose, no markdown fences, no comments, no trailing text.
+
+The JSON object MUST contain exactly these fields, with values restricted to the listed enums where applicable:
+
+- intent: one of ["raw_capture", "organize_request", "diff_request", "approve_request", "reject_request", "unclear"]
+- target: one of ["last", "today", "active", "active_bucket", "new_bucket", "none"]
+- capture_action: one of ["create", "append", "close", "none"]
+- bucket_relation: one of ["same_topic", "new_topic", "unrelated", "unclear"]
+- payload_text: string
+- additional_payload_text: string
+- confidence_label: one of ["high", "medium", "low"]
+- confidence: number between 0 and 1
+- reason: string
+
+Example JSON output:
+{"intent":"raw_capture","target":"new_bucket","capture_action":"create","bucket_relation":"new_topic","payload_text":"用户想新建一段记录","additional_payload_text":"","confidence_label":"high","confidence":0.9,"reason":"明确的新主题记录请求"}
 
 You only classify intent. You do not write notes, create plans, approve plans, or execute actions.
 Use the provided minimal state only. Do not infer hidden vault content.
@@ -55,58 +70,8 @@ Use medium when a focused clarification is needed.
 Use low/unclear when the message is ambiguous.`)
 }
 
-func intentClassifierResponseFormat() openAITextFormat {
-	return openAITextFormat{
-		Type:        "json_schema",
-		Name:        "openwhisker_intent_router",
-		Description: "Structured intent classification for OpenWhisker IM input.",
-		Strict:      true,
-		Schema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"intent": map[string]any{
-					"type": "string",
-					"enum": []string{"raw_capture", "organize_request", "diff_request", "approve_request", "reject_request", "unclear"},
-				},
-				"target": map[string]any{
-					"type": "string",
-					"enum": []string{"last", "today", "active", "active_bucket", "new_bucket", "none"},
-				},
-				"capture_action": map[string]any{
-					"type": "string",
-					"enum": []string{"create", "append", "close", "none"},
-				},
-				"bucket_relation": map[string]any{
-					"type": "string",
-					"enum": []string{"same_topic", "new_topic", "unrelated", "unclear"},
-				},
-				"payload_text":            map[string]any{"type": "string"},
-				"additional_payload_text": map[string]any{"type": "string"},
-				"confidence_label": map[string]any{
-					"type": "string",
-					"enum": []string{"high", "medium", "low"},
-				},
-				"confidence": map[string]any{
-					"type":    "number",
-					"minimum": 0,
-					"maximum": 1,
-				},
-				"reason": map[string]any{"type": "string"},
-			},
-			"required": []string{
-				"intent",
-				"target",
-				"capture_action",
-				"bucket_relation",
-				"payload_text",
-				"additional_payload_text",
-				"confidence_label",
-				"confidence",
-				"reason",
-			},
-			"additionalProperties": false,
-		},
-	}
+func intentClassifierJSONObjectFormat() openAITextFormat {
+	return openAITextFormat{Type: "json_object"}
 }
 
 func validateIntentClassifierOutput(output core.IntentClassifierResult) error {

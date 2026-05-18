@@ -84,8 +84,8 @@ type openAIChatMessage struct {
 }
 
 type openAIChatCompletionFormat struct {
-	Type       string           `json:"type"`
-	JSONSchema openAIJSONSchema `json:"json_schema,omitempty"`
+	Type       string            `json:"type"`
+	JSONSchema *openAIJSONSchema `json:"json_schema,omitempty"`
 }
 
 type openAIJSONSchema struct {
@@ -245,9 +245,12 @@ func (c OpenAIClient) httpClient() *http.Client {
 }
 
 func chatCompletionFormat(format openAITextFormat) openAIChatCompletionFormat {
+	if format.Type != "json_schema" {
+		return openAIChatCompletionFormat{Type: format.Type}
+	}
 	return openAIChatCompletionFormat{
 		Type: format.Type,
-		JSONSchema: openAIJSONSchema{
+		JSONSchema: &openAIJSONSchema{
 			Name:        format.Name,
 			Description: format.Description,
 			Strict:      format.Strict,

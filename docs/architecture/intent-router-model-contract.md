@@ -2,6 +2,8 @@
 
 状态：partial implementation。Stage 1 已实现 rules-only fallback；OpenAI-compatible 小模型 classifier 已接入第一版，当前仅在 `hybrid` 且配置 `OPENWHISKER_INTENT_API_KEY` 时作为 rules miss fallback 使用；intent audit jsonl 已接入分类摘要记录；pending clarification reply extraction 尚未接入。
 
+实现备注（2026-05-18）：classifier 请求体使用 `response_format: {"type": "json_object"}`，不依赖 OpenAI 的 strict `json_schema` 类型，以兼容 DeepSeek 等仅支持 `json_object` 的 OpenAI-compatible 端点。enum 与字段约束放在 system prompt 显式声明，并依赖客户端 `validateIntentClassifierOutput` 做硬校验；非法 enum / 缺字段 / 非法 JSON 仍按下文"Invalid output handling"降级。Core hard guard 不受影响，仍是最外层兜底。
+
 本文定义 Phase 4B.5 Intent Router 使用的小模型 contract。小模型只用于入口意图识别和 bucket 关系判断，不参与知识组织和 vault 写入。
 
 ## 配置
