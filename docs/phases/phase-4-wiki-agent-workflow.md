@@ -87,13 +87,13 @@ docs/skills/vault-profile-analyzer/SKILL.md
 
 ## 下一步真实环境验证顺序
 
-Phase 4 代码闭环已经进入真实环境验证。当前已完成真实 Matrix + test vault deterministic 闭环、真实 vault + deterministic diff/reject、test vault + OpenAI-compatible provider smoke，以及真实 vault + OpenAI-compatible LLM diff/reject。真实 vault + OpenAI-compatible LLM 的 approve/apply 闭环仍未验证。
+Phase 4 代码闭环已经进入真实环境验证。当前已完成真实 Matrix + test vault deterministic 闭环、真实 vault + deterministic diff/reject、test vault + OpenAI-compatible provider smoke、真实 vault + OpenAI-compatible LLM diff/reject，以及 2026-05-19 完成的真实 vault + OpenAI-compatible LLM **approve/apply** 闭环（CLI 路径，DeepSeek，`--sync=off`）。Matrix 路径下的 LLM approve/apply 仍待后续真实环境验证。
 
 真实环境验证顺序保持保守：
 
 1. **真实 Matrix + test vault**：先运行 `matrix daemon --vault testdata/vault --organizer=deterministic`，验证 IM 收发、event 去重、outbox 投递、`/organize last`、`/organize today`、`/diff`、`/approve` 和 `since` token 持久化，不污染真实 vault。
 2. **真实 vault + deterministic organizer**：再切到 `/Users/wang/Documents/KnowLedge`，验证 `Raw/Inbox`、`Raw/Processed`、`Knowledge/Drafts`、approval apply 和 Headless Sync 行为，保持输出稳定可控。真实 vault 验证应使用独立本地 SQLite，例如 `OPENWHISKER_DEBUG_DB=data/openwhisker-real.db`，避免和 test vault 的 job / plan / operation log 混在一起。
-3. **真实 vault + OpenAI-compatible LLM**：已完成 diff/reject 验证；后续如需完成真实写入闭环，再用低风险测试 raw approve 一次，验证真实 vault 下的 hash guard、Headless Sync、operation log、Knowledge draft 和 Raw/Processed processing note。中风险 plan 仍必须走 diff、approval、hash guard 和 `VaultExecutor`，不直接写正式 Knowledge note。
+3. **真实 vault + OpenAI-compatible LLM**：diff/reject 已验证。2026-05-19 完成 approve/apply 闭环（CLI 路径，DeepSeek `deepseek-v4-flash`，`--sync=off`，独立 `data/openwhisker-real-llm-approve.db`），覆盖 `direct_fs_executor` 真实写入、`move_note` Raw/Processed processing note、`vault_operation_logs` 两条 `applied`、`move_note.before_hash` 命中 ingest 时记录的 raw hash。这次验证暴露 Raw Organizer 仍在用 `response_format: json_schema`，与 DeepSeek 不兼容；按 intent classifier 已有的迁移路径切到 `json_object` + 客户端 `validateRawOrganizerOutput` 硬校验，并补单次空 content 重试。中风险 plan 仍必须走 diff、approval、hash guard 和 `VaultExecutor`，不直接写正式 Knowledge note。
 
 本地 ignored debug 脚本可用于这三步验证：
 
@@ -290,7 +290,7 @@ vault context 不读取 .obsidian、.git、secrets、隐藏路径或 vault root 
 
 范围内：
 
-- 选择并接入第一版真实 LLM provider；模型、密钥、超时和结构化输出解析隔离在 Wiki Agent Host 内。第一版优先接入 OpenAI-compatible Chat Completions API，使用 structured JSON 输出；重试策略仍待补齐。
+- 选择并接入第一版真实 LLM provider；模型、密钥、超时和结构化输出解析隔离在 Wiki Agent Host 内。第一版优先接入 OpenAI-compatible Chat Completions API。结构化输出契约：`response_format: {"type": "json_object"}`，schema 约束（字段名、`raw_kind` enum、字符串/数组类型）以英文规则 + JSON 示例形式写在 system prompt 里，依赖客户端 `validateRawOrganizerOutput` 做硬校验；不使用 OpenAI 的 strict `json_schema`，以兼容 DeepSeek 等只支持 `json_object` 的 OpenAI-compatible 端点。空 content 在 `OrganizeRaw` / `OrganizeRawToday` 共享的 `createWithRetry` helper 中做一次同请求体重试（无指数退避），两次都空则返回 `empty content after one retry` 错误。该实现与 [`docs/architecture/intent-router-model-contract.md`](../architecture/intent-router-model-contract.md) 里的 intent classifier 迁移备注同源（见 commit 890013a 与 2026-05-19 验证记录）。
 - CLI `organize last` 和 Matrix `/organize last` 都可以通过 `--organizer=openai-compatible` 使用 Raw Organizer 生成 plan；默认仍保持 deterministic，避免无意触发外部模型调用。
 - Matrix `/diff <job_id>`、`/approve <job_id>`、`/reject <job_id>` 返回用户可读的审批和执行结果。
 - 支持 `raw_kind` 推断：`concept-seed`、`web-clip`、`todo-list`、`llm-chat`、`mixed`。

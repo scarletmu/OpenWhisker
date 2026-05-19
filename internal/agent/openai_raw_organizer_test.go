@@ -56,11 +56,50 @@ func TestOpenAIRawOrganizerBuildsMediumRiskPlan(t *testing.T) {
 		!strings.Contains(plan.Operations[1].PayloadJSON, "确认是否需要补充 Matrix 入口说明") {
 		t.Fatalf("move payload = %s, want processing note with output and review trace", plan.Operations[1].PayloadJSON)
 	}
-	if client.request.Text.Format.Type != "json_schema" || !client.request.Text.Format.Strict {
-		t.Fatalf("response format = %+v, want strict json_schema", client.request.Text.Format)
+	if client.request.Text.Format.Type != "json_object" {
+		t.Fatalf("response format = %+v, want json_object", client.request.Text.Format)
+	}
+	if !strings.Contains(client.request.Instructions, "JSON object MUST contain exactly these fields") {
+		t.Fatalf("instructions missing inline schema guidance: %q", client.request.Instructions)
 	}
 	if !strings.Contains(client.request.Input, "Phase4 memory") {
 		t.Fatalf("input = %q, want raw note context", client.request.Input)
+	}
+}
+
+func TestOpenAIRawOrganizerRetriesOnceOnEmptyContent(t *testing.T) {
+	client := &sequenceCompatibleClient{outputs: []string{
+		"",
+		`{
+			"title": "ok",
+			"raw_kind": "concept-seed",
+			"summary": "ok",
+			"draft_body": "ok",
+			"review_items": []
+		}`,
+	}}
+	req := core.RawOrganizerRequest{
+		Job:     model.WikiJob{ID: "job_plan", Type: model.JobTypeOrganizeRaw},
+		RawJob:  model.WikiJob{ID: "job_raw"},
+		RawPath: "Raw/Inbox/job_raw.md",
+		Now:     time.Date(2026, 5, 19, 1, 2, 3, 0, time.UTC),
+	}
+	if _, err := (OpenAIRawOrganizer{Client: client}).OrganizeRaw(context.Background(), req); err != nil {
+		t.Fatalf("OrganizeRaw err = %v, want success after retry", err)
+	}
+	if client.calls != 2 {
+		t.Fatalf("client.calls = %d, want exactly 2", client.calls)
+	}
+}
+
+func TestOpenAIRawOrganizerFailsAfterTwoEmptyContents(t *testing.T) {
+	client := &sequenceCompatibleClient{outputs: []string{"", "   "}}
+	_, err := (OpenAIRawOrganizer{Client: client}).OrganizeRaw(context.Background(), core.RawOrganizerRequest{})
+	if err == nil || !strings.Contains(err.Error(), "empty content after one retry") {
+		t.Fatalf("err = %v, want empty-content-after-retry error", err)
+	}
+	if client.calls != 2 {
+		t.Fatalf("client.calls = %d, want exactly 2", client.calls)
 	}
 }
 
@@ -100,8 +139,8 @@ func TestOpenAIClientCallsOpenAICompatibleChatCompletionsAPI(t *testing.T) {
 		if len(payload.Messages) != 2 || payload.Messages[0].Role != "system" || payload.Messages[1].Role != "user" {
 			t.Fatalf("messages = %+v, want system and user messages", payload.Messages)
 		}
-		if payload.ResponseFormat.Type != "json_schema" || !payload.ResponseFormat.JSONSchema.Strict {
-			t.Fatalf("response format = %+v, want strict json_schema", payload.ResponseFormat)
+		if payload.ResponseFormat.Type != "json_object" || payload.ResponseFormat.JSONSchema != nil {
+			t.Fatalf("response format = %+v, want bare json_object", payload.ResponseFormat)
 		}
 		return &http.Response{
 			StatusCode: http.StatusOK,

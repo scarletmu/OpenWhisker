@@ -111,8 +111,7 @@ func (o OpenAIRawOrganizer) OrganizeRaw(ctx context.Context, req core.RawOrganiz
 	if o.Client == nil {
 		return model.VaultPlan{}, errors.New("openai raw organizer client is required")
 	}
-	outputText, err := o.Client.CreateResponse(ctx, openAIResponseRequest{
-		Model:           "",
+	outputText, err := o.createWithRetry(ctx, openAIResponseRequest{
 		Instructions:    rawOrganizerInstructions(),
 		Input:           renderRawOrganizerInput(req),
 		Text:            openAITextSpec{Format: rawOrganizerResponseFormat()},
@@ -136,7 +135,7 @@ func (o OpenAIRawOrganizer) OrganizeRawToday(ctx context.Context, req core.RawTo
 	if o.Client == nil {
 		return model.VaultPlan{}, errors.New("openai raw organizer client is required")
 	}
-	outputText, err := o.Client.CreateResponse(ctx, openAIResponseRequest{
+	outputText, err := o.createWithRetry(ctx, openAIResponseRequest{
 		Instructions:    rawOrganizerInstructions(),
 		Input:           renderRawTodayOrganizerInput(req),
 		Text:            openAITextSpec{Format: rawOrganizerResponseFormat()},
@@ -154,6 +153,24 @@ func (o OpenAIRawOrganizer) OrganizeRawToday(ctx context.Context, req core.RawTo
 		return model.VaultPlan{}, err
 	}
 	return buildLLMTodayPlan(req, output)
+}
+
+func (o OpenAIRawOrganizer) createWithRetry(ctx context.Context, req openAIResponseRequest) (string, error) {
+	out, err := o.Client.CreateResponse(ctx, req)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(out) != "" {
+		return out, nil
+	}
+	out, err = o.Client.CreateResponse(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("raw organizer retry after empty content failed: %w", err)
+	}
+	if strings.TrimSpace(out) == "" {
+		return "", errors.New("raw organizer returned empty content after one retry")
+	}
+	return out, nil
 }
 
 func (c OpenAIClient) CreateResponse(ctx context.Context, req openAIResponseRequest) (string, error) {
@@ -270,14 +287,25 @@ func extractOpenAIChatCompletionText(resp openAIChatCompletionResponse) string {
 }
 
 func rawOrganizerInstructions() string {
-	return strings.Join([]string{
-		"You are OpenWhisker Raw Organizer.",
-		"Return only the requested structured JSON.",
-		"Follow the task-specific Vault Skill documents in the provided context.",
-		"Generate a Chinese knowledge draft body by default.",
-		"Preserve source traceability and mark uncertain claims for review.",
-		"Do not ask to write files, run shell, call Obsidian CLI, or bypass approval.",
-	}, "\n")
+	return strings.TrimSpace(`You are OpenWhisker Raw Organizer.
+
+Return ONLY a single JSON object. No prose, no markdown fences, no comments, no trailing text.
+
+The JSON object MUST contain exactly these fields:
+
+- title: string. Short Chinese title for the Knowledge draft.
+- raw_kind: one of ["concept-seed", "web-clip", "todo-list", "llm-chat", "mixed"].
+- summary: string. One or two Chinese sentences summarizing the intended draft.
+- draft_body: string. Chinese markdown body without YAML frontmatter and without a top-level H1.
+- review_items: array of strings. Items the user should still verify.
+
+Example JSON output:
+{"title":"Phase4 记忆模型","raw_kind":"concept-seed","summary":"整理 Phase4 agent 记忆模型。","draft_body":"## 核心观点\n\nagent 的长期记忆来自 vault。","review_items":["确认是否需要补充 Matrix 入口说明。"]}
+
+Follow the task-specific Vault Skill documents in the provided context.
+Generate Chinese knowledge draft content by default.
+Preserve source traceability and mark uncertain claims for review.
+Do not ask to write files, run shell, call Obsidian CLI, or bypass approval.`)
 }
 
 func renderRawOrganizerInput(req core.RawOrganizerRequest) string {
@@ -313,41 +341,7 @@ func renderRawTodayOrganizerInput(req core.RawTodayOrganizerRequest) string {
 }
 
 func rawOrganizerResponseFormat() openAITextFormat {
-	return openAITextFormat{
-		Type:        "json_schema",
-		Name:        "openwhisker_raw_organizer",
-		Description: "A normalized draft result that OpenWhisker converts into a VaultPlan.",
-		Strict:      true,
-		Schema: map[string]any{
-			"type":                 "object",
-			"additionalProperties": false,
-			"properties": map[string]any{
-				"title": map[string]any{
-					"type":        "string",
-					"description": "Short Chinese title for the Knowledge draft.",
-				},
-				"raw_kind": map[string]any{
-					"type": "string",
-					"enum": []string{"concept-seed", "web-clip", "todo-list", "llm-chat", "mixed"},
-				},
-				"summary": map[string]any{
-					"type":        "string",
-					"description": "One or two Chinese sentences summarizing the intended draft.",
-				},
-				"draft_body": map[string]any{
-					"type":        "string",
-					"description": "Chinese markdown body without YAML frontmatter and without a top-level H1.",
-				},
-				"review_items": map[string]any{
-					"type": "array",
-					"items": map[string]any{
-						"type": "string",
-					},
-				},
-			},
-			"required": []string{"title", "raw_kind", "summary", "draft_body", "review_items"},
-		},
-	}
+	return openAITextFormat{Type: "json_object"}
 }
 
 func validateRawOrganizerOutput(output rawOrganizerLLMOutput) error {

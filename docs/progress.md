@@ -1,6 +1,6 @@
 # OpenWhisker 当前进度与交接说明
 
-更新时间：2026-05-18
+更新时间：2026-05-19
 
 本文用于在不同机器之间切换开发时快速恢复上下文。长期架构仍以 `docs/architecture/` 和 `docs/phases/` 为准；本文只记录当前实施进度、验证状态和下一步优先级。
 
@@ -62,7 +62,13 @@ Phase 4B.5 已提升为独立入口层能力：IM Intent Router。它位于 adap
   - rules-only 入口短语词表扩展：create 前缀新增 `记一下：` / `写下来：` / `存一下：` / `记下：`；append 前缀新增 `再加：` / `再补充：` / `后面还有：` / `另外：`；close/organize/diff/approve/reject exactAny 词表分别新增 `结束这组` / `到这里` / `就这些` / `整理一下` / `处理一下` / `看一下` / `看看` / `同意` / `通过` / `写吧` / `驳回` / `这版重来` 等。单测 `TestClassifyIntentRulesCoversCommonPhrasings` 覆盖。
   - clarification 合成扩展到 `raw_capture` 但无 active bucket 的 medium 情形：给出 2 候选（新建一组 / 取消）。原有 active bucket 路径仍给 3 候选（补充到上一组 / 新建一组 / 取消）,不变。单测 `TestIntentRouterClassifierMediumWithoutActiveBucketOffersTwoCandidates` / `TestIntentRouterClarificationReplyCreatesBucketWhenNoActiveBucket` 覆盖。
   - `OpenAIIntentClassifier.ClassifyIntent` 对 OpenAI-compatible response 的空 `content` 做单次重试（同一请求体,无指数退避）。两次都空则报 `empty content after one retry`,被 router 当作普通分类错误降级为 unclear,行为与旧路径一致。单测 `TestOpenAIIntentClassifierRetriesOnceOnEmptyContent` / `TestOpenAIIntentClassifierFailsAfterTwoEmptyContents` 覆盖。
-- 尚未做真实 vault + LLM approve/apply 闭环验证。
+- 2026-05-19 完成真实 vault + LLM approve/apply 闭环验证（CLI 路径，DeepSeek `deepseek-v4-flash`，`--sync=off`，独立 `data/openwhisker-real-llm-approve.db`）:
+  - 入口：`ingest raw` 在 `/Users/wang/Documents/KnowLedge/Raw/Inbox/` 写入受 frontmatter / source trace 保护的 raw note。
+  - 规划：`organize last --organizer=openai-compatible` 调用 DeepSeek 生成 medium-risk `VaultPlan`，触发并暴露了 Raw Organizer 仍在用 `json_schema` 的兼容性缺口；按 intent classifier 已有的迁移路径（commit 890013a）把 Raw Organizer 也改成 `json_object` + 客户端 `validateRawOrganizerOutput` 硬校验，并补单次空 content 重试。
+  - 审批：`plan diff` 输出 LLM 生成的 Knowledge draft（含受控 tags、`needs_review: true`、`待核查` 清单、显式 Raw/Processed source trace），人工审查后 `plan approve --sync=off` 成功 apply。
+  - 写入侧检查通过：`Knowledge/Drafts/job_fc0c7291eaa7.md` 创建，`Raw/Inbox/` 中同名 raw 被 move 到 `Raw/Processed/`，processing note 在原 raw 末尾追加包含 Plan job / Raw job / 路径 / 输出链接 / 剩余 review 项。
+  - 安全闸门验证：`vault_operation_logs` 两条 `applied`，`move_note` 的 `before_hash` 命中 ingest 时记录的 raw hash，证明 hash guard 实际生效；`plan_c896197d0cbd` `prepared_at` / `approved_at` / `applied_at` 三个时间戳齐全。
+  - 已知遗留：DeepSeek 偶尔在 `## 笔记` 后直接接 `## 测试背景` 造成 H2 嵌套；属于 prompt 工程层面，不影响 policy / executor 行为。
 
 ## 关键文档
 
@@ -75,9 +81,10 @@ Phase 4B.5 已提升为独立入口层能力：IM Intent Router。它位于 adap
 
 ## 下一步优先级
 
-1. 做真实 vault + LLM approve/apply 闭环验证。
+1. 真实 Matrix 路径下走一次 LLM approve/apply（CLI 已通），同步覆盖 Matrix `/diff` 渲染、approval guard、outbox 投递在真实 vault apply 上的表现。
 2. 真实 Matrix + DeepSeek 验证 medium clarification 闭环（同 topic / 新 topic 模糊消息；以及"无 active bucket 时给 2 候选"路径）。
 3. 根据真实使用反馈进一步扩展 rules-only 短句词表与 clarification 回复词表（已做一次本地硬化；继续扩张应基于实际未命中样本）。
+4. Phase 4C 主线候选：Knowledge Expander / High-risk proposal-only policy（rename / split / merge / bulk retag → `Meta/Agent-Proposals/`）。
 
 ## 当前已知限制
 
