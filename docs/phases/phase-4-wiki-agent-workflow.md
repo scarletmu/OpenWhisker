@@ -373,25 +373,27 @@ Phase 4C 进一步拆为四个子阶段，每个子阶段独立可 commit、独�
 - 现有 medium-risk Raw Organizer end-to-end 测试全绿，行为不变。
 ```
 
-### 4C.2：Knowledge Expander（medium-risk 主路径）
+### 4C.2：Knowledge Expander（仅 append + 高风险打报告）
 
-状态：进行中。第一版代码骨架已落地（`KnowledgeExpander` 接口、`OpenAIKnowledgeExpander`、`expand <path>` CLI、`prepareHighRiskApprovalPlan` 高风险出口）。真实 Matrix / 真实 vault + DeepSeek 的端到端验证待后续。
+状态：已落地（瘦身版）。`KnowledgeExpander` 接口、`OpenAIKnowledgeExpander`、`expand <path>` CLI、`prepareHighRiskApprovalPlan` 高风险出口均已实现并测试通过。真实 Matrix / 真实 vault + DeepSeek 的端到端验证待后续。
 
-目标：新增 LLM agent，针对已有 thin Knowledge note + 关联 raw，生成扩展 plan 或 child note draft；拿不准时通过 4C.1 的 proposal 出口降级。
+目标：新增 LLM agent，针对已有 thin Knowledge note，生成**末尾 append** 扩展 plan；拿不准（需要新建子 note / split / merge / rename / 批量改 tag 或 link）时一律通过 4C.1 的 proposal 出口降级，由人在外部强工具（Codex / Claude Code 等）中实际执行。
+
+**设计取向**：Knowledge Expander 是非关键模块，主干 policy / executor 不为它做让步。OpenWhisker 自接的开源 / 小厂 LLM 在工程能力 + 联网搜索能力上天然不如闭源旗舰；与其让 Expander 端到端把活做完，不如把它瘦成"只做最确定有用的 append + 给闭源工具生成高质量入口文档（proposal）"。
 
 范围内：
 
 - 新建 `KnowledgeExpander` LLM agent，契约对齐 Raw Organizer：OpenAI-compatible `json_object` 响应、客户端 `validateKnowledgeExpanderOutput` 硬校验、单次空 content 重试。
-- 输入边界：一篇目标 Knowledge note + 由 source trace 选出的关联 raw / processed note。不读取 vault 根 `AGENTS.md` 等规则源，除非显式 `--context-mode=vault-rules`，与 Raw Organizer 对齐。
-- 输出：medium-risk `VaultPlan`，支持两种主要形态：
-  - `append`：对已有 Knowledge note 末尾追加章节，必须有 `before_hash`；
-  - `create_child_note`：新建 child note，必须含 frontmatter / controlled tags / `needs_review` 清单 / 反向链接到关联 Raw/Processed。
-- 当 expander 判断 topic 边界不清、需要 split 或 merge 时，**直接输出 high-risk plan**，交由 4C.1 走 proposal 路径，而不是硬塞为 medium-risk。
+- 输入边界：一篇目标 Knowledge note（必填）+ 可选 source trace 关联的 raw / processed note（第一版只通过 `--context-mode=vault-rules` 显式扩展）。
+- 输出仅两种 kind：
+  - `append`（medium-risk）：对已有 Knowledge note 末尾追加 H2 章节，必须有 `before_hash`；
+  - `propose_restructure`（high-risk）：split / merge / rename / bulk-retag / bulk-link-rewrite，由 4C.1 写一份 proposal note 到 `Meta/Agent-Proposals/`，由人在外部工具中实际执行。**新建子 note 也归到这条路径**（建议 `proposal_kind = split`）。
 - CLI 入口最小形态：`expand <knowledge_path>`。Matrix 入口在 4C.4 接入。
-- 在 [`docs/architecture/`](../architecture/) 下新增 `knowledge-expander-model-contract.md`，定义输入/输出 schema 与硬校验规则。
+- 契约文档：[`docs/architecture/knowledge-expander-model-contract.md`](../architecture/knowledge-expander-model-contract.md)。
 
 范围外：
 
+- **直接新建子 note**。第一版有意不支持 `create_child_note` kind。任何新建 note 的需求都走 `propose_restructure`。这避免了 expander 输出落到 `Knowledge/Drafts/` 这种 policy 例外。
 - 主动「扫描整个 vault 找扩展机会」。本阶段只在用户显式指定 Knowledge note 时工作。
 - 自动选择关联 raw。第一版只用 source trace 中已写入的反向引用。
 - IM 自然语言入口（4C.4）。
@@ -400,10 +402,10 @@ Phase 4C 进一步拆为四个子阶段，每个子阶段独立可 commit、独�
 
 ```text
 在真实 vault 上：
-- 选一篇 thin Knowledge note + 若干关联 raw，运行 expand <path> --organizer=openai-compatible 产出 medium-risk plan；
-- plan diff / approve --sync=off 能正常落地，append 命中 before_hash，child note 含 frontmatter/tags/反链；
-- 若 LLM 输出 split/merge/rename 类操作组合，plan 被判定 high-risk 并走 4C.1 proposal 出口；
-- 单测覆盖 schema 校验、空 content 重试、high-risk 降级三条路径。
+- 选一篇 thin Knowledge note，运行 expand <path> --organizer=openai-compatible 产出 medium-risk append plan；
+- plan diff / approve --sync=off 能正常落地，append 命中 before_hash；
+- 若 LLM 输出 split/merge/rename/bulk-* 类操作，plan 被判定 high-risk 并走 4C.1 proposal 出口；
+- 单测覆盖 schema 校验（含 create_child_note 已被拒）、空 content 重试、high-risk 降级三条路径。
 ```
 
 ### 4C.3：Organize Today 多 topic 分组

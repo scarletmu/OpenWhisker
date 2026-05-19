@@ -1,8 +1,10 @@
 # Knowledge Expander Contract
 
-状态：spec only。4C.2 实现进行中。配套实现位于 `internal/agent/openai_knowledge_expander.go`（待落地）和 `internal/core/plans.go` 的 `KnowledgeExpander` 接口（待落地）。high-risk 降级出口复用 [`proposal-note-schema.md`](proposal-note-schema.md) 与 4C.1 流程。
+状态：已落地。配套实现位于 `internal/agent/openai_knowledge_expander.go` 和 `internal/core/plans.go` 的 `KnowledgeExpander` 接口。high-risk 降级出口复用 [`proposal-note-schema.md`](proposal-note-schema.md) 与 4C.1 流程。
 
-本文定义 Phase 4C.2 Knowledge Expander 使用的 LLM provider 契约。Knowledge Expander 只负责把"一篇已有 Knowledge note + 已有关联 raw"扩展为 medium-risk `VaultPlan`（或在拿不准时降级为 high-risk 计划，交 4C.1 proposal 出口处理）。它不主动扫描 vault、不主动选 raw、不直接写入 vault。
+本文定义 Phase 4C.2 Knowledge Expander 使用的 LLM provider 契约。Knowledge Expander 只负责把"一篇已有 Knowledge note"扩展为 medium-risk `append` 计划（或在拿不准时降级为 high-risk `propose_restructure` 计划，交 4C.1 proposal 出口处理）。它不主动扫描 vault、不主动选 raw、不直接写入 vault、不直接创建新的子 note。
+
+**设计取向**：Knowledge Expander 被定位为非关键模块。OpenWhisker 自接的开源 / 小厂 LLM 在工程能力和联网搜索能力上天然不如闭源工具（Codex / Claude Code）+ 闭源旗舰模型；因此 Expander 只承担最确定有用的 `append`（向已有 note 末尾加段内容），其余"创建新子 note / 拆分 / 合并 / 改 tag / 改 link"统一通过 `propose_restructure` 产出一份高质量入口文档（proposal note），由人在外部强工具中实际执行。这避免了主干 policy / executor 为 Expander 的不确定性买单。
 
 ## 配置
 
@@ -62,7 +64,6 @@ context builder 应限制每个文档的字节数（与 Raw Organizer 一致：c
   "title": "Phase4 笔记扩展",
   "summary": "在已有 Knowledge note 末尾补充 raw 中的新结论。",
   "append_section": "## 新增结论\n\n- ...",
-  "child_note": null,
   "restructure": null,
   "review_items": ["确认新增结论是否需要补充来源。"]
 }
@@ -73,34 +74,14 @@ context builder 应限制每个文档的字节数（与 Raw Organizer 一致：c
 ```text
 kind = append
   - append_section: 非空字符串，Markdown 片段，将作为 H2 章节追加到目标 note 末尾；不得包含 frontmatter，不得替换原文。
-  - child_note: 必须为 null。
-  - restructure: 必须为 null。
-
-kind = create_child_note
-  - child_note: 必填对象，字段见下。
-  - append_section: 必须为空字符串或省略。
   - restructure: 必须为 null。
 
 kind = propose_restructure
   - restructure: 必填对象，字段见下。声明这是 high-risk 计划候选。
   - append_section: 必须为空字符串或省略。
-  - child_note: 必须为 null。
 ```
 
-`child_note` schema：
-
-```json
-{
-  "relative_path": "subtopic-slug.md",
-  "title": "子主题标题",
-  "draft_body": "## 概念\n\n..."
-}
-```
-
-- `relative_path` 必须是相对路径，由 OpenWhisker 与当前 profile 的 `KnowledgeDraftDir`（默认 `Knowledge/Drafts/`）拼接为最终 vault 路径；不得以 `/` 开头、不得包含 `..`、不得离开 vault root；不得指向已存在文件。
-- 第一版 child note 一律落在 `KnowledgeDraftDir` 下，保留与 Raw Organizer 一致的 draft 中间态。"提升草稿为正式 Knowledge note + 同名子目录"是 vault 侧的人工动作（或由 `propose_restructure` 触发的高风险计划），不在本 expander 的 medium-risk 边界内。
-- `title` 短中文标题。
-- `draft_body` Markdown 正文，不含 frontmatter、不含顶级 H1（frontmatter 由 OpenWhisker 在 plan render 时统一注入，含 `needs_review`、controlled tags、反向链接到目标 Knowledge note 与关联 Raw/Processed）。
+> **不支持 `create_child_note`**。如果目标 note 实际上需要新建一篇子 note（或拆分、合并、重命名、批量改 tag / link），返回 `kind = propose_restructure`，由 4C.1 写一份 proposal note 给人，由人在外部强工具中执行实际写入。第一版有意压缩 Expander 的能力面，避免让主干 policy / executor 为弱 LLM 的不确定性绕路。
 
 `restructure` schema：
 
@@ -112,13 +93,13 @@ kind = propose_restructure
 }
 ```
 
-- `proposal_kind` 枚举与 `model.ProposalKind*` 对齐：`split`、`merge`、`rename`、`bulk-retag`、`bulk-link-rewrite`。第一版主要使用 `split` / `merge` / `rename`，后两者通常不由 Knowledge Expander 主动提出。
-- `affected_paths` 至少包含目标 Knowledge note 自身；不得越界、不得指向 `.obsidian` / `.git` / `Meta/Agent-Proposals/`。
+- `proposal_kind` 枚举与 `model.ProposalKind*` 对齐：`split`、`merge`、`rename`、`bulk-retag`、`bulk-link-rewrite`。**新建子 note 也归入 `split`**（rationale 应说清新增哪几篇、与目标 note 的边界关系）。
+- `affected_paths` 至少包含目标 Knowledge note 自身；不得越界、不得指向 `.obsidian` / `.git` / `Meta/Agent-Proposals/`。新建子 note 时把建议路径列在 affected_paths 后段。
 - `rationale` 用于填入 proposal note 的"来源 / 目标结构 / 建议操作"章节，不进入 vault 写入路径。
 
 所有 `kind` 共享字段：
 
-- `title`：本次输出对应的人类可读标题；append 时复用目标 note 标题或描述新增章节，create_child_note 时是 child note 标题，propose_restructure 时是 proposal 主旨。
+- `title`：本次输出对应的人类可读标题；append 时复用目标 note 标题或描述新增章节，propose_restructure 时是 proposal 主旨。
 - `summary`：一两句中文，写入 plan summary。
 - `review_items`：字符串数组，写入 plan 渲染的"待核查"章节；为空时由 OpenWhisker 注入默认提示。
 
@@ -127,16 +108,13 @@ kind = propose_restructure
 `validateKnowledgeExpanderOutput` 在客户端拒绝以下情况，不依赖 server-side strict schema：
 
 ```text
-kind 非合法枚举 -> error
+kind 非合法枚举（含历史的 create_child_note）-> error
 kind=append && append_section 为空 -> error
-kind=append && (child_note != null || restructure != null) -> error
-kind=create_child_note && child_note == nil -> error
-kind=create_child_note && child_note.relative_path 不合法 -> error
-kind=create_child_note && child_note.draft_body 为空 -> error
-kind=create_child_note && (append_section 非空 || restructure != null) -> error
+kind=append && restructure != null -> error
 kind=propose_restructure && restructure == nil -> error
 kind=propose_restructure && restructure.proposal_kind 非合法枚举 -> error
 kind=propose_restructure && len(affected_paths) == 0 -> error
+kind=propose_restructure && append_section 非空 -> error
 title 为空 -> error
 summary 为空 -> error
 ```
@@ -145,13 +123,7 @@ summary 为空 -> error
 
 ```text
 target_path（append 时）必须落在 conventions.KnowledgeDir 下，并指向 vault 内已存在文件
-child_note.relative_path 必须解析为 clean relative path
-拼接 conventions.KnowledgeDraftDir + relative_path 后:
-  - 不得以 / 开头
-  - 不得包含 ..
-  - 不得离开 vault root
-  - 不得指向 .obsidian / .git / Meta/Agent-Proposals / 隐藏目录
-  - 不得指向已存在文件
+propose_restructure 的 affected_paths 由 policy.CheckForApprovalHighRisk 在 4C.1 通道校验
 ```
 
 非法输出在 client 一次性拒绝，job 失败并返回结构化错误；不进入 plan lifecycle，不写 vault，不污染 outbox。
@@ -173,21 +145,6 @@ risk_level: medium
 requires_approval: true
 source_refs: [<expander job id>, <目标 note path>, <关联 raw/processed path>...]
 target_paths: [<目标 note path>]
-status: proposed
-```
-
-`kind = create_child_note`：
-
-```text
-operations:
-  - type: create_note
-    target_path: <KnowledgeDraftDir>/<relative_path>
-    payload: CreateNotePayload{content: 注入 frontmatter + draft_body}
-    risk_level: medium
-risk_level: medium
-requires_approval: true
-source_refs: [<expander job id>, <目标 note path>, <关联 raw/processed path>...]
-target_paths: [<child note path>]
 status: proposed
 ```
 
@@ -220,8 +177,6 @@ medium-risk plan:
   - must have target_paths
   - operations must have type / target_path / payload / reason / risk_level
   - append_note must have before_hash
-  - create_note relative_path must be clean and inside vault root
-  - knowledge draft content must contain required tags / source link / 待核查 markers
 
 high-risk plan:
   - delegated to CheckForApprovalHighRisk (4C.1) and ApplyAsProposal

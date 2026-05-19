@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path"
 	"strings"
-	"time"
 
 	"github.com/scarletmu/openwhisker/internal/core"
 	"github.com/scarletmu/openwhisker/internal/model"
@@ -18,19 +16,12 @@ type OpenAIKnowledgeExpander struct {
 }
 
 type knowledgeExpanderLLMOutput struct {
-	Kind          string                      `json:"kind"`
-	Title         string                      `json:"title"`
-	Summary       string                      `json:"summary"`
-	AppendSection string                      `json:"append_section"`
-	ChildNote     *knowledgeExpanderChildNote `json:"child_note"`
-	Restructure   *knowledgeExpanderRestruct  `json:"restructure"`
-	ReviewItems   []string                    `json:"review_items"`
-}
-
-type knowledgeExpanderChildNote struct {
-	RelativePath string `json:"relative_path"`
-	Title        string `json:"title"`
-	DraftBody    string `json:"draft_body"`
+	Kind          string                     `json:"kind"`
+	Title         string                     `json:"title"`
+	Summary       string                     `json:"summary"`
+	AppendSection string                     `json:"append_section"`
+	Restructure   *knowledgeExpanderRestruct `json:"restructure"`
+	ReviewItems   []string                   `json:"review_items"`
 }
 
 type knowledgeExpanderRestruct struct {
@@ -41,7 +32,6 @@ type knowledgeExpanderRestruct struct {
 
 const (
 	knowledgeExpanderKindAppend      = "append"
-	knowledgeExpanderKindCreateChild = "create_child_note"
 	knowledgeExpanderKindRestructure = "propose_restructure"
 )
 
@@ -94,18 +84,17 @@ Return ONLY a single JSON object. No prose, no markdown fences, no comments, no 
 
 The JSON object MUST contain these fields:
 
-- kind: one of ["append", "create_child_note", "propose_restructure"].
+- kind: one of ["append", "propose_restructure"].
 - title: short Chinese title for the human approval prompt.
 - summary: one or two Chinese sentences describing the change.
 - append_section: string. Required when kind=append; Markdown section to append at the end of the target note. Must NOT contain frontmatter and MUST start with an H2 heading. Empty string when kind!=append.
-- child_note: object. Required when kind=create_child_note; must be null otherwise. Fields: { relative_path: string, title: string, draft_body: string }. relative_path is a slug joined under the configured Knowledge draft directory; must be a clean relative path. draft_body is Chinese Markdown without frontmatter and without a top-level H1.
 - restructure: object. Required when kind=propose_restructure; must be null otherwise. Fields: { proposal_kind: one of ["split","merge","rename","bulk-retag","bulk-link-rewrite"], rationale: string, affected_paths: string array }.
 - review_items: array of strings. Items the user should still verify. May be empty.
 
 Example JSON output (append):
-{"kind":"append","title":"补充 Phase4 笔记","summary":"在已有 Knowledge note 末尾追加 raw 中的新结论。","append_section":"## 新增结论\n\n- ...","child_note":null,"restructure":null,"review_items":["确认新增结论来源是否充分。"]}
+{"kind":"append","title":"补充 Phase4 笔记","summary":"在已有 Knowledge note 末尾追加 raw 中的新结论。","append_section":"## 新增结论\n\n- ...","restructure":null,"review_items":["确认新增结论来源是否充分。"]}
 
-Use kind=propose_restructure only when the target note clearly needs split / merge / rename. The user will turn this into a proposal note and approve it manually; do NOT attempt to execute the restructure here.
+OpenWhisker Knowledge Expander only directly produces append operations. If the target note needs a new child note, a split, a merge, a rename, or bulk tag / link changes, return kind=propose_restructure with a clear rationale and the full affected_paths list. OpenWhisker will turn that into a proposal note for the human to review and execute manually (often via a stronger external tool); do NOT attempt to create child notes or execute the restructure here.
 
 Generate Chinese content by default; keep fixed technical terms, paths, property names, tag values, commands, APIs, and protocol names in English.
 Preserve source traceability and mark uncertain claims for review.
@@ -139,33 +128,8 @@ func validateKnowledgeExpanderOutput(out knowledgeExpanderLLMOutput) error {
 		if strings.TrimSpace(out.AppendSection) == "" {
 			return errors.New("knowledge expander append_section is required when kind=append")
 		}
-		if out.ChildNote != nil {
-			return errors.New("knowledge expander child_note must be null when kind=append")
-		}
 		if out.Restructure != nil {
 			return errors.New("knowledge expander restructure must be null when kind=append")
-		}
-	case knowledgeExpanderKindCreateChild:
-		if out.ChildNote == nil {
-			return errors.New("knowledge expander child_note is required when kind=create_child_note")
-		}
-		if strings.TrimSpace(out.ChildNote.RelativePath) == "" {
-			return errors.New("knowledge expander child_note.relative_path is required")
-		}
-		if strings.TrimSpace(out.ChildNote.Title) == "" {
-			return errors.New("knowledge expander child_note.title is required")
-		}
-		if strings.TrimSpace(out.ChildNote.DraftBody) == "" {
-			return errors.New("knowledge expander child_note.draft_body is required")
-		}
-		if strings.TrimSpace(out.AppendSection) != "" {
-			return errors.New("knowledge expander append_section must be empty when kind=create_child_note")
-		}
-		if out.Restructure != nil {
-			return errors.New("knowledge expander restructure must be null when kind=create_child_note")
-		}
-		if err := validateChildRelativePath(out.ChildNote.RelativePath); err != nil {
-			return err
 		}
 	case knowledgeExpanderKindRestructure:
 		if out.Restructure == nil {
@@ -177,32 +141,11 @@ func validateKnowledgeExpanderOutput(out knowledgeExpanderLLMOutput) error {
 		if len(out.Restructure.AffectedPaths) == 0 {
 			return errors.New("knowledge expander restructure.affected_paths must not be empty")
 		}
-		if out.ChildNote != nil {
-			return errors.New("knowledge expander child_note must be null when kind=propose_restructure")
-		}
 		if strings.TrimSpace(out.AppendSection) != "" {
 			return errors.New("knowledge expander append_section must be empty when kind=propose_restructure")
 		}
 	default:
 		return fmt.Errorf("knowledge expander kind %q is not allowed", out.Kind)
-	}
-	return nil
-}
-
-func validateChildRelativePath(rel string) error {
-	rel = strings.TrimSpace(rel)
-	if rel == "" {
-		return errors.New("child note relative_path is required")
-	}
-	if strings.HasPrefix(rel, "/") {
-		return errors.New("child note relative_path must not be absolute")
-	}
-	cleaned := path.Clean(rel)
-	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.Contains(cleaned, "/../") {
-		return fmt.Errorf("child note relative_path %q must stay inside the draft directory", rel)
-	}
-	if !strings.HasSuffix(strings.ToLower(cleaned), ".md") {
-		return fmt.Errorf("child note relative_path %q must end with .md", rel)
 	}
 	return nil
 }
@@ -221,8 +164,6 @@ func buildKnowledgeExpanderPlan(req core.KnowledgeExpanderRequest, out knowledge
 	switch out.Kind {
 	case knowledgeExpanderKindAppend:
 		return buildKnowledgeAppendPlan(req, out)
-	case knowledgeExpanderKindCreateChild:
-		return buildKnowledgeCreateChildPlan(req, out)
 	case knowledgeExpanderKindRestructure:
 		return buildKnowledgeRestructurePlan(req, out)
 	default:
@@ -252,36 +193,6 @@ func buildKnowledgeAppendPlan(req core.KnowledgeExpanderRequest, out knowledgeEx
 			TargetPath:  req.TargetPath,
 			PayloadJSON: string(appendPayload),
 			Reason:      "Append an LLM-organized section to an existing Knowledge note.",
-			RiskLevel:   model.RiskMedium,
-		}},
-		Status:    model.PlanStatusProposed,
-		CreatedAt: req.Now,
-	}, nil
-}
-
-func buildKnowledgeCreateChildPlan(req core.KnowledgeExpanderRequest, out knowledgeExpanderLLMOutput) (model.VaultPlan, error) {
-	conv := req.Conventions.Normalize()
-	childPath := joinVaultPath(conv.KnowledgeDraftDir, strings.TrimSpace(out.ChildNote.RelativePath))
-	content := renderKnowledgeExpanderChildDraft(req, out, childPath, conv.RequiredDraftTags)
-	createPayload, err := json.Marshal(model.CreateNotePayload{Content: content})
-	if err != nil {
-		return model.VaultPlan{}, err
-	}
-	return model.VaultPlan{
-		ID:               model.NewID("plan"),
-		JobID:            req.Job.ID,
-		Purpose:          "expand existing Knowledge note via child draft",
-		RiskLevel:        model.RiskMedium,
-		RequiresApproval: true,
-		Summary:          strings.TrimSpace(out.Summary),
-		SourceRefs:       []string{req.Job.ID, req.TargetPath},
-		TargetPaths:      []string{childPath},
-		Operations: []model.VaultOperation{{
-			ID:          model.NewID("op"),
-			Type:        model.OperationCreateNote,
-			TargetPath:  childPath,
-			PayloadJSON: string(createPayload),
-			Reason:      "Create a draft child note expanding the target Knowledge note.",
 			RiskLevel:   model.RiskMedium,
 		}},
 		Status:    model.PlanStatusProposed,
@@ -394,56 +305,6 @@ func buildKnowledgeRestructureBulkLinkRewriteOp(req core.KnowledgeExpanderReques
 		Reason:      "Knowledge expander surfaced a bulk-link-rewrite proposal.",
 		RiskLevel:   model.RiskHigh,
 	}, nil
-}
-
-func renderKnowledgeExpanderChildDraft(req core.KnowledgeExpanderRequest, out knowledgeExpanderLLMOutput, childPath string, requiredTags []string) string {
-	reviewItems := out.ReviewItems
-	if len(reviewItems) == 0 {
-		reviewItems = []string{"核对扩展内容是否与目标 Knowledge note 一致。"}
-	}
-	var reviewLines []string
-	for _, item := range reviewItems {
-		item = strings.TrimSpace(item)
-		if item != "" {
-			reviewLines = append(reviewLines, "- "+item)
-		}
-	}
-	if len(reviewLines) == 0 {
-		reviewLines = []string{"- 核对扩展内容是否与目标 Knowledge note 一致。"}
-	}
-	return fmt.Sprintf(`---
-openwhisker_job_id: %s
-openwhisker_job_type: %s
-source_knowledge_path: %s
-status: draft
-needs_review: true
-created_at: %s
-tags:
-%s
----
-
-# %s
-
-## 摘要
-
-%s
-
-## 笔记
-
-%s
-
-## 待核查
-
-%s
-
-## Source
-
-- Source Knowledge note: %s
-- Plan job: %s
-- Child draft path: %s
-`, req.Job.ID, req.Job.Type, req.TargetPath, req.Now.Format(time.RFC3339), renderYAMLList(requiredTags),
-		strings.TrimSpace(out.ChildNote.Title), strings.TrimSpace(out.Summary), strings.TrimSpace(out.ChildNote.DraftBody),
-		strings.Join(reviewLines, "\n"), req.TargetPath, req.Job.ID, childPath)
 }
 
 func ensureLeadingBlankLine(content string) string {

@@ -53,59 +53,6 @@ func TestOpenAIKnowledgeExpanderBuildsAppendPlan(t *testing.T) {
 	}
 }
 
-func TestOpenAIKnowledgeExpanderBuildsCreateChildPlan(t *testing.T) {
-	client := &fakeCompatibleClient{output: `{
-		"kind": "create_child_note",
-		"title": "子主题：raw bucket",
-		"summary": "为目标 note 创建一篇子主题草稿。",
-		"append_section": "",
-		"child_note": {
-			"relative_path": "agent-memory-raw-bucket.md",
-			"title": "raw bucket 设计",
-			"draft_body": "## 概念\n\nraw bucket 用于短期记忆。"
-		},
-		"restructure": null,
-		"review_items": []
-	}`}
-	req := core.KnowledgeExpanderRequest{
-		Job:         model.WikiJob{ID: "job_exp", Type: model.JobTypeExpandKnowledge},
-		TargetPath:  "Knowledge/topic/agent-memory.md",
-		Conventions: policy.DefaultConventions(),
-		VaultContext: core.KnowledgeExpanderContext{
-			TargetPath:    "Knowledge/topic/agent-memory.md",
-			TargetContent: "# Agent Memory",
-		},
-		Now: time.Date(2026, 5, 19, 1, 2, 3, 0, time.UTC),
-	}
-
-	plan, err := (OpenAIKnowledgeExpander{Client: client}).ExpandKnowledge(context.Background(), req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if plan.RiskLevel != model.RiskMedium {
-		t.Fatalf("risk = %q", plan.RiskLevel)
-	}
-	if len(plan.Operations) != 1 || plan.Operations[0].Type != model.OperationCreateNote {
-		t.Fatalf("operations = %+v, want one create_note", plan.Operations)
-	}
-	wantPath := "Knowledge/Drafts/agent-memory-raw-bucket.md"
-	if plan.Operations[0].TargetPath != wantPath {
-		t.Fatalf("child target = %q, want %q", plan.Operations[0].TargetPath, wantPath)
-	}
-	if plan.TargetPaths[0] != wantPath {
-		t.Fatalf("plan.TargetPaths[0] = %q, want %q", plan.TargetPaths[0], wantPath)
-	}
-	if !strings.Contains(plan.Operations[0].PayloadJSON, "raw bucket 用于短期记忆") {
-		t.Fatalf("payload missing child body: %q", plan.Operations[0].PayloadJSON)
-	}
-	if !strings.Contains(plan.Operations[0].PayloadJSON, "source_knowledge_path: Knowledge/topic/agent-memory.md") {
-		t.Fatalf("payload missing source_knowledge_path traceability: %q", plan.Operations[0].PayloadJSON)
-	}
-	if !strings.Contains(plan.Operations[0].PayloadJSON, "needs_review: true") {
-		t.Fatalf("payload missing needs_review marker: %q", plan.Operations[0].PayloadJSON)
-	}
-}
-
 func TestOpenAIKnowledgeExpanderBuildsHighRiskRestructurePlan(t *testing.T) {
 	client := &fakeCompatibleClient{output: `{
 		"kind": "propose_restructure",
@@ -186,30 +133,16 @@ func TestOpenAIKnowledgeExpanderRejectsKindOnlyAndPayloadOnlyOutput(t *testing.T
 			want: "append_section is required",
 		},
 		{
-			name: "create_child_note without child_note",
+			name: "create_child_note kind no longer supported",
 			output: `{
 				"kind": "create_child_note",
 				"title": "x",
 				"summary": "x",
 				"append_section": "",
-				"child_note": null,
 				"restructure": null,
 				"review_items": []
 			}`,
-			want: "child_note is required",
-		},
-		{
-			name: "create_child_note relative_path escapes draft dir",
-			output: `{
-				"kind": "create_child_note",
-				"title": "x",
-				"summary": "x",
-				"append_section": "",
-				"child_note": {"relative_path": "../escape.md", "title": "x", "draft_body": "x"},
-				"restructure": null,
-				"review_items": []
-			}`,
-			want: "must stay inside the draft directory",
+			want: `kind "create_child_note" is not allowed`,
 		},
 		{
 			name: "propose_restructure missing proposal_kind",
