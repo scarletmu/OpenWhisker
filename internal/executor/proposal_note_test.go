@@ -74,12 +74,12 @@ func TestApplyAsProposalWritesNoteAndProposedLog(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	applied, err := NewDirectFS(vaultRoot, store).ApplyAsProposal(context.Background(), plan)
+	applied, err := NewDirectFS(vaultRoot, store).ApplyAsProposal(context.Background(), plan, "Raw/Agent-Proposals")
 	if err != nil {
 		t.Fatalf("ApplyAsProposal() error = %v", err)
 	}
 
-	expectedPath := ProposalNotePath(plan.ID)
+	expectedPath := ProposalNotePath(plan.ID, "Raw/Agent-Proposals")
 	if applied.TargetPath != expectedPath {
 		t.Fatalf("applied target = %q, want %q", applied.TargetPath, expectedPath)
 	}
@@ -128,17 +128,25 @@ func TestApplyAsProposalRejectsMediumRisk(t *testing.T) {
 	defer store.Close()
 	plan := highRiskRenamePlanFixture(t)
 	plan.RiskLevel = model.RiskMedium
-	_, err = NewDirectFS(vaultRoot, store).ApplyAsProposal(context.Background(), plan)
+	_, err = NewDirectFS(vaultRoot, store).ApplyAsProposal(context.Background(), plan, "Raw/Agent-Proposals")
 	if err == nil || !strings.Contains(err.Error(), "high") {
 		t.Fatalf("ApplyAsProposal() error = %v, want risk mismatch", err)
 	}
 }
 
 func TestProposalNotePathStripsPlanPrefix(t *testing.T) {
-	got := ProposalNotePath("plan_c896197d0cbd1234")
-	want := "Meta/Agent-Proposals/proposal_c896197d0cbd.md"
+	got := ProposalNotePath("plan_c896197d0cbd1234", "Raw/Agent-Proposals")
+	want := "Raw/Agent-Proposals/proposal_c896197d0cbd.md"
 	if got != want {
 		t.Fatalf("ProposalNotePath = %q, want %q", got, want)
+	}
+}
+
+func TestProposalNotePathHonorsBaseDirFromProfile(t *testing.T) {
+	got := ProposalNotePath("plan_abc123def456ghi", "Meta/CustomProposals/")
+	want := "Meta/CustomProposals/proposal_abc123def456.md"
+	if got != want {
+		t.Fatalf("ProposalNotePath with custom base = %q, want %q", got, want)
 	}
 }
 

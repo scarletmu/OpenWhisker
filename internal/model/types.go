@@ -40,8 +40,6 @@ const (
 	OperationBulkLinkRewrite  = "bulk_link_rewrite"
 	OperationWriteProposal    = "write_proposal"
 
-	ProposalNoteDir = "Meta/Agent-Proposals"
-
 	ProposalKindSplit            = "split"
 	ProposalKindMerge            = "merge"
 	ProposalKindRename           = "rename"

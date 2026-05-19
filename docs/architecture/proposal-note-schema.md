@@ -14,10 +14,12 @@
 
 medium-risk Raw Organizer / Knowledge Expander plan **不**进入本 schema，仍走原有 approve + apply 路径。
 
-## 默认路径与命名
+## 路径与命名
 
-- 默认目录：`Meta/Agent-Proposals/`。
-  - 选择 `Meta/` 而非 `Knowledge/Drafts/` 的理由：`Knowledge/Drafts/` 是 Knowledge 维度的进行中草稿，proposal note 是关于「结构如何变化」的元层决策建议，归属 Meta 更准确。`Agent-Proposals/` 子目录用于把 agent-generated proposal 与人工 design proposal 区分开。
+- 目录由 vault profile 提供：`policy.Conventions.AgentProposalsDir`。OpenWhisker 自身不硬编码任何 vault 路径，所有 vault 形状决策都从 profile 流入。
+- 当前 `KnowledgeVaultConventions` 默认值：`Raw/Agent-Proposals/`。
+  - 选择 `Raw/` 的理由：proposal note 是 agent 主动产出、等人决策的「未被人加工的输入」，与 `Raw/Inbox/`（用户捕获）、`Raw/Processed/`（已完成 raw）同属「未处理输入」分支。`Meta/` 留给规则 / 模板 / 架构文档，不放运行时产出；`Knowledge/Drafts/` 是 Knowledge 维度的进行中草稿，与结构层决策建议语义不符。`Agent-Proposals/` 子目录把 agent-generated proposal 与人工 design proposal 区分开。
+  - 如果你的 vault 想用别的位置（例如 `Meta/CustomProposals/`），改 profile 即可，无需改 OpenWhisker 代码。
 - 文件名：`proposal_<plan_id_short>.md`，其中 `plan_id_short` 是 plan_id 的前 12 字符，与现有 `job_<short>.md` 命名风格一致。
 - proposal note 一旦写入，OpenWhisker **不再覆盖、不再追加**。用户可以手工编辑、归档或转写为正式 plan / Knowledge note。
 
@@ -107,5 +109,5 @@ proposal note 正文按以下 H2 顺序写出。任何一节缺失或为空都�
 
 - 写 proposal note 不修改任何 `Knowledge/` 路径。
 - 写 proposal note 不修改 `.obsidian` / `.git` / secrets / hidden path。
-- proposal note 路径必须在 `Meta/Agent-Proposals/` 之内，不接受 `..` / 绝对路径 / 跨 vault root。
+- proposal note 路径必须在 profile 指定的 `AgentProposalsDir` 之内，不接受 `..` / 绝对路径 / 跨 vault root。
 - proposal note 内容来自 plan + 模板拼装，不含任何 LLM 自由输出之外的 vault content；不夹带 raw 全文或其它 Knowledge note 全文。

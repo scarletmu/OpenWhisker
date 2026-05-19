@@ -87,11 +87,11 @@ Phase 4B.5 已提升为独立入口层能力：IM Intent Router。它位于 adap
 4. Phase 4C 已拆分为 4C.1–4C.4 四个子阶段（详见 `docs/phases/phase-4-wiki-agent-workflow.md`）。
    - **4C.1 已闭环（2026-05-19）**：
      - **policy / model**：新增 `RiskHigh` + `PlanStatusProposalWritten` + `OperationRename/BulkRetag/BulkLinkRewrite/WriteProposal` 常量；`policy.CheckForApprovalHighRisk` + `ClassifyProposalKind`（rename / merge / split / bulk-retag / bulk-link-rewrite）。
-     - **executor**：`ApplyAsProposal` + `RenderProposalNote` 按 `docs/architecture/proposal-note-schema.md` 渲染为 `Meta/Agent-Proposals/proposal_<short>.md`（全部 5 个 H2 + 至少 1 条人工确认问题）。
+     - **executor**：`ApplyAsProposal` + `RenderProposalNote` 按 `docs/architecture/proposal-note-schema.md` 渲染为 `Raw/Agent-Proposals/proposal_<short>.md`（全部 5 个 H2 + 至少 1 条人工确认问题）。
      - **storage**：`vault_operation_logs.outcome` 列区分 `applied` / `proposed`，新增 `ListOperationLogsByPlan` 查询助手。
      - **core**：`PlanService.Approve` 在 `RiskLevel=high` 时分叉走 `approveHighRiskAsProposal` 终态 `proposal_written`；`PlanService.Diff` 对高风险 plan 合成虚拟 diff（不需要 prepare 真实 ops）。
      - **adapter**：`renderAdapterDiff` 对高风险 plan 输出 `⚠ 高风险计划` 顶部 banner + 影响路径列表 + `批准 (写 proposal)` 提示；CLI `plan diff` 通过同一条 Summary 路径自然带上警告。
-     - **vault 同步**：`/Users/wang/Documents/KnowLedge/Meta/Agent-Proposals/AGENTS.md` 新建说明 proposal note 用途 + 一次性写入 + 不二次执行；vault 根 `AGENTS.md` 在 Folder Map 中登记。
+     - **vault 同步**：`/Users/wang/Documents/KnowLedge/Raw/Agent-Proposals/AGENTS.md` 新建说明 proposal note 用途 + 一次性写入 + 不二次执行；vault 根 `AGENTS.md` 在 Folder Map 中登记。
      - **测试**：policy / executor / core 三层覆盖高风险 happy path + 越界拒绝 + 阈值拒绝 + proposal 写入 + log outcome=proposed + 高风险 diff 合成 + adapter 渲染。medium-risk 回归路径完全不变。`go test ./...` 全绿。
    - **4C.2 瘦身版已落地（2026-05-19）**：
      - **设计取向**：Knowledge Expander 被定位为非关键模块。OpenWhisker 自接的开源 / 小厂 LLM 在工程能力 + 联网搜索上天然不如闭源工具（Codex / Claude Code）+ 闭源旗舰；让主干 policy / executor 为 expander 的不确定性绕路（例如把 child note 落到 `Knowledge/Drafts/` 才能过 `create_note` policy）得不偿失。因此第一版仅保留 `append`，其余一律产出高质量 proposal 入口文档交人外部执行。

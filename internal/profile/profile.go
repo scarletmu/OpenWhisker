@@ -115,7 +115,7 @@ func KnowledgeExpanderSkill(vaultProfile VaultProfile) VaultSkill {
 			"- Do not propose writes outside the configured Knowledge directory.",
 			"- Do not ask to write files, run shell, call Obsidian CLI, approve plans, or bypass policy.",
 			"",
-			"Local OpenWhisker policy validates paths, OpenWhisker trace metadata, profile-specific tags, source links, risk level, operations, and approval before any vault write. High-risk plans are routed to a proposal note in Meta/Agent-Proposals/ instead of touching Knowledge/.",
+			"Local OpenWhisker policy validates paths, OpenWhisker trace metadata, profile-specific tags, source links, risk level, operations, and approval before any vault write. High-risk plans are routed to a proposal note in Raw/Agent-Proposals/ instead of touching Knowledge/.",
 		}, "\n"),
 	}
 }

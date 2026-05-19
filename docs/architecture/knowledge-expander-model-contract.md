@@ -94,7 +94,7 @@ kind = propose_restructure
 ```
 
 - `proposal_kind` 枚举与 `model.ProposalKind*` 对齐：`split`、`merge`、`rename`、`bulk-retag`、`bulk-link-rewrite`。**新建子 note 也归入 `split`**（rationale 应说清新增哪几篇、与目标 note 的边界关系）。
-- `affected_paths` 至少包含目标 Knowledge note 自身；不得越界、不得指向 `.obsidian` / `.git` / `Meta/Agent-Proposals/`。新建子 note 时把建议路径列在 affected_paths 后段。
+- `affected_paths` 至少包含目标 Knowledge note 自身；不得越界、不得指向 `.obsidian` / `.git` / `Raw/Agent-Proposals/`。新建子 note 时把建议路径列在 affected_paths 后段。
 - `rationale` 用于填入 proposal note 的"来源 / 目标结构 / 建议操作"章节，不进入 vault 写入路径。
 
 所有 `kind` 共享字段：
@@ -163,7 +163,7 @@ target_paths: <affected_paths>
 status: proposed
 ```
 
-`propose_restructure` plan 进入现有 4C.1 path：policy `CheckForApprovalHighRisk` -> `synthesizeHighRiskDiff` -> 用户 approve -> `ApplyAsProposal` 写 `Meta/Agent-Proposals/proposal_<short>.md`。Knowledge Expander 自身**不**写 proposal note。
+`propose_restructure` plan 进入现有 4C.1 path：policy `CheckForApprovalHighRisk` -> `synthesizeHighRiskDiff` -> 用户 approve -> `ApplyAsProposal` 写 `Raw/Agent-Proposals/proposal_<short>.md`。Knowledge Expander 自身**不**写 proposal note。
 
 第一版 `propose_restructure` 仅生成单 operation；多 operation high-risk 组合（如 split = rename + bulk_link_rewrite）留给后续阶段，由 4C.1 policy 校验为 high-risk 即可。
 

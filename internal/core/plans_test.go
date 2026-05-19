@@ -80,7 +80,7 @@ func TestDiffSynthesizesProposalPreviewForHighRiskPlan(t *testing.T) {
 	if entry.Type != model.OperationWriteProposal {
 		t.Fatalf("entry type = %q, want %q", entry.Type, model.OperationWriteProposal)
 	}
-	if entry.TargetPath != "Meta/Agent-Proposals/proposal_hrdiff.md" {
+	if entry.TargetPath != "Raw/Agent-Proposals/proposal_hrdiff.md" {
 		t.Fatalf("entry target_path = %q, want proposal path", entry.TargetPath)
 	}
 	if !strings.Contains(entry.Preview, "rename: "+src+" → "+dst) {
@@ -149,7 +149,7 @@ func TestApproveHighRiskPlanWritesProposalNoteAndProposedLog(t *testing.T) {
 		t.Fatalf("Approve status = %q, want %q", result.Status, model.PlanStatusProposalWritten)
 	}
 
-	proposalPath := filepath.Join(vaultRoot, "Meta", "Agent-Proposals", "proposal_hr.md")
+	proposalPath := filepath.Join(vaultRoot, "Raw", "Agent-Proposals", "proposal_hr.md")
 	content, err := os.ReadFile(proposalPath)
 	if err != nil {
 		t.Fatalf("read proposal note: %v", err)
@@ -969,7 +969,7 @@ func TestExpandKnowledgeHighRiskPlanRoutedToProposalOnApprove(t *testing.T) {
 	if exists(filepath.Join(vaultRoot, filepath.FromSlash(dst))) {
 		t.Fatalf("approve wrote to Knowledge/ destination %q for high-risk plan", dst)
 	}
-	proposalDir := filepath.Join(vaultRoot, "Meta", "Agent-Proposals")
+	proposalDir := filepath.Join(vaultRoot, "Raw", "Agent-Proposals")
 	entries, err := os.ReadDir(proposalDir)
 	if err != nil {
 		t.Fatalf("read proposal dir: %v", err)

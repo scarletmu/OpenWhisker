@@ -765,7 +765,7 @@ write proposal note only
 proposal 路径：
 
 ```text
-Meta/Agent-Proposals/YYYY-MM-DD-<slug>.md
+Raw/Agent-Proposals/YYYY-MM-DD-<slug>.md
 ```
 
 用户可以在 Obsidian 里阅读 proposal，再通过 IM 或 UI 批准部分操作。

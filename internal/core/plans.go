@@ -742,7 +742,7 @@ func (s PlanService) synthesizeHighRiskDiff(plan model.VaultPlan) (*model.VaultD
 	if err != nil {
 		return nil, err
 	}
-	targetPath := executor.ProposalNotePath(plan.ID)
+	targetPath := executor.ProposalNotePath(plan.ID, s.conventions.AgentProposalsDir)
 	summary := "⚠ 高风险计划：批准后只生成 proposal note，不写入 Knowledge。原摘要：" + plan.Summary
 	preview, err := highRiskOperationsPreview(plan.Operations)
 	if err != nil {
@@ -1146,7 +1146,7 @@ func (s PlanService) approveHighRiskAsProposal(ctx context.Context, plan model.V
 		return PlanActionResult{}, err
 	}
 	plan.Status = model.PlanStatusApplying
-	applied, err := s.executor.ApplyAsProposal(ctx, plan)
+	applied, err := s.executor.ApplyAsProposal(ctx, plan, s.conventions.AgentProposalsDir)
 	if err != nil {
 		_ = s.store.MarkPlanFailed(plan.ID, model.PlanStatusFailed, err.Error())
 		_ = s.store.UpdateJobStatus(plan.JobID, model.JobStatusFailed, "", err.Error())

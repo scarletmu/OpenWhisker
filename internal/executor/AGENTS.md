@@ -7,7 +7,7 @@ Primary responsibilities:
 - Resolve target paths under the configured vault root.
 - Prepare diffs and `before_hash` values before approval.
 - Apply approved `VaultOperation` values with locks and hash guards.
-- Render approved high-risk plans into proposal notes under `Meta/Agent-Proposals/` instead of executing the operations (`ApplyAsProposal`, `RenderProposalNote`).
+- Render approved high-risk plans into proposal notes under the profile-supplied agent-proposals directory (passed by `core` as `baseDir`; default `Raw/Agent-Proposals/`) instead of executing the operations (`ApplyAsProposal`, `RenderProposalNote`).
 - Record applied operation logs through storage; proposal writes carry `Outcome=proposed` for auditing.
 
 Primary files:

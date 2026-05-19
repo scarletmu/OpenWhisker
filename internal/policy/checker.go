@@ -16,6 +16,7 @@ type Conventions struct {
 	RawProcessedDir   string   `json:"raw_processed_dir"`
 	KnowledgeDir      string   `json:"knowledge_dir"`
 	KnowledgeDraftDir string   `json:"knowledge_draft_dir"`
+	AgentProposalsDir string   `json:"agent_proposals_dir"`
 	RequiredDraftTags []string `json:"required_draft_tags,omitempty"`
 }
 
@@ -38,6 +39,7 @@ func DefaultConventions() Conventions {
 		RawProcessedDir:   "Raw/Processed",
 		KnowledgeDir:      "Knowledge",
 		KnowledgeDraftDir: "Knowledge/Drafts",
+		AgentProposalsDir: "Raw/Agent-Proposals",
 	}
 }
 
@@ -75,10 +77,14 @@ func (c Conventions) Normalize() Conventions {
 	if strings.TrimSpace(c.KnowledgeDraftDir) == "" {
 		c.KnowledgeDraftDir = strings.TrimRight(c.KnowledgeDir, "/") + "/Drafts"
 	}
+	if strings.TrimSpace(c.AgentProposalsDir) == "" {
+		c.AgentProposalsDir = "Raw/Agent-Proposals"
+	}
 	c.RawInboxDir = cleanRelativeDir(c.RawInboxDir)
 	c.RawProcessedDir = cleanRelativeDir(c.RawProcessedDir)
 	c.KnowledgeDir = cleanRelativeDir(c.KnowledgeDir)
 	c.KnowledgeDraftDir = cleanRelativeDir(c.KnowledgeDraftDir)
+	c.AgentProposalsDir = cleanRelativeDir(c.AgentProposalsDir)
 	c.ProfileID = strings.ToLower(strings.TrimSpace(c.ProfileID))
 	c.RequiredDraftTags = cleanStringList(c.RequiredDraftTags)
 	return c

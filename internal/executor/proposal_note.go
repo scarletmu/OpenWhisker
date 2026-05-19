@@ -15,32 +15,38 @@ import (
 
 const proposalShortIDLen = 12
 
-// ProposalNotePath returns the controlled Meta/Agent-Proposals path for a plan.
-func ProposalNotePath(planID string) string {
+// ProposalNotePath returns the controlled proposal-note path for a plan under
+// the supplied agent-proposals directory (from the vault profile's
+// conventions.AgentProposalsDir). The caller is responsible for passing a
+// non-empty, vault-relative directory.
+func ProposalNotePath(planID, baseDir string) string {
 	short := strings.TrimPrefix(planID, "plan_")
 	if len(short) > proposalShortIDLen {
 		short = short[:proposalShortIDLen]
 	}
-	return model.ProposalNoteDir + "/proposal_" + short + ".md"
+	return strings.TrimRight(baseDir, "/") + "/proposal_" + short + ".md"
 }
 
 // ApplyAsProposal renders a proposal note for a high-risk plan and writes it
-// under Meta/Agent-Proposals/. The plan's high-risk operations are recorded in
-// the rendered note but are not executed against the vault. The operation log
-// row carries Outcome=proposed so downstream auditors can distinguish proposal
-// writes from regular applies.
-func (e DirectFS) ApplyAsProposal(ctx context.Context, plan model.VaultPlan) (model.AppliedOperation, error) {
+// under baseDir (vault-profile-supplied agent-proposals directory). The plan's
+// high-risk operations are recorded in the rendered note but are not executed
+// against the vault. The operation log row carries Outcome=proposed so
+// downstream auditors can distinguish proposal writes from regular applies.
+func (e DirectFS) ApplyAsProposal(ctx context.Context, plan model.VaultPlan, baseDir string) (model.AppliedOperation, error) {
 	if err := ctx.Err(); err != nil {
 		return model.AppliedOperation{}, err
 	}
 	if plan.RiskLevel != model.RiskHigh {
 		return model.AppliedOperation{}, fmt.Errorf("apply as proposal requires risk %q, got %q", model.RiskHigh, plan.RiskLevel)
 	}
+	if strings.TrimSpace(baseDir) == "" {
+		return model.AppliedOperation{}, fmt.Errorf("apply as proposal requires non-empty proposals directory")
+	}
 	kind, err := policy.ClassifyProposalKind(plan)
 	if err != nil {
 		return model.AppliedOperation{}, err
 	}
-	targetPath := ProposalNotePath(plan.ID)
+	targetPath := ProposalNotePath(plan.ID, baseDir)
 	fullPath, err := ResolveVaultPath(e.vaultRoot, targetPath)
 	if err != nil {
 		return model.AppliedOperation{}, err

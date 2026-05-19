@@ -192,7 +192,7 @@ func TestRenderAdapterDiffPrependsHighRiskWarning(t *testing.T) {
 		Entries: []model.DiffEntry{{
 			OperationID: plan.ID,
 			Type:        model.OperationWriteProposal,
-			TargetPath:  "Meta/Agent-Proposals/proposal_high.md",
+			TargetPath:  "Raw/Agent-Proposals/proposal_high.md",
 			Summary:     "write proposal note (proposal/rename)",
 		}},
 	}
@@ -201,7 +201,7 @@ func TestRenderAdapterDiffPrependsHighRiskWarning(t *testing.T) {
 		"⚠ 高风险计划",
 		"## 影响路径",
 		"rename: `" + src + "` → `" + dst + "`",
-		"proposal 路径: Meta/Agent-Proposals/proposal_high.md",
+		"proposal 路径: Raw/Agent-Proposals/proposal_high.md",
 		"批准 (写 proposal)",
 	} {
 		if !strings.Contains(body, needle) {

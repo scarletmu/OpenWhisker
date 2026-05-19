@@ -353,7 +353,7 @@ Phase 4C 进一步拆为四个子阶段，每个子阶段独立可 commit、独�
 
 - 在 policy 层固化 high-risk 判定枚举：`split` / `merge` / `rename`（已有正式 Knowledge note）/ 大规模 retag / 大规模 link rewrite。第一版以静态规则识别 plan 内 operation 组合，无需新 LLM 调用。
 - plan lifecycle 新增 `proposal_written` 终态：high-risk plan 在 `approve` 时不进入 `direct_fs_executor` apply 路径，而是生成一篇结构化 proposal note 写入受控路径，原始 plan 操作不落 vault。
-- proposal note 默认写入 `Meta/Agent-Proposals/`，frontmatter / 必填章节由 [`docs/architecture/proposal-note-schema.md`](../architecture/proposal-note-schema.md) 定义。
+- proposal note 默认写入 `Raw/Agent-Proposals/`，frontmatter / 必填章节由 [`docs/architecture/proposal-note-schema.md`](../architecture/proposal-note-schema.md) 定义。
 - `vault_operation_logs` 增加可区分 `applied` / `proposed` 的字段（或新增 row type），保留 hash chain 完整性。
 - `plan diff` 对 high-risk plan 展示「将生成 proposal note 而非直接写入」的明确提示，避免用户以为是普通 medium-risk 审批。
 - 现有 medium-risk Raw Organizer 闭环行为完全不变（回归测试覆盖）。
@@ -368,7 +368,7 @@ Phase 4C 进一步拆为四个子阶段，每个子阶段独立可 commit、独�
 ```text
 给一个合成 high-risk plan（包含 rename 现有 Knowledge note + 大规模 retag），approve 后：
 - Knowledge/ 没有任何写入；
-- Meta/Agent-Proposals/ 出一篇符合 proposal-note-schema 的 proposal note；
+- Raw/Agent-Proposals/ 出一篇符合 proposal-note-schema 的 proposal note；
 - vault_operation_logs 中该 plan 状态为 proposed，hash chain 保持完整；
 - 现有 medium-risk Raw Organizer end-to-end 测试全绿，行为不变。
 ```
@@ -387,7 +387,7 @@ Phase 4C 进一步拆为四个子阶段，每个子阶段独立可 commit、独�
 - 输入边界：一篇目标 Knowledge note（必填）+ 可选 source trace 关联的 raw / processed note（第一版只通过 `--context-mode=vault-rules` 显式扩展）。
 - 输出仅两种 kind：
   - `append`（medium-risk）：对已有 Knowledge note 末尾追加 H2 章节，必须有 `before_hash`；
-  - `propose_restructure`（high-risk）：split / merge / rename / bulk-retag / bulk-link-rewrite，由 4C.1 写一份 proposal note 到 `Meta/Agent-Proposals/`，由人在外部工具中实际执行。**新建子 note 也归到这条路径**（建议 `proposal_kind = split`）。
+  - `propose_restructure`（high-risk）：split / merge / rename / bulk-retag / bulk-link-rewrite，由 4C.1 写一份 proposal note 到 `Raw/Agent-Proposals/`，由人在外部工具中实际执行。**新建子 note 也归到这条路径**（建议 `proposal_kind = split`）。
 - CLI 入口最小形态：`expand <knowledge_path>`。Matrix 入口在 4C.4 接入。
 - 契约文档：[`docs/architecture/knowledge-expander-model-contract.md`](../architecture/knowledge-expander-model-contract.md)。
 
@@ -454,7 +454,7 @@ Phase 4C 进一步拆为四个子阶段，每个子阶段独立可 commit、独�
 ```text
 真实 Matrix 上：
 - 自然语言「扩展一下 <某 Knowledge>」走通：classifier → expand plan → /diff → 同意 → 落地；
-- 自然语言「这两个合并」走通：classifier → high-risk plan → /diff 显示 proposal-only → 同意 → proposal note 写入 Meta/Agent-Proposals/；
+- 自然语言「这两个合并」走通：classifier → high-risk plan → /diff 显示 proposal-only → 同意 → proposal note 写入 Raw/Agent-Proposals/；
 - audit jsonl 包含 expand_pending_approval / proposal_written 行；
 - 单 plan organize today 行为不变。
 ```
