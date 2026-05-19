@@ -268,6 +268,170 @@ func (c Checker) CheckApproved(plan model.VaultPlan) error {
 	return nil
 }
 
+func (c Checker) CheckForApprovalHighRisk(plan model.VaultPlan) error {
+	conventions := c.conventions.Normalize()
+	if plan.RiskLevel != model.RiskHigh {
+		return fmt.Errorf("high-risk approval flow requires risk %q, got %q", model.RiskHigh, plan.RiskLevel)
+	}
+	if !plan.RequiresApproval {
+		return errors.New("high-risk plan must require approval")
+	}
+	if strings.TrimSpace(plan.ID) == "" {
+		return errors.New("plan id is required")
+	}
+	if strings.TrimSpace(plan.JobID) == "" {
+		return errors.New("plan job id is required")
+	}
+	if strings.TrimSpace(plan.Summary) == "" {
+		return errors.New("plan summary is required")
+	}
+	if len(plan.SourceRefs) == 0 {
+		return errors.New("plan source_refs are required")
+	}
+	for _, ref := range plan.SourceRefs {
+		if strings.TrimSpace(ref) == "" {
+			return errors.New("plan source_refs must not contain empty values")
+		}
+	}
+	if len(plan.TargetPaths) == 0 {
+		return errors.New("plan target_paths are required")
+	}
+	for _, targetPath := range plan.TargetPaths {
+		if err := validateRelativeVaultPath(targetPath); err != nil {
+			return fmt.Errorf("plan target path %q: %w", targetPath, err)
+		}
+	}
+	if len(plan.Operations) == 0 {
+		return errors.New("plan has no operations")
+	}
+	for _, op := range plan.Operations {
+		if strings.TrimSpace(op.ID) == "" {
+			return errors.New("operation id is required")
+		}
+		if strings.TrimSpace(op.Reason) == "" {
+			return fmt.Errorf("operation %s reason is required", op.ID)
+		}
+		if strings.TrimSpace(op.PayloadJSON) == "" {
+			return fmt.Errorf("operation %s payload is required", op.ID)
+		}
+		if op.RiskLevel != model.RiskHigh {
+			return fmt.Errorf("operation %s risk %q is not high", op.ID, op.RiskLevel)
+		}
+		if err := validateRelativeVaultPath(op.TargetPath); err != nil {
+			return fmt.Errorf("operation %s target path: %w", op.ID, err)
+		}
+		switch op.Type {
+		case model.OperationRenameNote:
+			var payload model.RenameNotePayload
+			if err := json.Unmarshal([]byte(op.PayloadJSON), &payload); err != nil {
+				return fmt.Errorf("decode rename_note payload for %s: %w", op.ID, err)
+			}
+			if err := validateRelativeVaultPath(payload.SourcePath); err != nil {
+				return fmt.Errorf("operation %s source path: %w", op.ID, err)
+			}
+			if err := validateRelativeVaultPath(payload.DestinationPath); err != nil {
+				return fmt.Errorf("operation %s destination path: %w", op.ID, err)
+			}
+			if !hasDirPrefix(payload.SourcePath, conventions.KnowledgeDir) {
+				return fmt.Errorf("rename_note source %q is outside %s", payload.SourcePath, conventions.KnowledgeDir)
+			}
+			if hasDirPrefix(payload.SourcePath, conventions.KnowledgeDraftDir) {
+				return fmt.Errorf("rename_note source %q is inside %s; draft renames are not high-risk", payload.SourcePath, conventions.KnowledgeDraftDir)
+			}
+			if payload.SourcePath != op.TargetPath {
+				return fmt.Errorf("operation %s target_path %q must match payload source_path %q", op.ID, op.TargetPath, payload.SourcePath)
+			}
+		case model.OperationBulkRetag:
+			var payload model.BulkRetagPayload
+			if err := json.Unmarshal([]byte(op.PayloadJSON), &payload); err != nil {
+				return fmt.Errorf("decode bulk_retag payload for %s: %w", op.ID, err)
+			}
+			if len(payload.AffectedPaths) < model.ProposalBulkAffectsThreshold {
+				return fmt.Errorf("operation %s bulk_retag must affect >= %d paths to qualify as high-risk", op.ID, model.ProposalBulkAffectsThreshold)
+			}
+			if len(payload.AddTags) == 0 && len(payload.RemoveTags) == 0 {
+				return fmt.Errorf("operation %s bulk_retag must add or remove at least one tag", op.ID)
+			}
+			for _, p := range payload.AffectedPaths {
+				if err := validateRelativeVaultPath(p); err != nil {
+					return fmt.Errorf("operation %s affected path %q: %w", op.ID, p, err)
+				}
+			}
+		case model.OperationBulkLinkRewrite:
+			var payload model.BulkLinkRewritePayload
+			if err := json.Unmarshal([]byte(op.PayloadJSON), &payload); err != nil {
+				return fmt.Errorf("decode bulk_link_rewrite payload for %s: %w", op.ID, err)
+			}
+			if err := validateRelativeVaultPath(payload.FromPath); err != nil {
+				return fmt.Errorf("operation %s from path: %w", op.ID, err)
+			}
+			if err := validateRelativeVaultPath(payload.ToPath); err != nil {
+				return fmt.Errorf("operation %s to path: %w", op.ID, err)
+			}
+			if len(payload.AffectedPaths) < model.ProposalBulkAffectsThreshold {
+				return fmt.Errorf("operation %s bulk_link_rewrite must affect >= %d paths to qualify as high-risk", op.ID, model.ProposalBulkAffectsThreshold)
+			}
+			for _, p := range payload.AffectedPaths {
+				if err := validateRelativeVaultPath(p); err != nil {
+					return fmt.Errorf("operation %s affected path %q: %w", op.ID, p, err)
+				}
+			}
+		default:
+			return fmt.Errorf("operation type %q is not allowed in high-risk plan", op.Type)
+		}
+	}
+	return nil
+}
+
+func ClassifyProposalKind(plan model.VaultPlan) (string, error) {
+	if plan.RiskLevel != model.RiskHigh {
+		return "", fmt.Errorf("classify proposal kind requires risk %q, got %q", model.RiskHigh, plan.RiskLevel)
+	}
+	var renameCount, retagCount, linkRewriteCount int
+	for _, op := range plan.Operations {
+		switch op.Type {
+		case model.OperationRenameNote:
+			renameCount++
+		case model.OperationBulkRetag:
+			retagCount++
+		case model.OperationBulkLinkRewrite:
+			linkRewriteCount++
+		}
+	}
+	switch {
+	case retagCount > 0 && renameCount == 0 && linkRewriteCount == 0:
+		return model.ProposalKindBulkRetag, nil
+	case linkRewriteCount > 0 && renameCount == 0 && retagCount == 0:
+		return model.ProposalKindBulkLinkRewrite, nil
+	case renameCount == 1 && retagCount == 0 && linkRewriteCount == 0:
+		return model.ProposalKindRename, nil
+	case renameCount > 1 && retagCount == 0 && linkRewriteCount == 0:
+		return mergeOrSplitKind(plan), nil
+	case renameCount > 0 || retagCount > 0 || linkRewriteCount > 0:
+		return model.ProposalKindRename, nil
+	default:
+		return "", errors.New("plan has no high-risk operations to classify")
+	}
+}
+
+func mergeOrSplitKind(plan model.VaultPlan) string {
+	destinations := map[string]struct{}{}
+	for _, op := range plan.Operations {
+		if op.Type != model.OperationRenameNote {
+			continue
+		}
+		var payload model.RenameNotePayload
+		if err := json.Unmarshal([]byte(op.PayloadJSON), &payload); err != nil {
+			return model.ProposalKindRename
+		}
+		destinations[payload.DestinationPath] = struct{}{}
+	}
+	if len(destinations) == 1 {
+		return model.ProposalKindMerge
+	}
+	return model.ProposalKindSplit
+}
+
 func validateRelativeVaultPath(path string) error {
 	if path == "" {
 		return errors.New("empty path")

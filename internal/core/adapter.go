@@ -348,6 +348,9 @@ func renderNoPreparedDiff(err NoPreparedDiffError) string {
 }
 
 func renderAdapterDiff(plan model.VaultPlan, diff *model.VaultDiff) string {
+	if plan.RiskLevel == model.RiskHigh {
+		return renderHighRiskAdapterDiff(plan, diff)
+	}
 	lines := []string{
 		"## 审批预览",
 		"",
@@ -373,6 +376,73 @@ func renderAdapterDiff(plan model.VaultPlan, diff *model.VaultDiff) string {
 		fmt.Sprintf("- 拒绝：//reject %s", diff.PlanID),
 	)
 	return strings.Join(lines, "\n")
+}
+
+func renderHighRiskAdapterDiff(plan model.VaultPlan, diff *model.VaultDiff) string {
+	var proposalPath, kindLabel string
+	if len(diff.Entries) > 0 {
+		proposalPath = diff.Entries[0].TargetPath
+		kindLabel = diff.Entries[0].Summary
+	}
+	lines := []string{
+		"⚠ 高风险计划：批准后只生成 proposal note，不会写入正式 Knowledge note。",
+		"",
+		"## 审批预览",
+		"",
+		fmt.Sprintf("- Plan: %s", diff.PlanID),
+		fmt.Sprintf("- 原摘要: %s", plan.Summary),
+	}
+	if kindLabel != "" {
+		lines = append(lines, fmt.Sprintf("- 类型: %s", kindLabel))
+	}
+	if proposalPath != "" {
+		lines = append(lines, fmt.Sprintf("- proposal 路径: %s", proposalPath))
+	}
+	if len(plan.SourceRefs) > 0 {
+		lines = append(lines, fmt.Sprintf("- 来源: %s", strings.Join(plan.SourceRefs, ", ")))
+	}
+	lines = append(lines, "", "## 影响路径")
+	for _, op := range plan.Operations {
+		for _, line := range highRiskOpAdapterLines(op) {
+			lines = append(lines, "- "+line)
+		}
+	}
+	lines = append(lines,
+		"",
+		"## 审批动作",
+		fmt.Sprintf("- 批准 (写 proposal)：//approve %s", diff.PlanID),
+		fmt.Sprintf("- 拒绝：//reject %s", diff.PlanID),
+	)
+	return strings.Join(lines, "\n")
+}
+
+func highRiskOpAdapterLines(op model.VaultOperation) []string {
+	switch op.Type {
+	case model.OperationRenameNote:
+		var payload model.RenameNotePayload
+		if err := json.Unmarshal([]byte(op.PayloadJSON), &payload); err != nil {
+			return []string{fmt.Sprintf("rename (payload decode failed: %s)", err.Error())}
+		}
+		return []string{fmt.Sprintf("rename: `%s` → `%s`", payload.SourcePath, payload.DestinationPath)}
+	case model.OperationBulkRetag:
+		var payload model.BulkRetagPayload
+		if err := json.Unmarshal([]byte(op.PayloadJSON), &payload); err != nil {
+			return []string{fmt.Sprintf("bulk-retag (payload decode failed: %s)", err.Error())}
+		}
+		return []string{fmt.Sprintf("bulk-retag: 影响 %d 篇; +[%s] -[%s]",
+			len(payload.AffectedPaths),
+			strings.Join(payload.AddTags, ", "),
+			strings.Join(payload.RemoveTags, ", "))}
+	case model.OperationBulkLinkRewrite:
+		var payload model.BulkLinkRewritePayload
+		if err := json.Unmarshal([]byte(op.PayloadJSON), &payload); err != nil {
+			return []string{fmt.Sprintf("bulk-link-rewrite (payload decode failed: %s)", err.Error())}
+		}
+		return []string{fmt.Sprintf("bulk-link-rewrite: `%s` → `%s` (影响 %d 篇)",
+			payload.FromPath, payload.ToPath, len(payload.AffectedPaths))}
+	default:
+		return []string{fmt.Sprintf("unknown high-risk op: %s", op.Type)}
+	}
 }
 
 func renderCreatedNotePreview(operations []model.VaultOperation) string {

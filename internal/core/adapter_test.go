@@ -169,3 +169,43 @@ func TestAdapterServiceHandlesOrganizeToday(t *testing.T) {
 		t.Fatalf("organize today body = %q, want raw count", organized.Body)
 	}
 }
+
+func TestRenderAdapterDiffPrependsHighRiskWarning(t *testing.T) {
+	src := "Knowledge/topic/old-name.md"
+	dst := "Knowledge/topic/new-name.md"
+	plan := model.VaultPlan{
+		ID:         "plan_high",
+		RiskLevel:  model.RiskHigh,
+		Summary:    "Rename Knowledge note to clearer title.",
+		SourceRefs: []string{"job_review", src},
+		Operations: []model.VaultOperation{{
+			ID:          "op_rename",
+			Type:        model.OperationRenameNote,
+			TargetPath:  src,
+			PayloadJSON: `{"source_path":"` + src + `","destination_path":"` + dst + `"}`,
+			RiskLevel:   model.RiskHigh,
+		}},
+	}
+	diff := &model.VaultDiff{
+		PlanID:  plan.ID,
+		Summary: "⚠ 高风险计划：批准后只生成 proposal note，不写入 Knowledge。原摘要：" + plan.Summary,
+		Entries: []model.DiffEntry{{
+			OperationID: plan.ID,
+			Type:        model.OperationWriteProposal,
+			TargetPath:  "Meta/Agent-Proposals/proposal_high.md",
+			Summary:     "write proposal note (proposal/rename)",
+		}},
+	}
+	body := renderAdapterDiff(plan, diff)
+	for _, needle := range []string{
+		"⚠ 高风险计划",
+		"## 影响路径",
+		"rename: `" + src + "` → `" + dst + "`",
+		"proposal 路径: Meta/Agent-Proposals/proposal_high.md",
+		"批准 (写 proposal)",
+	} {
+		if !strings.Contains(body, needle) {
+			t.Fatalf("renderAdapterDiff missing %q:\n%s", needle, body)
+		}
+	}
+}

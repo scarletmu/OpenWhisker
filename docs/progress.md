@@ -84,7 +84,16 @@ Phase 4B.5 已提升为独立入口层能力：IM Intent Router。它位于 adap
 1. 真实 Matrix 路径下走一次 LLM approve/apply（CLI 已通），同步覆盖 Matrix `/diff` 渲染、approval guard、outbox 投递在真实 vault apply 上的表现。
 2. 真实 Matrix + DeepSeek 验证 medium clarification 闭环（同 topic / 新 topic 模糊消息；以及"无 active bucket 时给 2 候选"路径）。
 3. 根据真实使用反馈进一步扩展 rules-only 短句词表与 clarification 回复词表（已做一次本地硬化；继续扩张应基于实际未命中样本）。
-4. Phase 4C 主线候选：Knowledge Expander / High-risk proposal-only policy（rename / split / merge / bulk retag → `Meta/Agent-Proposals/`）。
+4. Phase 4C 已拆分为 4C.1–4C.4 四个子阶段（详见 `docs/phases/phase-4-wiki-agent-workflow.md`）。
+   - **4C.1 已闭环（2026-05-19）**：
+     - **policy / model**：新增 `RiskHigh` + `PlanStatusProposalWritten` + `OperationRename/BulkRetag/BulkLinkRewrite/WriteProposal` 常量；`policy.CheckForApprovalHighRisk` + `ClassifyProposalKind`（rename / merge / split / bulk-retag / bulk-link-rewrite）。
+     - **executor**：`ApplyAsProposal` + `RenderProposalNote` 按 `docs/architecture/proposal-note-schema.md` 渲染为 `Meta/Agent-Proposals/proposal_<short>.md`（全部 5 个 H2 + 至少 1 条人工确认问题）。
+     - **storage**：`vault_operation_logs.outcome` 列区分 `applied` / `proposed`，新增 `ListOperationLogsByPlan` 查询助手。
+     - **core**：`PlanService.Approve` 在 `RiskLevel=high` 时分叉走 `approveHighRiskAsProposal` 终态 `proposal_written`；`PlanService.Diff` 对高风险 plan 合成虚拟 diff（不需要 prepare 真实 ops）。
+     - **adapter**：`renderAdapterDiff` 对高风险 plan 输出 `⚠ 高风险计划` 顶部 banner + 影响路径列表 + `批准 (写 proposal)` 提示；CLI `plan diff` 通过同一条 Summary 路径自然带上警告。
+     - **vault 同步**：`/Users/wang/Documents/KnowLedge/Meta/Agent-Proposals/AGENTS.md` 新建说明 proposal note 用途 + 一次性写入 + 不二次执行；vault 根 `AGENTS.md` 在 Folder Map 中登记。
+     - **测试**：policy / executor / core 三层覆盖高风险 happy path + 越界拒绝 + 阈值拒绝 + proposal 写入 + log outcome=proposed + 高风险 diff 合成 + adapter 渲染。medium-risk 回归路径完全不变。`go test ./...` 全绿。
+   - 4C.2 / 4C.3 / 4C.4 还未开工。
 
 ## 当前已知限制
 

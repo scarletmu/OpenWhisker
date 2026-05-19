@@ -16,6 +16,169 @@ import (
 	"github.com/scarletmu/openwhisker/internal/storage"
 )
 
+func TestDiffSynthesizesProposalPreviewForHighRiskPlan(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "openwhisker.db")
+	vaultRoot := filepath.Join(dir, "vault")
+	if err := os.MkdirAll(vaultRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Now().UTC()
+	if err := store.CreateJob(model.WikiJob{
+		ID:        "job_hrdiff",
+		Type:      model.JobTypeOrganizeRaw,
+		Status:    model.JobStatusAwaitingApproval,
+		Source:    "test",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	src := "Knowledge/topic/old-name.md"
+	dst := "Knowledge/topic/new-name.md"
+	plan := model.VaultPlan{
+		ID:               "plan_hrdiff",
+		JobID:            "job_hrdiff",
+		Purpose:          "rename",
+		RiskLevel:        model.RiskHigh,
+		RequiresApproval: true,
+		Summary:          "Rename Knowledge note to clearer title.",
+		SourceRefs:       []string{"job_hrdiff", src},
+		TargetPaths:      []string{src, dst},
+		Operations: []model.VaultOperation{{
+			ID:          "op_rename",
+			Type:        model.OperationRenameNote,
+			TargetPath:  src,
+			PayloadJSON: `{"source_path":"` + src + `","destination_path":"` + dst + `"}`,
+			Reason:      "rename for clarity",
+			RiskLevel:   model.RiskHigh,
+		}},
+		Status:    model.PlanStatusAwaitingApproval,
+		CreatedAt: now,
+	}
+	if err := store.SavePlan(plan); err != nil {
+		t.Fatal(err)
+	}
+
+	diff, err := NewPlanService(store, vaultRoot).Diff(plan.ID)
+	if err != nil {
+		t.Fatalf("Diff() error = %v", err)
+	}
+	if diff == nil || len(diff.Entries) != 1 {
+		t.Fatalf("Diff() = %+v, want 1 entry", diff)
+	}
+	if !strings.Contains(diff.Summary, "高风险计划") {
+		t.Fatalf("diff summary = %q, want high-risk warning", diff.Summary)
+	}
+	entry := diff.Entries[0]
+	if entry.Type != model.OperationWriteProposal {
+		t.Fatalf("entry type = %q, want %q", entry.Type, model.OperationWriteProposal)
+	}
+	if entry.TargetPath != "Meta/Agent-Proposals/proposal_hrdiff.md" {
+		t.Fatalf("entry target_path = %q, want proposal path", entry.TargetPath)
+	}
+	if !strings.Contains(entry.Preview, "rename: "+src+" → "+dst) {
+		t.Fatalf("entry preview = %q, want rename line", entry.Preview)
+	}
+}
+
+func TestApproveHighRiskPlanWritesProposalNoteAndProposedLog(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "openwhisker.db")
+	vaultRoot := filepath.Join(dir, "vault")
+	if err := os.MkdirAll(vaultRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Now().UTC()
+	job := model.WikiJob{
+		ID:        "job_hr",
+		Type:      model.JobTypeOrganizeRaw,
+		Status:    model.JobStatusAwaitingApproval,
+		Source:    "test",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := store.CreateJob(job); err != nil {
+		t.Fatal(err)
+	}
+
+	src := "Knowledge/topic/old-name.md"
+	dst := "Knowledge/topic/new-name.md"
+	renamePayload := `{"source_path":"` + src + `","destination_path":"` + dst + `","reason":"clearer title"}`
+	plan := model.VaultPlan{
+		ID:               "plan_hr",
+		JobID:            job.ID,
+		Purpose:          "rename existing Knowledge note",
+		RiskLevel:        model.RiskHigh,
+		RequiresApproval: true,
+		Summary:          "Rename Knowledge note to clearer title.",
+		SourceRefs:       []string{job.ID, src},
+		TargetPaths:      []string{src, dst},
+		Operations: []model.VaultOperation{{
+			ID:          "op_rename",
+			Type:        model.OperationRenameNote,
+			TargetPath:  src,
+			PayloadJSON: renamePayload,
+			Reason:      "Rename to fix ambiguity.",
+			RiskLevel:   model.RiskHigh,
+		}},
+		Status:    model.PlanStatusAwaitingApproval,
+		CreatedAt: now,
+	}
+	if err := store.SavePlan(plan); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := NewPlanService(store, vaultRoot).Approve(context.Background(), plan.ID)
+	if err != nil {
+		t.Fatalf("Approve() error = %v", err)
+	}
+	if result.Status != model.PlanStatusProposalWritten {
+		t.Fatalf("Approve status = %q, want %q", result.Status, model.PlanStatusProposalWritten)
+	}
+
+	proposalPath := filepath.Join(vaultRoot, "Meta", "Agent-Proposals", "proposal_hr.md")
+	content, err := os.ReadFile(proposalPath)
+	if err != nil {
+		t.Fatalf("read proposal note: %v", err)
+	}
+	for _, needle := range []string{"type: proposal", "proposal/rename", "## 影响路径", src, dst} {
+		if !strings.Contains(string(content), needle) {
+			t.Fatalf("proposal note missing %q:\n%s", needle, string(content))
+		}
+	}
+
+	if _, err := os.Stat(filepath.Join(vaultRoot, "Knowledge")); !os.IsNotExist(err) {
+		t.Fatalf("Knowledge/ unexpectedly created: err=%v", err)
+	}
+
+	logs, err := store.ListOperationLogsByPlan(plan.ID)
+	if err != nil {
+		t.Fatalf("ListOperationLogsByPlan: %v", err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("logs = %d, want 1", len(logs))
+	}
+	if logs[0].Outcome != model.OperationOutcomeProposed {
+		t.Fatalf("outcome = %q, want %q", logs[0].Outcome, model.OperationOutcomeProposed)
+	}
+	if logs[0].OpType != model.OperationWriteProposal {
+		t.Fatalf("op_type = %q, want %q", logs[0].OpType, model.OperationWriteProposal)
+	}
+}
+
 func TestOrganizeLastPreparesDiffAndApproveAppliesPlan(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "openwhisker.db")

@@ -328,14 +328,48 @@ func (s *Store) scanPlan(row planScanner) (model.VaultPlan, error) {
 	return plan, nil
 }
 
+func (s *Store) ListOperationLogsByPlan(planID string) ([]model.VaultOperationLog, error) {
+	rows, err := s.db.Query(`
+SELECT id, plan_id, job_id, op_type, target_path, before_hash, after_hash, payload_json,
+       result_json, reason, status, outcome, created_at, applied_at
+FROM vault_operation_logs
+WHERE plan_id = ?
+ORDER BY created_at ASC`, planID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var logs []model.VaultOperationLog
+	for rows.Next() {
+		var log model.VaultOperationLog
+		var createdAt string
+		var appliedAt sql.NullString
+		if err := rows.Scan(
+			&log.ID, &log.PlanID, &log.JobID, &log.OpType, &log.TargetPath,
+			&log.BeforeHash, &log.AfterHash, &log.PayloadJSON, &log.ResultJSON,
+			&log.Reason, &log.Status, &log.Outcome, &createdAt, &appliedAt,
+		); err != nil {
+			return nil, err
+		}
+		log.CreatedAt = parseTime(createdAt)
+		log.AppliedAt = parseNullableTime(appliedAt)
+		logs = append(logs, log)
+	}
+	return logs, rows.Err()
+}
+
 func (s *Store) AppendOperationLog(log model.VaultOperationLog) error {
+	outcome := log.Outcome
+	if outcome == "" {
+		outcome = model.OperationOutcomeApplied
+	}
 	_, err := s.db.Exec(`
 INSERT INTO vault_operation_logs (
   id, plan_id, job_id, op_type, target_path, before_hash, after_hash, payload_json,
-  result_json, reason, status, created_at, applied_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  result_json, reason, status, outcome, created_at, applied_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		log.ID, log.PlanID, log.JobID, log.OpType, log.TargetPath, log.BeforeHash, log.AfterHash,
-		log.PayloadJSON, log.ResultJSON, log.Reason, log.Status, formatTime(log.CreatedAt),
+		log.PayloadJSON, log.ResultJSON, log.Reason, log.Status, outcome, formatTime(log.CreatedAt),
 		nullableTime(log.AppliedAt))
 	return err
 }

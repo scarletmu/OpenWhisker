@@ -21,17 +21,35 @@ const (
 	PlanStatusRejected         = "rejected"
 	PlanStatusApplying         = "applying"
 	PlanStatusApplied          = "applied"
+	PlanStatusProposalWritten  = "proposal_written"
 	PlanStatusFailed           = "failed"
 	PlanStatusConflict         = "conflict"
 
 	RiskLow    = "low"
 	RiskMedium = "medium"
+	RiskHigh   = "high"
 
 	OperationCreateNote       = "create_note"
 	OperationAppendNote       = "append_note"
 	OperationRewriteNote      = "rewrite_note"
 	OperationMoveNote         = "move_note"
 	OperationWriteAgentReport = "write_agent_report"
+	OperationRenameNote       = "rename_note"
+	OperationBulkRetag        = "bulk_retag"
+	OperationBulkLinkRewrite  = "bulk_link_rewrite"
+	OperationWriteProposal    = "write_proposal"
+
+	ProposalNoteDir = "Meta/Agent-Proposals"
+
+	ProposalKindSplit            = "split"
+	ProposalKindMerge            = "merge"
+	ProposalKindRename           = "rename"
+	ProposalKindBulkRetag        = "bulk-retag"
+	ProposalKindBulkLinkRewrite  = "bulk-link-rewrite"
+	ProposalBulkAffectsThreshold = 5
+
+	OperationOutcomeApplied  = "applied"
+	OperationOutcomeProposed = "proposed"
 
 	OutboxKindResult   = "result"
 	OutboxKindError    = "error"
@@ -172,6 +190,26 @@ type MoveNotePayload struct {
 	ProcessingNote  string `json:"processing_note,omitempty"`
 }
 
+type RenameNotePayload struct {
+	SourcePath      string `json:"source_path"`
+	DestinationPath string `json:"destination_path"`
+	Reason          string `json:"reason,omitempty"`
+}
+
+type BulkRetagPayload struct {
+	AffectedPaths []string `json:"affected_paths"`
+	AddTags       []string `json:"add_tags,omitempty"`
+	RemoveTags    []string `json:"remove_tags,omitempty"`
+	Reason        string   `json:"reason,omitempty"`
+}
+
+type BulkLinkRewritePayload struct {
+	FromPath      string   `json:"from_path"`
+	ToPath        string   `json:"to_path"`
+	AffectedPaths []string `json:"affected_paths"`
+	Reason        string   `json:"reason,omitempty"`
+}
+
 type VaultDiff struct {
 	PlanID  string      `json:"plan_id"`
 	Summary string      `json:"summary"`
@@ -223,6 +261,7 @@ type VaultOperationLog struct {
 	ResultJSON  string
 	Reason      string
 	Status      string
+	Outcome     string
 	CreatedAt   time.Time
 	AppliedAt   *time.Time
 }

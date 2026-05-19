@@ -604,6 +604,9 @@ func (s PlanService) Diff(identifier string) (*model.VaultDiff, error) {
 	if err != nil {
 		return nil, err
 	}
+	if plan.RiskLevel == model.RiskHigh {
+		return s.synthesizeHighRiskDiff(plan)
+	}
 	if plan.Diff == nil {
 		return nil, NoPreparedDiffError{
 			PlanID:    plan.ID,
@@ -612,6 +615,63 @@ func (s PlanService) Diff(identifier string) (*model.VaultDiff, error) {
 		}
 	}
 	return plan.Diff, nil
+}
+
+func (s PlanService) synthesizeHighRiskDiff(plan model.VaultPlan) (*model.VaultDiff, error) {
+	kind, err := policy.ClassifyProposalKind(plan)
+	if err != nil {
+		return nil, err
+	}
+	targetPath := executor.ProposalNotePath(plan.ID)
+	summary := "⚠ 高风险计划：批准后只生成 proposal note，不写入 Knowledge。原摘要：" + plan.Summary
+	preview, err := highRiskOperationsPreview(plan.Operations)
+	if err != nil {
+		return nil, err
+	}
+	return &model.VaultDiff{
+		PlanID:  plan.ID,
+		Summary: summary,
+		Entries: []model.DiffEntry{{
+			OperationID: plan.ID,
+			Type:        model.OperationWriteProposal,
+			TargetPath:  targetPath,
+			Summary:     fmt.Sprintf("write proposal note (proposal/%s)", kind),
+			Preview:     preview,
+		}},
+	}, nil
+}
+
+func highRiskOperationsPreview(operations []model.VaultOperation) (string, error) {
+	var lines []string
+	for _, op := range operations {
+		switch op.Type {
+		case model.OperationRenameNote:
+			var payload model.RenameNotePayload
+			if err := json.Unmarshal([]byte(op.PayloadJSON), &payload); err != nil {
+				return "", fmt.Errorf("decode rename_note payload for %s: %w", op.ID, err)
+			}
+			lines = append(lines, fmt.Sprintf("rename: %s → %s", payload.SourcePath, payload.DestinationPath))
+		case model.OperationBulkRetag:
+			var payload model.BulkRetagPayload
+			if err := json.Unmarshal([]byte(op.PayloadJSON), &payload); err != nil {
+				return "", fmt.Errorf("decode bulk_retag payload for %s: %w", op.ID, err)
+			}
+			lines = append(lines, fmt.Sprintf("bulk-retag: 影响 %d 篇 (add=%s remove=%s)",
+				len(payload.AffectedPaths),
+				strings.Join(payload.AddTags, ","),
+				strings.Join(payload.RemoveTags, ",")))
+		case model.OperationBulkLinkRewrite:
+			var payload model.BulkLinkRewritePayload
+			if err := json.Unmarshal([]byte(op.PayloadJSON), &payload); err != nil {
+				return "", fmt.Errorf("decode bulk_link_rewrite payload for %s: %w", op.ID, err)
+			}
+			lines = append(lines, fmt.Sprintf("bulk-link-rewrite: %s → %s (影响 %d 篇)",
+				payload.FromPath, payload.ToPath, len(payload.AffectedPaths)))
+		default:
+			lines = append(lines, fmt.Sprintf("unknown high-risk op: %s", op.Type))
+		}
+	}
+	return strings.Join(lines, "\n"), nil
 }
 
 func (s PlanService) Approve(ctx context.Context, identifier string) (PlanActionResult, error) {
@@ -628,6 +688,9 @@ func (s PlanService) Approve(ctx context.Context, identifier string) (PlanAction
 	}
 	plan.Status = model.PlanStatusApproved
 	plan.ApprovedAt = &approvedAt
+	if plan.RiskLevel == model.RiskHigh {
+		return s.approveHighRiskAsProposal(ctx, plan)
+	}
 	if err := s.checker.CheckApproved(plan); err != nil {
 		_ = s.store.MarkPlanFailed(plan.ID, model.PlanStatusFailed, err.Error())
 		return PlanActionResult{}, err
@@ -936,6 +999,63 @@ func (s PlanService) failPlanJob(jobID string, err error) error {
 		CreatedAt: s.now(),
 	})
 	return s.store.UpdateJobStatus(jobID, model.JobStatusFailed, "", err.Error())
+}
+
+func (s PlanService) approveHighRiskAsProposal(ctx context.Context, plan model.VaultPlan) (PlanActionResult, error) {
+	if err := s.checker.CheckForApprovalHighRisk(plan); err != nil {
+		_ = s.store.MarkPlanFailed(plan.ID, model.PlanStatusFailed, err.Error())
+		return PlanActionResult{}, err
+	}
+	if err := s.store.UpdateJobStatus(plan.JobID, model.JobStatusApplying, "", ""); err != nil {
+		return PlanActionResult{}, err
+	}
+	if err := s.store.UpdatePlanStatus(plan.ID, model.PlanStatusApplying, nil); err != nil {
+		return PlanActionResult{}, err
+	}
+	plan.Status = model.PlanStatusApplying
+	applied, err := s.executor.ApplyAsProposal(ctx, plan)
+	if err != nil {
+		_ = s.store.MarkPlanFailed(plan.ID, model.PlanStatusFailed, err.Error())
+		_ = s.store.UpdateJobStatus(plan.JobID, model.JobStatusFailed, "", err.Error())
+		if !s.suppressOutbox {
+			_ = s.store.AddOutboxMessage(model.OutboxMessage{
+				ID:        model.NewID("out"),
+				JobID:     plan.JobID,
+				Kind:      model.OutboxKindError,
+				Body:      fmt.Sprintf("Plan %s proposal write failed: %s", plan.ID, err.Error()),
+				Status:    model.OutboxStatusPending,
+				CreatedAt: s.now(),
+			})
+		}
+		return PlanActionResult{}, err
+	}
+	terminalAt := s.now()
+	if err := s.store.UpdatePlanStatus(plan.ID, model.PlanStatusProposalWritten, &terminalAt); err != nil {
+		return PlanActionResult{}, err
+	}
+	resultJSON, _ := json.Marshal(model.VaultApplyResult{AppliedOperations: []model.AppliedOperation{applied}})
+	if err := s.store.UpdateJobStatus(plan.JobID, model.JobStatusDone, string(resultJSON), ""); err != nil {
+		return PlanActionResult{}, err
+	}
+	body := fmt.Sprintf("Plan %s wrote proposal note: %s", plan.ID, applied.TargetPath)
+	if !s.suppressOutbox {
+		if err := s.store.AddOutboxMessage(model.OutboxMessage{
+			ID:        model.NewID("out"),
+			JobID:     plan.JobID,
+			Kind:      model.OutboxKindResult,
+			Body:      body,
+			Status:    model.OutboxStatusPending,
+			CreatedAt: s.now(),
+		}); err != nil {
+			return PlanActionResult{}, err
+		}
+	}
+	return PlanActionResult{
+		JobID:    plan.JobID,
+		PlanID:   plan.ID,
+		Status:   model.PlanStatusProposalWritten,
+		Messages: []string{body},
+	}, nil
 }
 
 func planAppliedMessage(planID, warning string) string {

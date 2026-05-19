@@ -212,3 +212,207 @@ func mustJSON(t *testing.T, value any) string {
 	}
 	return string(data)
 }
+
+func TestCheckerAllowsHighRiskRenamePlan(t *testing.T) {
+	plan := highRiskRenamePlan(t)
+	if err := NewChecker().CheckForApprovalHighRisk(plan); err != nil {
+		t.Fatalf("CheckForApprovalHighRisk() error = %v", err)
+	}
+	kind, err := ClassifyProposalKind(plan)
+	if err != nil {
+		t.Fatalf("ClassifyProposalKind() error = %v", err)
+	}
+	if kind != model.ProposalKindRename {
+		t.Fatalf("ClassifyProposalKind() = %q, want %q", kind, model.ProposalKindRename)
+	}
+}
+
+func TestCheckerAllowsHighRiskBulkRetagPlan(t *testing.T) {
+	plan := highRiskBulkRetagPlan(t)
+	if err := NewChecker().CheckForApprovalHighRisk(plan); err != nil {
+		t.Fatalf("CheckForApprovalHighRisk() error = %v", err)
+	}
+	kind, err := ClassifyProposalKind(plan)
+	if err != nil {
+		t.Fatalf("ClassifyProposalKind() error = %v", err)
+	}
+	if kind != model.ProposalKindBulkRetag {
+		t.Fatalf("ClassifyProposalKind() = %q, want %q", kind, model.ProposalKindBulkRetag)
+	}
+}
+
+func TestCheckerRejectsHighRiskPlanWithMediumRisk(t *testing.T) {
+	plan := highRiskRenamePlan(t)
+	plan.RiskLevel = model.RiskMedium
+	err := NewChecker().CheckForApprovalHighRisk(plan)
+	if err == nil || !strings.Contains(err.Error(), "high-risk approval flow") {
+		t.Fatalf("CheckForApprovalHighRisk() error = %v, want risk mismatch", err)
+	}
+}
+
+func TestCheckerRejectsHighRiskRenameOutsideKnowledge(t *testing.T) {
+	plan := highRiskRenamePlan(t)
+	plan.Operations[0].TargetPath = "Raw/Inbox/note.md"
+	plan.Operations[0].PayloadJSON = mustJSON(t, model.RenameNotePayload{
+		SourcePath:      "Raw/Inbox/note.md",
+		DestinationPath: "Raw/Inbox/renamed.md",
+	})
+	plan.TargetPaths = []string{"Raw/Inbox/note.md", "Raw/Inbox/renamed.md"}
+	err := NewChecker().CheckForApprovalHighRisk(plan)
+	if err == nil || !strings.Contains(err.Error(), "outside Knowledge") {
+		t.Fatalf("CheckForApprovalHighRisk() error = %v, want Knowledge-scope error", err)
+	}
+}
+
+func TestCheckerRejectsHighRiskRenameInsideDrafts(t *testing.T) {
+	plan := highRiskRenamePlan(t)
+	plan.Operations[0].TargetPath = "Knowledge/Drafts/draft.md"
+	plan.Operations[0].PayloadJSON = mustJSON(t, model.RenameNotePayload{
+		SourcePath:      "Knowledge/Drafts/draft.md",
+		DestinationPath: "Knowledge/Drafts/renamed.md",
+	})
+	plan.TargetPaths = []string{"Knowledge/Drafts/draft.md", "Knowledge/Drafts/renamed.md"}
+	err := NewChecker().CheckForApprovalHighRisk(plan)
+	if err == nil || !strings.Contains(err.Error(), "draft renames") {
+		t.Fatalf("CheckForApprovalHighRisk() error = %v, want draft-renames error", err)
+	}
+}
+
+func TestCheckerRejectsHighRiskBulkRetagBelowThreshold(t *testing.T) {
+	plan := highRiskBulkRetagPlan(t)
+	short := []string{"Knowledge/a.md", "Knowledge/b.md"}
+	plan.Operations[0].PayloadJSON = mustJSON(t, model.BulkRetagPayload{
+		AffectedPaths: short,
+		AddTags:       []string{"topic/database"},
+	})
+	err := NewChecker().CheckForApprovalHighRisk(plan)
+	if err == nil || !strings.Contains(err.Error(), ">=") {
+		t.Fatalf("CheckForApprovalHighRisk() error = %v, want threshold error", err)
+	}
+}
+
+func TestCheckerRejectsHighRiskOpInMediumPlan(t *testing.T) {
+	plan := mediumRiskRawOrganizerPlan(t)
+	plan.Operations = append(plan.Operations, model.VaultOperation{
+		ID:         "op_rename",
+		Type:       model.OperationRenameNote,
+		TargetPath: "Knowledge/topic/note.md",
+		PayloadJSON: mustJSON(t, model.RenameNotePayload{
+			SourcePath:      "Knowledge/topic/note.md",
+			DestinationPath: "Knowledge/topic/renamed.md",
+		}),
+		Reason:    "rename note",
+		RiskLevel: model.RiskHigh,
+	})
+	err := NewChecker().CheckForApproval(plan)
+	if err == nil {
+		t.Fatal("CheckForApproval() expected high-risk op inside medium plan to be rejected")
+	}
+}
+
+func TestClassifyProposalKindMergeAndSplit(t *testing.T) {
+	mergePlan := highRiskRenamePlan(t)
+	mergePlan.Operations = []model.VaultOperation{
+		renameOp(t, "op_r1", "Knowledge/topic/a.md", "Knowledge/topic/merged.md"),
+		renameOp(t, "op_r2", "Knowledge/topic/b.md", "Knowledge/topic/merged.md"),
+	}
+	mergePlan.TargetPaths = []string{
+		"Knowledge/topic/a.md",
+		"Knowledge/topic/b.md",
+		"Knowledge/topic/merged.md",
+	}
+	kind, err := ClassifyProposalKind(mergePlan)
+	if err != nil {
+		t.Fatalf("ClassifyProposalKind() error = %v", err)
+	}
+	if kind != model.ProposalKindMerge {
+		t.Fatalf("merge kind = %q, want %q", kind, model.ProposalKindMerge)
+	}
+
+	splitPlan := highRiskRenamePlan(t)
+	splitPlan.Operations = []model.VaultOperation{
+		renameOp(t, "op_r1", "Knowledge/topic/a.md", "Knowledge/topic/a-part1.md"),
+		renameOp(t, "op_r2", "Knowledge/topic/a.md", "Knowledge/topic/a-part2.md"),
+	}
+	splitPlan.TargetPaths = []string{
+		"Knowledge/topic/a.md",
+		"Knowledge/topic/a-part1.md",
+		"Knowledge/topic/a-part2.md",
+	}
+	kind, err = ClassifyProposalKind(splitPlan)
+	if err != nil {
+		t.Fatalf("ClassifyProposalKind() error = %v", err)
+	}
+	if kind != model.ProposalKindSplit {
+		t.Fatalf("split kind = %q, want %q", kind, model.ProposalKindSplit)
+	}
+}
+
+func renameOp(t *testing.T, id, src, dst string) model.VaultOperation {
+	t.Helper()
+	return model.VaultOperation{
+		ID:         id,
+		Type:       model.OperationRenameNote,
+		TargetPath: src,
+		PayloadJSON: mustJSON(t, model.RenameNotePayload{
+			SourcePath:      src,
+			DestinationPath: dst,
+		}),
+		Reason:    "rename for high-risk test",
+		RiskLevel: model.RiskHigh,
+	}
+}
+
+func highRiskRenamePlan(t *testing.T) model.VaultPlan {
+	t.Helper()
+	src := "Knowledge/topic/old-name.md"
+	dst := "Knowledge/topic/new-name.md"
+	return model.VaultPlan{
+		ID:               "plan_high",
+		JobID:            "job_high",
+		Purpose:          "rename existing Knowledge note",
+		RiskLevel:        model.RiskHigh,
+		RequiresApproval: true,
+		Summary:          "Rename existing Knowledge note to clearer title.",
+		SourceRefs:       []string{"job_review", src},
+		TargetPaths:      []string{src, dst},
+		Operations: []model.VaultOperation{
+			renameOp(t, "op_rename", src, dst),
+		},
+	}
+}
+
+func highRiskBulkRetagPlan(t *testing.T) model.VaultPlan {
+	t.Helper()
+	affected := []string{
+		"Knowledge/topic/a.md",
+		"Knowledge/topic/b.md",
+		"Knowledge/topic/c.md",
+		"Knowledge/topic/d.md",
+		"Knowledge/topic/e.md",
+	}
+	return model.VaultPlan{
+		ID:               "plan_retag",
+		JobID:            "job_retag",
+		Purpose:          "consolidate tag taxonomy across topic",
+		RiskLevel:        model.RiskHigh,
+		RequiresApproval: true,
+		Summary:          "Bulk retag five Knowledge notes under topic/database.",
+		SourceRefs:       []string{"job_review"},
+		TargetPaths:      append([]string{}, affected...),
+		Operations: []model.VaultOperation{
+			{
+				ID:         "op_retag",
+				Type:       model.OperationBulkRetag,
+				TargetPath: affected[0],
+				PayloadJSON: mustJSON(t, model.BulkRetagPayload{
+					AffectedPaths: affected,
+					AddTags:       []string{"topic/database"},
+					RemoveTags:    []string{"topic/db"},
+				}),
+				Reason:    "Migrate topic/db to topic/database.",
+				RiskLevel: model.RiskHigh,
+			},
+		},
+	}
+}

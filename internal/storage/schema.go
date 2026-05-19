@@ -137,6 +137,7 @@ ON pending_clarifications(source_key, status, created_at);
 		{"vault_plans", "rejected_reason", "TEXT NOT NULL DEFAULT ''"},
 		{"vault_plans", "error", "TEXT NOT NULL DEFAULT ''"},
 		{"wiki_jobs", "source_key", "TEXT NOT NULL DEFAULT ''"},
+		{"vault_operation_logs", "outcome", "TEXT NOT NULL DEFAULT 'applied'"},
 	} {
 		if err := s.addColumnIfMissing(column.table, column.name, column.def); err != nil {
 			return err

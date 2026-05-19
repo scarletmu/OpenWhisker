@@ -343,6 +343,118 @@ fixture agent 仍可在测试中替代真实 provider。
 proposal note 能让用户理解结构变化、来源依据、影响路径和下一步审批方式。
 ```
 
+Phase 4C 进一步拆为四个子阶段，每个子阶段独立可 commit、独立可验收，按依赖顺序推进。子阶段之间不耦合 LLM 调通节奏，便于在不同时间窗口内分别推进。
+
+### 4C.1：High-risk proposal-only policy
+
+目标：在引入新 LLM agent 之前，先把 high-risk plan 的安全出口铺好。让 4C.2 / 4C.3 在判断不准时可以稳定降级为 proposal，而不是被迫硬写或拒绝。
+
+范围内：
+
+- 在 policy 层固化 high-risk 判定枚举：`split` / `merge` / `rename`（已有正式 Knowledge note）/ 大规模 retag / 大规模 link rewrite。第一版以静态规则识别 plan 内 operation 组合，无需新 LLM 调用。
+- plan lifecycle 新增 `proposal_written` 终态：high-risk plan 在 `approve` 时不进入 `direct_fs_executor` apply 路径，而是生成一篇结构化 proposal note 写入受控路径，原始 plan 操作不落 vault。
+- proposal note 默认写入 `Meta/Agent-Proposals/`，frontmatter / 必填章节由 [`docs/architecture/proposal-note-schema.md`](../architecture/proposal-note-schema.md) 定义。
+- `vault_operation_logs` 增加可区分 `applied` / `proposed` 的字段（或新增 row type），保留 hash chain 完整性。
+- `plan diff` 对 high-risk plan 展示「将生成 proposal note 而非直接写入」的明确提示，避免用户以为是普通 medium-risk 审批。
+- 现有 medium-risk Raw Organizer 闭环行为完全不变（回归测试覆盖）。
+
+范围外：
+
+- 自动检测「我应该把这俩 note 合并」之类的 high-risk **建议**生成。本阶段只处理「plan 已经长成 high-risk 形状时怎么办」，建议生成由 4C.2 负责。
+- proposal note 上的二次审批 / 自动执行。proposal 是给人看的终态，不再走 OpenWhisker apply。
+
+验收：
+
+```text
+给一个合成 high-risk plan（包含 rename 现有 Knowledge note + 大规模 retag），approve 后：
+- Knowledge/ 没有任何写入；
+- Meta/Agent-Proposals/ 出一篇符合 proposal-note-schema 的 proposal note；
+- vault_operation_logs 中该 plan 状态为 proposed，hash chain 保持完整；
+- 现有 medium-risk Raw Organizer end-to-end 测试全绿，行为不变。
+```
+
+### 4C.2：Knowledge Expander（medium-risk 主路径）
+
+目标：新增 LLM agent，针对已有 thin Knowledge note + 关联 raw，生成扩展 plan 或 child note draft；拿不准时通过 4C.1 的 proposal 出口降级。
+
+范围内：
+
+- 新建 `KnowledgeExpander` LLM agent，契约对齐 Raw Organizer：OpenAI-compatible `json_object` 响应、客户端 `validateKnowledgeExpanderOutput` 硬校验、单次空 content 重试。
+- 输入边界：一篇目标 Knowledge note + 由 source trace 选出的关联 raw / processed note。不读取 vault 根 `AGENTS.md` 等规则源，除非显式 `--context-mode=vault-rules`，与 Raw Organizer 对齐。
+- 输出：medium-risk `VaultPlan`，支持两种主要形态：
+  - `append`：对已有 Knowledge note 末尾追加章节，必须有 `before_hash`；
+  - `create_child_note`：新建 child note，必须含 frontmatter / controlled tags / `needs_review` 清单 / 反向链接到关联 Raw/Processed。
+- 当 expander 判断 topic 边界不清、需要 split 或 merge 时，**直接输出 high-risk plan**，交由 4C.1 走 proposal 路径，而不是硬塞为 medium-risk。
+- CLI 入口最小形态：`expand <knowledge_path>`。Matrix 入口在 4C.4 接入。
+- 在 [`docs/architecture/`](../architecture/) 下新增 `knowledge-expander-model-contract.md`，定义输入/输出 schema 与硬校验规则。
+
+范围外：
+
+- 主动「扫描整个 vault 找扩展机会」。本阶段只在用户显式指定 Knowledge note 时工作。
+- 自动选择关联 raw。第一版只用 source trace 中已写入的反向引用。
+- IM 自然语言入口（4C.4）。
+
+验收：
+
+```text
+在真实 vault 上：
+- 选一篇 thin Knowledge note + 若干关联 raw，运行 expand <path> --organizer=openai-compatible 产出 medium-risk plan；
+- plan diff / approve --sync=off 能正常落地，append 命中 before_hash，child note 含 frontmatter/tags/反链；
+- 若 LLM 输出 split/merge/rename 类操作组合，plan 被判定 high-risk 并走 4C.1 proposal 出口；
+- 单测覆盖 schema 校验、空 content 重试、high-risk 降级三条路径。
+```
+
+### 4C.3：Organize Today 多 topic 分组
+
+目标：把 `organize today` 从「单 grouped plan」升级为「按 topic 分组的多 plan」，提升用户一次性整理一天 raw 的吞吐量。
+
+范围内：
+
+- `organize today` 在 raw topic 明显分歧时，返回多个独立 `plan_id`，每个对应一个 topic 分组，独立 diff / approve / reject。
+- 分组判定优先复用 Raw Organizer 已有的 `raw_kind` 推断和文本聚类，**不**引入新 LLM 调用 round。
+- Matrix `/organize today` 返回所有 plan_id 的列表，用户用 `/diff <plan_id>` 选择性预览。
+- 单 topic 输入行为与现状一致（回归测试）。
+
+范围外：
+
+- 自动跨天聚合（涉及历史 raw 重组，超出 organize today 的语义）。
+- 自动决定哪个 group 应该走 Knowledge Expander 进一步扩展。
+
+验收：
+
+```text
+给一组明显跨 ≥2 topic 的 raw，organize today --organizer=openai-compatible 返回 ≥2 grouped plan；
+每个 plan 可独立 diff / approve / reject；
+单 topic 输入仍只返回 1 个 plan，行为与 Phase 4B 一致；
+对应 grouped plan 测试和 Matrix 入口测试全绿。
+```
+
+### 4C.4：IM 自然语言入口 + intent router 扩展
+
+目标：把 4C.2 / 4C.3 的能力暴露到 Matrix 自然语言入口，并通过 intent router 覆盖典型说法。
+
+范围内：
+
+- intent router rules-only 短句词表新增：`扩展一下 <topic>` / `这块要拆` / `这两个合并` / `重命名 <path>` / `处理今天分组` 等高频说法（先用直觉版词表，落地后基于真实未命中样本扩张）。
+- intent classifier 输出枚举新增 `knowledge_expand` / `propose_restructure`，[`docs/architecture/intent-router-model-contract.md`](../architecture/intent-router-model-contract.md) 同步更新。
+- Matrix `/diff` 渲染层适配：对 high-risk plan 显示 proposal-only 提示；对多 plan organize today 输出 plan 列表 + 每个 plan 独立 approval 入口。
+- intent audit `executed_action` 枚举新增 `expand_pending_approval` / `proposal_written`。
+
+范围外：
+
+- 多模态输入（图片 / 文件 / 语音）。仍由后续阶段承接。
+- 全自动批量审批 / 一键 approve 所有 grouped plan。
+
+验收：
+
+```text
+真实 Matrix 上：
+- 自然语言「扩展一下 <某 Knowledge>」走通：classifier → expand plan → /diff → 同意 → 落地；
+- 自然语言「这两个合并」走通：classifier → high-risk plan → /diff 显示 proposal-only → 同意 → proposal note 写入 Meta/Agent-Proposals/；
+- audit jsonl 包含 expand_pending_approval / proposal_written 行；
+- 单 plan organize today 行为不变。
+```
+
 ## 已确认的 Phase 4 决策
 
 - Phase 4 主线是真实 LLM + Matrix IM approval workflow。
