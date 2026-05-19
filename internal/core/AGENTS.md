@@ -9,6 +9,7 @@ Primary responsibilities:
 - Call policy checks before prepare or apply.
 - Prepare approval diffs and route approve/reject actions.
 - Emit user-visible outbox messages.
+- Route `RawOrganizer` and `KnowledgeExpander` LLM-backed plans through prepare / approve. High-risk plans skip `executor.Prepare` and reach `awaiting_approval` via `prepareHighRiskApprovalPlan`; `Approve` then writes a proposal note via the 4C.1 path.
 
 Primary files:
 

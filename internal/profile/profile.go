@@ -7,12 +7,14 @@ import (
 )
 
 const (
-	ProfileDocumentPath       = "OpenWhisker/VaultProfile.md"
-	RawOrganizerSkillPath     = "OpenWhisker/VaultRawOrganizerSkill.md"
-	RawOrganizerSkillName     = "vault-raw-organizer"
-	ProfileStatusConfigured   = "configured"
-	ProfileSourceManualConfig = "manual-config"
-	ProfileSourceVaultSkill   = "vault-local-skill"
+	ProfileDocumentPath        = "OpenWhisker/VaultProfile.md"
+	RawOrganizerSkillPath      = "OpenWhisker/VaultRawOrganizerSkill.md"
+	RawOrganizerSkillName      = "vault-raw-organizer"
+	KnowledgeExpanderSkillPath = "OpenWhisker/VaultKnowledgeExpanderSkill.md"
+	KnowledgeExpanderSkillName = "vault-knowledge-expander"
+	ProfileStatusConfigured    = "configured"
+	ProfileSourceManualConfig  = "manual-config"
+	ProfileSourceVaultSkill    = "vault-local-skill"
 )
 
 type VaultProfile struct {
@@ -70,6 +72,51 @@ func ContextDocuments(conventions policy.Conventions) []Document {
 	return []Document{
 		{Path: skill.Path, Content: skill.Content},
 		{Path: ProfileDocumentPath, Content: RenderProfileMarkdown(vaultProfile)},
+	}
+}
+
+func KnowledgeExpanderContextDocuments(conventions policy.Conventions) []Document {
+	vaultProfile := NewConfiguredVaultProfile(conventions)
+	skill := KnowledgeExpanderSkill(vaultProfile)
+	return []Document{
+		{Path: skill.Path, Content: skill.Content},
+		{Path: ProfileDocumentPath, Content: RenderProfileMarkdown(vaultProfile)},
+	}
+}
+
+func KnowledgeExpanderSkill(vaultProfile VaultProfile) VaultSkill {
+	conventions := vaultProfile.Conventions.Normalize()
+	return VaultSkill{
+		Name:    KnowledgeExpanderSkillName,
+		Path:    KnowledgeExpanderSkillPath,
+		Purpose: "expand an existing thin Knowledge note into a reviewable medium-risk plan, or surface a high-risk restructure proposal when boundaries are unclear",
+		Content: strings.Join([]string{
+			"# OpenWhisker Vault Knowledge Expander Skill",
+			"",
+			"Purpose: expand an existing thin Knowledge note into a reviewable medium-risk plan, or surface a high-risk restructure proposal when topic boundaries are unclear.",
+			"",
+			"This task skill is compiled from the current VaultProfile. Treat it as the main vault-specific guidance for this run; the profile is included only as the auditable fact summary behind the skill.",
+			"",
+			"Profile facts used by this skill:",
+			"- Profile id: " + conventions.ProfileID,
+			"- Knowledge directory: " + conventions.KnowledgeDir,
+			"- Draft output directory: " + conventions.KnowledgeDraftDir,
+			"- Raw processed directory: " + conventions.RawProcessedDir,
+			"- Required draft tags: " + renderInlineList(conventions.RequiredDraftTags),
+			"",
+			"Rules:",
+			"- Output one JSON object with `kind` one of `append` / `create_child_note` / `propose_restructure`.",
+			"- For `append`, return a Markdown H2-level section to append to the target note; do not rewrite or replace existing content.",
+			"- For `create_child_note`, return a relative path (relative to the target note's parent), a Chinese title, and a Markdown body without frontmatter and without a top-level H1.",
+			"- For `propose_restructure`, return one of split / merge / rename / bulk-retag / bulk-link-rewrite together with `rationale` and the full `affected_paths` list. OpenWhisker will turn this into a high-risk plan and a proposal note; do not attempt to execute the restructure directly.",
+			"- Write human-facing note content in Chinese by default; keep fixed technical terms, paths, property names, tag values, commands, APIs, library names, and protocol names in English.",
+			"- Preserve source traceability: surface the target Knowledge note path and any related Raw/Processed paths in `review_items` when the inferred content depends on them.",
+			"- Mark uncertain facts, version-sensitive claims, missing sources, and inferred content under `review_items`.",
+			"- Do not propose writes outside the configured Knowledge directory.",
+			"- Do not ask to write files, run shell, call Obsidian CLI, approve plans, or bypass policy.",
+			"",
+			"Local OpenWhisker policy validates paths, OpenWhisker trace metadata, profile-specific tags, source links, risk level, operations, and approval before any vault write. High-risk plans are routed to a proposal note in Meta/Agent-Proposals/ instead of touching Knowledge/.",
+		}, "\n"),
 	}
 }
 

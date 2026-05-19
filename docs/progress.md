@@ -93,7 +93,15 @@ Phase 4B.5 已提升为独立入口层能力：IM Intent Router。它位于 adap
      - **adapter**：`renderAdapterDiff` 对高风险 plan 输出 `⚠ 高风险计划` 顶部 banner + 影响路径列表 + `批准 (写 proposal)` 提示；CLI `plan diff` 通过同一条 Summary 路径自然带上警告。
      - **vault 同步**：`/Users/wang/Documents/KnowLedge/Meta/Agent-Proposals/AGENTS.md` 新建说明 proposal note 用途 + 一次性写入 + 不二次执行；vault 根 `AGENTS.md` 在 Folder Map 中登记。
      - **测试**：policy / executor / core 三层覆盖高风险 happy path + 越界拒绝 + 阈值拒绝 + proposal 写入 + log outcome=proposed + 高风险 diff 合成 + adapter 渲染。medium-risk 回归路径完全不变。`go test ./...` 全绿。
-   - 4C.2 / 4C.3 / 4C.4 还未开工。
+   - **4C.2 第一版骨架已落地（2026-05-19）**：
+     - **contract**：新增 `docs/architecture/knowledge-expander-model-contract.md`，定义 json_object 响应、`validateKnowledgeExpanderOutput` 客户端硬校验、空 content 单次重试、`append` / `create_child_note` / `propose_restructure` 三种 kind 与对应 plan 形态。
+     - **profile**：新增 `KnowledgeExpanderSkill` + `KnowledgeExpanderContextDocuments`，与 Raw Organizer 同级的 task-specific skill bundle。
+     - **agent**：新增 `OpenAIKnowledgeExpander` + `validateKnowledgeExpanderOutput` + `createWithRetry`；child note path 受 `validateChildRelativePath` 限制不离开 draft 目录。
+     - **core**：新增 `KnowledgeExpander` 接口 / `KnowledgeExpanderRequest` / `KnowledgeExpanderContext` / `PlanService.ExpandKnowledge` / `prepareHighRiskApprovalPlan`；medium-risk 经 `prepareApprovalPlan` 走 hash guard + diff，high-risk 经 `prepareHighRiskApprovalPlan` 直接进入 `awaiting_approval`，再由 `Approve` 走 4C.1 的 `ApplyAsProposal` 出口。
+     - **CLI**：新增 `openwhisker expand <knowledge_path>` + `knowledgeExpanderForName`；复用 `OPENWHISKER_LLM_*` 配置。默认 deterministic fallback 返回 not-implemented 错误，需显式 `--organizer=openai-compatible`。
+     - **测试**：覆盖 schema 校验 / 空 content 重试 / append plan 形态 / create_child_note 形态 / high-risk propose_restructure 形态 / core medium awaiting_approval / core high-risk → proposal note 写入。`go test ./...` 全绿。
+     - **待办**：真实 vault + OpenAI-compatible LLM 的 expand 端到端验证；Knowledge note frontmatter 中 source trace 的关联 raw / processed note 自动注入（当前只发目标 note）；Matrix `/expand` 自然语言入口（属于 4C.4 范围）。
+   - 4C.3 / 4C.4 还未开工。
 
 ## 当前已知限制
 

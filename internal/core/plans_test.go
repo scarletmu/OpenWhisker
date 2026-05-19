@@ -820,6 +820,165 @@ func (checkingVaultRulesRawOrganizer) OrganizeRaw(ctx context.Context, req RawOr
 	return buildOrganizePlan(req.Job, req.RawJob, req.RawPath, req.Conventions, req.Now)
 }
 
+type fakeKnowledgeExpander struct {
+	plan model.VaultPlan
+	err  error
+}
+
+func (f fakeKnowledgeExpander) ExpandKnowledge(_ context.Context, req KnowledgeExpanderRequest) (model.VaultPlan, error) {
+	if f.err != nil {
+		return model.VaultPlan{}, f.err
+	}
+	plan := f.plan
+	if plan.ID == "" {
+		plan.ID = model.NewID("plan")
+	}
+	plan.JobID = req.Job.ID
+	if plan.Status == "" {
+		plan.Status = model.PlanStatusProposed
+	}
+	if plan.CreatedAt.IsZero() {
+		plan.CreatedAt = req.Now
+	}
+	return plan, nil
+}
+
+func TestExpandKnowledgeMediumRiskAppendPlanGoesAwaitingApproval(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "openwhisker.db")
+	vaultRoot := filepath.Join(dir, "vault")
+	knowledgeDir := filepath.Join(vaultRoot, "Knowledge", "topic")
+	if err := os.MkdirAll(knowledgeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	knowledgePath := "Knowledge/topic/agent-memory.md"
+	if err := os.WriteFile(filepath.Join(vaultRoot, filepath.FromSlash(knowledgePath)), []byte("# Agent Memory\n\nthin note"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	expander := fakeKnowledgeExpander{plan: model.VaultPlan{
+		Purpose:          "expand existing Knowledge note via append",
+		RiskLevel:        model.RiskMedium,
+		RequiresApproval: true,
+		Summary:          "append a section to the target Knowledge note",
+		SourceRefs:       []string{"placeholder-job", knowledgePath},
+		TargetPaths:      []string{knowledgePath},
+		Operations: []model.VaultOperation{{
+			ID:          "op_append",
+			Type:        model.OperationAppendNote,
+			TargetPath:  knowledgePath,
+			PayloadJSON: `{"content":"\n\n## 新增结论\n\n- agent 记忆来自 vault。\n"}`,
+			Reason:      "Append an LLM-organized section to an existing Knowledge note.",
+			RiskLevel:   model.RiskMedium,
+		}},
+	}}
+
+	result, err := NewPlanServiceWithOptions(store, vaultRoot, PlanServiceOptions{
+		KnowledgeExpander: expander,
+	}).ExpandKnowledge(context.Background(), knowledgePath)
+	if err != nil {
+		t.Fatalf("ExpandKnowledge error = %v", err)
+	}
+	if result.Status != model.PlanStatusAwaitingApproval || result.PlanID == "" {
+		t.Fatalf("result = %+v, want awaiting approval plan", result)
+	}
+	if result.Diff == nil || len(result.Diff.Entries) != 1 {
+		t.Fatalf("result.Diff = %+v, want one prepared diff entry", result.Diff)
+	}
+	if result.Diff.Entries[0].Type != model.OperationAppendNote {
+		t.Fatalf("diff entry type = %q, want append_note", result.Diff.Entries[0].Type)
+	}
+	if result.Diff.Entries[0].BeforeHash == "" {
+		t.Fatalf("diff entry missing before_hash for append_note")
+	}
+}
+
+func TestExpandKnowledgeHighRiskPlanRoutedToProposalOnApprove(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "openwhisker.db")
+	vaultRoot := filepath.Join(dir, "vault")
+	knowledgeDir := filepath.Join(vaultRoot, "Knowledge", "topic")
+	if err := os.MkdirAll(knowledgeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := "Knowledge/topic/agent-memory.md"
+	dst := "Knowledge/topic/agent-memory/short-term.md"
+	if err := os.WriteFile(filepath.Join(vaultRoot, filepath.FromSlash(src)), []byte("# Agent Memory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	expander := fakeKnowledgeExpander{plan: model.VaultPlan{
+		Purpose:          "propose Knowledge restructure (split)",
+		RiskLevel:        model.RiskHigh,
+		RequiresApproval: true,
+		Summary:          "split agent-memory into short-term and long-term subtopics",
+		SourceRefs:       []string{"placeholder-job", src, dst},
+		TargetPaths:      []string{src, dst},
+		Operations: []model.VaultOperation{{
+			ID:          "op_split",
+			Type:        model.OperationRenameNote,
+			TargetPath:  src,
+			PayloadJSON: `{"source_path":"` + src + `","destination_path":"` + dst + `","reason":"split"}`,
+			Reason:      "Knowledge expander surfaced a high-risk restructure proposal.",
+			RiskLevel:   model.RiskHigh,
+		}},
+	}}
+
+	service := NewPlanServiceWithOptions(store, vaultRoot, PlanServiceOptions{
+		KnowledgeExpander: expander,
+	})
+	result, err := service.ExpandKnowledge(context.Background(), src)
+	if err != nil {
+		t.Fatalf("ExpandKnowledge error = %v", err)
+	}
+	if result.Status != model.PlanStatusAwaitingApproval {
+		t.Fatalf("status = %q, want awaiting_approval", result.Status)
+	}
+	if result.Diff != nil {
+		t.Fatalf("result.Diff = %+v, want nil for high-risk plans (synthesized lazily by Diff())", result.Diff)
+	}
+
+	diff, err := service.Diff(result.PlanID)
+	if err != nil {
+		t.Fatalf("Diff() error = %v", err)
+	}
+	if !strings.Contains(diff.Summary, "高风险计划") {
+		t.Fatalf("diff summary = %q, want high-risk warning", diff.Summary)
+	}
+	if len(diff.Entries) != 1 || diff.Entries[0].Type != model.OperationWriteProposal {
+		t.Fatalf("diff entries = %+v, want one write_proposal entry", diff.Entries)
+	}
+
+	approve, err := service.Approve(context.Background(), result.PlanID)
+	if err != nil {
+		t.Fatalf("Approve error = %v", err)
+	}
+	if approve.Status != model.PlanStatusProposalWritten {
+		t.Fatalf("approve status = %q, want %q", approve.Status, model.PlanStatusProposalWritten)
+	}
+	if exists(filepath.Join(vaultRoot, filepath.FromSlash(dst))) {
+		t.Fatalf("approve wrote to Knowledge/ destination %q for high-risk plan", dst)
+	}
+	proposalDir := filepath.Join(vaultRoot, "Meta", "Agent-Proposals")
+	entries, err := os.ReadDir(proposalDir)
+	if err != nil {
+		t.Fatalf("read proposal dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("proposal dir entries = %d, want 1", len(entries))
+	}
+}
+
 func (c *fakeSyncClient) Status(_ context.Context, _ string) (model.SyncResult, error) {
 	return model.SyncResult{Mode: model.SyncModeOn, Backend: model.SyncBackendHeadless, Phase: model.SyncPhaseStatus, OK: true}, nil
 }

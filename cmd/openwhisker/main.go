@@ -50,6 +50,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runOrganizeToday(args[2:], stdout, stderr)
 	case args[0] == "organize" && args[1] == "preview-context":
 		return runOrganizePreviewContext(args[2:], stdout, stderr)
+	case args[0] == "expand":
+		return runExpandKnowledge(args[1:], stdout, stderr)
 	case args[0] == "plan" && args[1] == "diff":
 		return runPlanDiff(args[2:], stdout, stderr)
 	case args[0] == "plan" && args[1] == "approve":
@@ -235,6 +237,45 @@ func runOrganizePreviewContext(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	return printJSON(stdout, preview)
+}
+
+func runExpandKnowledge(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("expand", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dbPath := fs.String("db", "data/openwhisker.db", "SQLite database path")
+	vaultRoot := fs.String("vault", "testdata/vault", "target vault root")
+	organizerName := fs.String("organizer", organizerDefault(), "knowledge expander: deterministic or openai-compatible")
+	contextMode := fs.String("context-mode", contextModeDefault(), "knowledge expander context mode: minimal or vault-rules")
+	vaultProfile := fs.String("vault-profile", vaultProfileDefault(), "vault profile: generic or knowledge-vault")
+	llmModel := fs.String("llm-model", llmModelDefault(), "OpenAI-compatible model for --organizer=openai-compatible")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: openwhisker expand [--db data/openwhisker.db] [--vault testdata/vault] [--organizer deterministic|openai-compatible] <knowledge_path>")
+	}
+	store, err := storage.Open(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	expander, err := knowledgeExpanderForName(*organizerName, *llmModel)
+	if err != nil {
+		return err
+	}
+	conventions, err := vaultConventionsForProfile(*vaultProfile)
+	if err != nil {
+		return err
+	}
+	result, err := core.NewPlanServiceWithOptions(store, *vaultRoot, core.PlanServiceOptions{
+		KnowledgeExpander: expander,
+		ContextMode:       *contextMode,
+		Conventions:       conventions,
+	}).ExpandKnowledge(context.Background(), fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	return printJSON(stdout, result)
 }
 
 func runVaultProfilePreview(args []string, stdout, stderr io.Writer) error {
@@ -885,6 +926,7 @@ func printUsage(stderr io.Writer) {
   openwhisker organize last [--db data/openwhisker.db] [--vault testdata/vault] [--organizer deterministic|openai-compatible] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault] [--llm-model MODEL]
   openwhisker organize today [--db data/openwhisker.db] [--vault testdata/vault] [--date YYYY-MM-DD] [--organizer deterministic|openai-compatible] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault] [--llm-model MODEL]
   openwhisker organize preview-context [--db data/openwhisker.db] [--vault testdata/vault] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault]
+  openwhisker expand [--db data/openwhisker.db] [--vault testdata/vault] [--organizer deterministic|openai-compatible] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault] [--llm-model MODEL] <knowledge_path>
   openwhisker plan diff [--db data/openwhisker.db] [--vault testdata/vault] <plan_id|job_id>
   openwhisker plan approve [--sync=auto|off|on] [--ob-bin ob] [--db data/openwhisker.db] [--vault testdata/vault] [--vault-profile generic|knowledge-vault] <plan_id|job_id>
   openwhisker plan reject [--db data/openwhisker.db] [--reason TEXT] <plan_id|job_id>
@@ -1038,6 +1080,29 @@ func rawOrganizerForName(name, openAIModel string) (core.RawOrganizer, error) {
 		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported organizer %q; want deterministic or openai-compatible", name)
+	}
+}
+
+func knowledgeExpanderForName(name, llmModel string) (core.KnowledgeExpander, error) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "", "deterministic":
+		return nil, nil
+	case "openai-compatible", "compatible", "openai":
+		apiKey := llmAPIKey()
+		if apiKey == "" {
+			return nil, fmt.Errorf("OPENWHISKER_LLM_API_KEY is required for --organizer=openai-compatible")
+		}
+		return agent.OpenAIKnowledgeExpander{
+			Client: agent.OpenAIClient{
+				APIKey:       apiKey,
+				BaseURL:      llmBaseURL(),
+				Model:        llmModel,
+				Organization: coalesce(os.Getenv("OPENWHISKER_LLM_ORG_ID"), os.Getenv("OPENAI_ORG_ID")),
+				Project:      coalesce(os.Getenv("OPENWHISKER_LLM_PROJECT_ID"), os.Getenv("OPENAI_PROJECT_ID")),
+			},
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported expander %q; want deterministic or openai-compatible", name)
 	}
 }
 

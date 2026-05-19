@@ -19,27 +19,29 @@ import (
 )
 
 type PlanService struct {
-	store          *storage.Store
-	checker        policy.Checker
-	executor       executor.DirectFS
-	syncClient     executor.SyncClient
-	syncMode       string
-	contextMode    string
-	conventions    policy.Conventions
-	vaultRoot      string
-	organizer      RawOrganizer
-	suppressOutbox bool
-	now            func() time.Time
+	store             *storage.Store
+	checker           policy.Checker
+	executor          executor.DirectFS
+	syncClient        executor.SyncClient
+	syncMode          string
+	contextMode       string
+	conventions       policy.Conventions
+	vaultRoot         string
+	organizer         RawOrganizer
+	knowledgeExpander KnowledgeExpander
+	suppressOutbox    bool
+	now               func() time.Time
 }
 
 type PlanServiceOptions struct {
-	SyncMode       string
-	SyncBackend    string
-	SyncClient     executor.SyncClient
-	Organizer      RawOrganizer
-	ContextMode    string
-	Conventions    policy.Conventions
-	SuppressOutbox bool
+	SyncMode          string
+	SyncBackend       string
+	SyncClient        executor.SyncClient
+	Organizer         RawOrganizer
+	KnowledgeExpander KnowledgeExpander
+	ContextMode       string
+	Conventions       policy.Conventions
+	SuppressOutbox    bool
 }
 
 const (
@@ -53,6 +55,26 @@ type RawOrganizer interface {
 
 type RawTodayOrganizer interface {
 	OrganizeRawToday(context.Context, RawTodayOrganizerRequest) (model.VaultPlan, error)
+}
+
+type KnowledgeExpander interface {
+	ExpandKnowledge(context.Context, KnowledgeExpanderRequest) (model.VaultPlan, error)
+}
+
+type KnowledgeExpanderRequest struct {
+	Job          model.WikiJob
+	TargetPath   string
+	VaultRoot    string
+	Conventions  policy.Conventions
+	VaultContext KnowledgeExpanderContext
+	Now          time.Time
+}
+
+type KnowledgeExpanderContext struct {
+	TargetPath    string
+	TargetContent string
+	RelatedNotes  []VaultContextDocument
+	Documents     []VaultContextDocument
 }
 
 type RawOrganizerRequest struct {
@@ -144,17 +166,18 @@ func NewPlanServiceWithOptions(store *storage.Store, vaultRoot string, opts Plan
 	}
 	conventions := opts.Conventions.Normalize()
 	return PlanService{
-		store:          store,
-		checker:        policy.NewCheckerWithConventions(conventions),
-		executor:       executor.NewDirectFS(vaultRoot, store),
-		syncClient:     syncClient,
-		syncMode:       syncMode,
-		contextMode:    normalizeContextMode(opts.ContextMode),
-		conventions:    conventions,
-		vaultRoot:      vaultRoot,
-		organizer:      defaultRawOrganizer(opts.Organizer),
-		suppressOutbox: opts.SuppressOutbox,
-		now:            func() time.Time { return time.Now().UTC() },
+		store:             store,
+		checker:           policy.NewCheckerWithConventions(conventions),
+		executor:          executor.NewDirectFS(vaultRoot, store),
+		syncClient:        syncClient,
+		syncMode:          syncMode,
+		contextMode:       normalizeContextMode(opts.ContextMode),
+		conventions:       conventions,
+		vaultRoot:         vaultRoot,
+		organizer:         defaultRawOrganizer(opts.Organizer),
+		knowledgeExpander: defaultKnowledgeExpander(opts.KnowledgeExpander),
+		suppressOutbox:    opts.SuppressOutbox,
+		now:               func() time.Time { return time.Now().UTC() },
 	}
 }
 
@@ -559,6 +582,103 @@ func (s PlanService) currentVaultFileHash(rawPath string) (string, error) {
 	return sha256String(string(data)), nil
 }
 
+func (s PlanService) ExpandKnowledge(ctx context.Context, knowledgePath string) (OrganizeRawResult, error) {
+	knowledgePath = strings.TrimSpace(knowledgePath)
+	if knowledgePath == "" {
+		return OrganizeRawResult{}, errors.New("knowledge path is required")
+	}
+	vaultContext, err := buildKnowledgeExpanderContext(ctx, s.vaultRoot, knowledgePath, s.contextMode, s.conventions)
+	if err != nil {
+		return OrganizeRawResult{}, err
+	}
+	now := s.now()
+	inputJSON, err := json.Marshal(map[string]string{
+		"knowledge_path": knowledgePath,
+	})
+	if err != nil {
+		return OrganizeRawResult{}, err
+	}
+	job := model.WikiJob{
+		ID:        model.NewID("job"),
+		Type:      model.JobTypeExpandKnowledge,
+		Status:    model.JobStatusPending,
+		Source:    "cli",
+		InputJSON: string(inputJSON),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := s.store.CreateJob(job); err != nil {
+		return OrganizeRawResult{}, err
+	}
+	plan, err := s.knowledgeExpander.ExpandKnowledge(ctx, KnowledgeExpanderRequest{
+		Job:          job,
+		TargetPath:   knowledgePath,
+		VaultRoot:    s.vaultRoot,
+		Conventions:  s.conventions,
+		VaultContext: vaultContext,
+		Now:          now,
+	})
+	if err != nil {
+		_ = s.failPlanJob(job.ID, err)
+		return OrganizeRawResult{}, err
+	}
+	if plan.RiskLevel == model.RiskHigh {
+		prepared, err := s.prepareHighRiskApprovalPlan(job.ID, plan)
+		if err != nil {
+			return OrganizeRawResult{}, err
+		}
+		return OrganizeRawResult{
+			JobID:       job.ID,
+			PlanID:      prepared.ID,
+			Status:      prepared.Status,
+			TargetPaths: prepared.TargetPaths,
+			Messages:    []string{"high-risk plan prepared; approval will only write a proposal note"},
+		}, nil
+	}
+	prepared, err := s.prepareApprovalPlan(ctx, job.ID, plan)
+	if err != nil {
+		return OrganizeRawResult{}, err
+	}
+	return OrganizeRawResult{
+		JobID:       job.ID,
+		PlanID:      prepared.ID,
+		Status:      prepared.Status,
+		TargetPaths: prepared.TargetPaths,
+		Diff:        prepared.Diff,
+		Messages:    []string{"knowledge expansion plan prepared and awaiting approval"},
+	}, nil
+}
+
+func (s PlanService) prepareHighRiskApprovalPlan(jobID string, plan model.VaultPlan) (model.VaultPlan, error) {
+	if err := s.checker.CheckForApprovalHighRisk(plan); err != nil {
+		_ = s.failPlanJob(jobID, err)
+		return model.VaultPlan{}, err
+	}
+	plan.Status = model.PlanStatusAwaitingApproval
+	preparedAt := s.now()
+	plan.PreparedAt = &preparedAt
+	if err := s.store.SavePlan(plan); err != nil {
+		_ = s.failPlanJob(jobID, err)
+		return model.VaultPlan{}, err
+	}
+	if err := s.store.UpdateJobStatus(jobID, model.JobStatusAwaitingApproval, "", ""); err != nil {
+		return model.VaultPlan{}, err
+	}
+	if !s.suppressOutbox {
+		if err := s.store.AddOutboxMessage(model.OutboxMessage{
+			ID:        model.NewID("out"),
+			JobID:     jobID,
+			Kind:      model.OutboxKindApproval,
+			Body:      fmt.Sprintf("Plan %s awaits approval (high-risk: proposal only): %s", plan.ID, plan.Summary),
+			Status:    model.OutboxStatusPending,
+			CreatedAt: s.now(),
+		}); err != nil {
+			return model.VaultPlan{}, err
+		}
+	}
+	return plan, nil
+}
+
 func (s PlanService) prepareApprovalPlan(ctx context.Context, jobID string, plan model.VaultPlan) (model.VaultPlan, error) {
 	if err := s.checker.CheckForApproval(plan); err != nil {
 		_ = s.failPlanJob(jobID, err)
@@ -838,6 +958,19 @@ func defaultRawOrganizer(organizer RawOrganizer) RawOrganizer {
 	return deterministicRawOrganizer{}
 }
 
+type notImplementedKnowledgeExpander struct{}
+
+func (notImplementedKnowledgeExpander) ExpandKnowledge(_ context.Context, _ KnowledgeExpanderRequest) (model.VaultPlan, error) {
+	return model.VaultPlan{}, errors.New("knowledge expander is not available; pass --organizer=openai-compatible to enable the LLM-backed expander")
+}
+
+func defaultKnowledgeExpander(expander KnowledgeExpander) KnowledgeExpander {
+	if expander != nil {
+		return expander
+	}
+	return notImplementedKnowledgeExpander{}
+}
+
 func normalizeContextMode(mode string) string {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "", ContextModeMinimal:
@@ -1091,6 +1224,59 @@ func (s PlanService) previewLatestRawContext(ctx context.Context) (RawOrganizerC
 		RawPath:  rawPath,
 		Context:  vaultContext,
 	}, rawJob, nil
+}
+
+func buildKnowledgeExpanderContext(ctx context.Context, vaultRoot, targetPath, contextMode string, conventions policy.Conventions) (KnowledgeExpanderContext, error) {
+	if vaultRoot == "" {
+		return KnowledgeExpanderContext{}, errors.New("vault root is required")
+	}
+	targetFullPath, err := executor.ResolveVaultPath(vaultRoot, targetPath)
+	if err != nil {
+		return KnowledgeExpanderContext{}, err
+	}
+	noteContent, err := os.ReadFile(targetFullPath)
+	if err != nil {
+		return KnowledgeExpanderContext{}, fmt.Errorf("read knowledge note %s: %w", targetPath, err)
+	}
+	context := KnowledgeExpanderContext{
+		TargetPath:    targetPath,
+		TargetContent: string(noteContent),
+	}
+	for _, doc := range profile.KnowledgeExpanderContextDocuments(conventions) {
+		context.Documents = append(context.Documents, VaultContextDocument{
+			Path:    doc.Path,
+			Content: doc.Content,
+		})
+	}
+	if normalizeContextMode(contextMode) == ContextModeMinimal {
+		return context, nil
+	}
+	for _, relPath := range []string{
+		"AGENTS.md",
+		"Meta/README.md",
+		"Meta/Tagging.md",
+		"Knowledge/AGENTS.md",
+	} {
+		if err := ctx.Err(); err != nil {
+			return KnowledgeExpanderContext{}, err
+		}
+		fullPath, err := executor.ResolveVaultPath(vaultRoot, relPath)
+		if err != nil {
+			return KnowledgeExpanderContext{}, err
+		}
+		content, err := os.ReadFile(fullPath)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return KnowledgeExpanderContext{}, fmt.Errorf("read vault context %s: %w", relPath, err)
+		}
+		context.Documents = append(context.Documents, VaultContextDocument{
+			Path:    relPath,
+			Content: string(content),
+		})
+	}
+	return context, nil
 }
 
 func buildRawOrganizerContext(ctx context.Context, vaultRoot, rawPath, contextMode string, conventions policy.Conventions) (RawOrganizerContext, error) {

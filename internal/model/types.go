@@ -7,6 +7,7 @@ const (
 	JobTypeAppendRaw        = "append_raw"
 	JobTypeOrganizeRaw      = "organize_raw"
 	JobTypeOrganizeRawToday = "organize_raw_today"
+	JobTypeExpandKnowledge  = "expand_knowledge"
 
 	JobStatusPending          = "pending"
 	JobStatusAwaitingApproval = "awaiting_approval"

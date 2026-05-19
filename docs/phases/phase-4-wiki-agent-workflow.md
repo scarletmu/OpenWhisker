@@ -375,6 +375,8 @@ Phase 4C 进一步拆为四个子阶段，每个子阶段独立可 commit、独�
 
 ### 4C.2：Knowledge Expander（medium-risk 主路径）
 
+状态：进行中。第一版代码骨架已落地（`KnowledgeExpander` 接口、`OpenAIKnowledgeExpander`、`expand <path>` CLI、`prepareHighRiskApprovalPlan` 高风险出口）。真实 Matrix / 真实 vault + DeepSeek 的端到端验证待后续。
+
 目标：新增 LLM agent，针对已有 thin Knowledge note + 关联 raw，生成扩展 plan 或 child note draft；拿不准时通过 4C.1 的 proposal 出口降级。
 
 范围内：
