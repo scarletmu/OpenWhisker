@@ -379,10 +379,15 @@ func renderAdapterDiff(plan model.VaultPlan, diff *model.VaultDiff) string {
 }
 
 func renderHighRiskAdapterDiff(plan model.VaultPlan, diff *model.VaultDiff) string {
+	// The high-risk diff puts the proposal-write entry first; subsequent
+	// entries are per-affected-path previews carrying the "→ proposal only"
+	// suffix (see synthesizeHighRiskDiff).
 	var proposalPath, kindLabel string
-	if len(diff.Entries) > 0 {
+	previewEntries := diff.Entries
+	if len(diff.Entries) > 0 && diff.Entries[0].Type == model.OperationWriteProposal {
 		proposalPath = diff.Entries[0].TargetPath
 		kindLabel = diff.Entries[0].Summary
+		previewEntries = diff.Entries[1:]
 	}
 	lines := []string{
 		"⚠ 高风险计划：批准后只生成 proposal note，不会写入正式 Knowledge note。",
@@ -402,9 +407,19 @@ func renderHighRiskAdapterDiff(plan model.VaultPlan, diff *model.VaultDiff) stri
 		lines = append(lines, fmt.Sprintf("- 来源: %s", strings.Join(plan.SourceRefs, ", ")))
 	}
 	lines = append(lines, "", "## 影响路径")
-	for _, op := range plan.Operations {
-		for _, line := range highRiskOpAdapterLines(op) {
-			lines = append(lines, "- "+line)
+	if len(previewEntries) == 0 {
+		// Defensive fallback if a future caller skips BuildAffectedRows.
+		for _, op := range plan.Operations {
+			for _, line := range highRiskOpAdapterLines(op) {
+				lines = append(lines, "- "+line)
+			}
+		}
+	} else {
+		for _, entry := range previewEntries {
+			lines = append(lines, "- "+entry.Summary)
+			if entry.Preview != "" {
+				lines = append(lines, "  - 理由："+entry.Preview)
+			}
 		}
 	}
 	lines = append(lines,

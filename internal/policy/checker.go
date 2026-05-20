@@ -393,6 +393,15 @@ func ClassifyProposalKind(plan model.VaultPlan) (string, error) {
 	if plan.RiskLevel != model.RiskHigh {
 		return "", fmt.Errorf("classify proposal kind requires risk %q, got %q", model.RiskHigh, plan.RiskLevel)
 	}
+	// Fast path: the Knowledge Expander collapses split/merge into a single
+	// rename_note op plus affected_paths in TargetPaths, which the count
+	// heuristic below would otherwise classify as a plain rename. The
+	// expander records the original proposal_kind in Purpose
+	// ("propose Knowledge restructure (split)") — honor it if present so the
+	// downstream renderer and diff can expand all affected paths.
+	if hinted := proposalKindFromPurpose(plan.Purpose); hinted != "" {
+		return hinted, nil
+	}
 	var renameCount, retagCount, linkRewriteCount int
 	for _, op := range plan.Operations {
 		switch op.Type {
@@ -418,6 +427,25 @@ func ClassifyProposalKind(plan model.VaultPlan) (string, error) {
 	default:
 		return "", errors.New("plan has no high-risk operations to classify")
 	}
+}
+
+func proposalKindFromPurpose(purpose string) string {
+	// Match the suffix "(<kind>)" produced by the Knowledge Expander.
+	open := strings.LastIndex(purpose, "(")
+	close := strings.LastIndex(purpose, ")")
+	if open < 0 || close <= open {
+		return ""
+	}
+	kind := strings.TrimSpace(purpose[open+1 : close])
+	switch kind {
+	case model.ProposalKindSplit,
+		model.ProposalKindMerge,
+		model.ProposalKindRename,
+		model.ProposalKindBulkRetag,
+		model.ProposalKindBulkLinkRewrite:
+		return kind
+	}
+	return ""
 }
 
 func mergeOrSplitKind(plan model.VaultPlan) string {
@@ -470,38 +498,33 @@ func validateKnowledgeDraftPayload(op model.VaultOperation, payload model.Create
 		return fmt.Errorf("create_note payload for %s must start with YAML frontmatter", op.ID)
 	}
 	for _, key := range []string{
-		"openwhisker_job_id",
-		"source_raw_job_id",
-		"source_raw_path",
-		"source_processed_path",
-		"status",
-		"needs_review",
+		"title",
 		"tags",
+		"related",
+		"openwhisker",
+		"job_id",
+		"raw_job_id",
+		"processed_path",
 	} {
 		if !frontmatterHasKey(frontmatter, key) {
 			return fmt.Errorf("create_note payload for %s frontmatter missing %s", op.ID, key)
 		}
 	}
-	if frontmatterValue(frontmatter, "status") != "draft" {
-		return fmt.Errorf("create_note payload for %s status must be draft", op.ID)
-	}
-	if frontmatterValue(frontmatter, "needs_review") != "true" {
-		return fmt.Errorf("create_note payload for %s needs_review must be true", op.ID)
-	}
-	processedPath := frontmatterValue(frontmatter, "source_processed_path")
+	processedPath := frontmatterValue(frontmatter, "processed_path")
 	if err := validateRelativeVaultPath(processedPath); err != nil {
-		return fmt.Errorf("create_note payload for %s source_processed_path: %w", op.ID, err)
+		return fmt.Errorf("create_note payload for %s processed_path: %w", op.ID, err)
 	}
 	if !hasDirPrefix(processedPath, conventions.RawProcessedDir) {
-		return fmt.Errorf("create_note payload for %s source_processed_path %q is outside %s", op.ID, processedPath, conventions.RawProcessedDir)
+		return fmt.Errorf("create_note payload for %s processed_path %q is outside %s", op.ID, processedPath, conventions.RawProcessedDir)
 	}
 	for _, tag := range conventions.RequiredDraftTags {
 		if !frontmatterHasListValue(frontmatter, tag) {
 			return fmt.Errorf("create_note payload for %s tags must include %s", op.ID, tag)
 		}
 	}
-	if !strings.Contains(body, processedPath) {
-		return fmt.Errorf("create_note payload for %s must link to source_processed_path in the body", op.ID)
+	wantLink := "[[" + strings.TrimSuffix(processedPath, ".md") + "]]"
+	if !strings.Contains(body, wantLink) {
+		return fmt.Errorf("create_note payload for %s must link to processed_path via %s in the body", op.ID, wantLink)
 	}
 	return nil
 }
@@ -511,15 +534,23 @@ func validateProcessingNote(op model.VaultOperation, payload model.MoveNotePaylo
 	if note == "" {
 		return fmt.Errorf("move_note payload for %s processing_note is required", op.ID)
 	}
-	if !strings.Contains(note, payload.DestinationPath) {
+	if !pathReferencedInNote(note, payload.DestinationPath) {
 		return fmt.Errorf("move_note payload for %s processing_note must link to destination_path", op.ID)
 	}
 	for _, targetPath := range knowledgeTargetPaths {
-		if strings.Contains(note, targetPath) {
+		if pathReferencedInNote(note, targetPath) {
 			return nil
 		}
 	}
 	return fmt.Errorf("move_note payload for %s processing_note must link to a Knowledge output", op.ID)
+}
+
+func pathReferencedInNote(note, path string) bool {
+	if strings.Contains(note, path) {
+		return true
+	}
+	wikilink := "[[" + strings.TrimSuffix(path, ".md") + "]]"
+	return strings.Contains(note, wikilink)
 }
 
 func markdownFrontmatter(content string) (string, string, bool) {

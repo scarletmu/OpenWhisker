@@ -95,10 +95,10 @@ func TestCheckerRejectsKnowledgeDraftWithoutRequiredFrontmatter(t *testing.T) {
 func TestCheckerRejectsKnowledgeDraftWithoutProcessedSourceLink(t *testing.T) {
 	plan := mediumRiskRawOrganizerPlan(t)
 	plan.Operations[0].PayloadJSON = mustJSON(t, model.CreateNotePayload{
-		Content: strings.Replace(validKnowledgeDraft(), "- Raw path after approval: Raw/Processed/job_test.md", "- Raw path after approval: omitted", 1),
+		Content: strings.ReplaceAll(validKnowledgeDraft(), "[[Raw/Processed/job_test]]", "[[Raw/Processed/omitted]]"),
 	})
 	err := NewChecker().CheckForApproval(plan)
-	if err == nil || !strings.Contains(err.Error(), "source_processed_path in the body") {
+	if err == nil || !strings.Contains(err.Error(), "processed_path") {
 		t.Fatalf("CheckForApproval() error = %v, want processed source link error", err)
 	}
 }
@@ -183,24 +183,30 @@ func mediumRiskRawOrganizerPlan(t *testing.T) model.VaultPlan {
 
 func validKnowledgeDraft() string {
 	return `---
-openwhisker_job_id: job_plan
-openwhisker_job_type: organize_raw
-source_raw_job_id: job_raw
-source_raw_path: Raw/Inbox/job_test.md
-source_processed_path: Raw/Processed/job_test.md
-status: draft
-needs_review: true
+title: "Test Draft"
 tags:
+  - type/knowledge-draft
+  - status/needs-review
   - type/knowledge
   - status/draft
-  - status/needs-review
+related:
+  - "[[Raw/Processed/job_test]]"
+openwhisker:
+  job_id: job_plan
+  job_type: organize_raw
+  raw_job_id: job_raw
+  raw_path: Raw/Inbox/job_test.md
+  processed_path: Raw/Processed/job_test.md
 ---
 
 # Test Draft
 
-## Source
+> [!todo] OpenWhisker Raw Organizer 草稿
+> 由 OpenWhisker 从 raw 输入整理。
 
-- Raw path after approval: Raw/Processed/job_test.md
+## 来源
+
+- [[Raw/Processed/job_test]]
 `
 }
 

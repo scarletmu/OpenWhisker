@@ -70,21 +70,26 @@ func TestDiffSynthesizesProposalPreviewForHighRiskPlan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Diff() error = %v", err)
 	}
-	if diff == nil || len(diff.Entries) != 1 {
-		t.Fatalf("Diff() = %+v, want 1 entry", diff)
+	if diff == nil || len(diff.Entries) < 2 {
+		t.Fatalf("Diff() = %+v, want write_proposal entry plus at least one affected-path entry", diff)
 	}
 	if !strings.Contains(diff.Summary, "高风险计划") {
 		t.Fatalf("diff summary = %q, want high-risk warning", diff.Summary)
 	}
-	entry := diff.Entries[0]
-	if entry.Type != model.OperationWriteProposal {
-		t.Fatalf("entry type = %q, want %q", entry.Type, model.OperationWriteProposal)
+	leading := diff.Entries[0]
+	if leading.Type != model.OperationWriteProposal {
+		t.Fatalf("leading entry type = %q, want %q (proposal-write must lead so adapter renderers stay stable)",
+			leading.Type, model.OperationWriteProposal)
 	}
-	if entry.TargetPath != "Raw/Agent-Proposals/proposal_hrdiff.md" {
-		t.Fatalf("entry target_path = %q, want proposal path", entry.TargetPath)
+	if leading.TargetPath != "Raw/Agent-Proposals/proposal_hrdiff.md" {
+		t.Fatalf("leading entry target_path = %q, want proposal path", leading.TargetPath)
 	}
-	if !strings.Contains(entry.Preview, "rename: "+src+" → "+dst) {
-		t.Fatalf("entry preview = %q, want rename line", entry.Preview)
+	preview := diff.Entries[1]
+	if preview.Type != model.ProposalKindRename {
+		t.Fatalf("preview entry type = %q, want %q", preview.Type, model.ProposalKindRename)
+	}
+	if !strings.Contains(preview.Summary, "rename: "+src+" → "+dst+" → proposal only") {
+		t.Fatalf("preview summary = %q, want \"rename: ... → ... → proposal only\"", preview.Summary)
 	}
 }
 
@@ -154,9 +159,29 @@ func TestApproveHighRiskPlanWritesProposalNoteAndProposedLog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read proposal note: %v", err)
 	}
-	for _, needle := range []string{"type: proposal", "proposal/rename", "## 影响路径", src, dst} {
+	srcWiki := "[[" + strings.TrimSuffix(src, ".md") + "]]"
+	dstWiki := "[[" + strings.TrimSuffix(dst, ".md") + "]]"
+	for _, needle := range []string{
+		"type: proposal",
+		"risk: high",
+		"  origin: expander",
+		"proposal/rename",
+		"> [!warning] 高风险结构变更提案",
+		"## 影响路径",
+		srcWiki,
+		dstWiki,
+		" ^q1",
+	} {
 		if !strings.Contains(string(content), needle) {
 			t.Fatalf("proposal note missing %q:\n%s", needle, string(content))
+		}
+	}
+	for _, antiNeedle := range []string{
+		"aliases:",
+		"`" + src + "`",
+	} {
+		if strings.Contains(string(content), antiNeedle) {
+			t.Fatalf("proposal note must not contain %q:\n%s", antiNeedle, string(content))
 		}
 	}
 
@@ -239,10 +264,11 @@ func TestOrganizeLastPreparesDiffAndApproveAppliesPlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	draftBase := strings.TrimSuffix(filepath.Base(ingest.TargetPath), ".md")
 	for _, needle := range []string{
-		"## OpenWhisker Processing",
-		"Raw path after approval: " + processedPath,
-		"Knowledge/Drafts/" + strings.TrimSuffix(filepath.Base(ingest.TargetPath), ".md") + ".md",
+		"> [!note] OpenWhisker Processing",
+		"processed_path: `" + processedPath + "`",
+		"[[Knowledge/Drafts/" + draftBase + "]]",
 	} {
 		if !strings.Contains(string(processedContent), needle) {
 			t.Fatalf("processed raw missing %q:\n%s", needle, string(processedContent))
@@ -412,7 +438,8 @@ func TestOrganizeTodayPreparesGroupedPlanAndApproveAppliesAllRaw(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(content), "## OpenWhisker Processing") || !strings.Contains(string(content), result.TargetPaths[0]) {
+		draftWiki := "[[" + strings.TrimSuffix(result.TargetPaths[0], ".md") + "]]"
+		if !strings.Contains(string(content), "> [!note] OpenWhisker Processing") || !strings.Contains(string(content), draftWiki) {
 			t.Fatalf("processed raw %s missing grouped processing note:\n%s", processedPath, string(content))
 		}
 	}
@@ -955,8 +982,8 @@ func TestExpandKnowledgeHighRiskPlanRoutedToProposalOnApprove(t *testing.T) {
 	if !strings.Contains(diff.Summary, "高风险计划") {
 		t.Fatalf("diff summary = %q, want high-risk warning", diff.Summary)
 	}
-	if len(diff.Entries) != 1 || diff.Entries[0].Type != model.OperationWriteProposal {
-		t.Fatalf("diff entries = %+v, want one write_proposal entry", diff.Entries)
+	if len(diff.Entries) < 2 || diff.Entries[0].Type != model.OperationWriteProposal {
+		t.Fatalf("diff entries = %+v, want leading write_proposal entry plus at least one affected-path entry", diff.Entries)
 	}
 
 	approve, err := service.Approve(context.Background(), result.PlanID)

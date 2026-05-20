@@ -22,19 +22,50 @@ func TestRenderProposalNoteIncludesAllRequiredSections(t *testing.T) {
 	mustContain(t, out, []string{
 		"type: proposal",
 		"status: needs-review",
+		"risk: high",
 		"  plan_id: plan_high",
 		"  job_id: job_high",
+		"  origin: expander",
 		"  - type/proposal",
 		"  - status/needs-review",
 		"  - proposal/rename",
+		"# 重命名 old-name 提案",
+		"> [!warning] 高风险结构变更提案",
 		"## 来源",
 		"## 目标结构",
 		"## 影响路径",
 		"## 建议操作",
 		"## 待人工确认问题",
-		"`Knowledge/topic/old-name.md`",
-		"`Knowledge/topic/new-name.md`",
+		"- **rename**: [[Knowledge/topic/old-name]] → [[Knowledge/topic/new-name]]",
+		"- 理由：clearer title",
 		"反向链接",
+		" ^q1",
+		" ^q2",
+	})
+	mustNotContain(t, out, []string{
+		"aliases:",
+		"`Knowledge/topic/old-name.md`",
+		"Knowledge expander surfaced a high-risk restructure proposal",
+	})
+}
+
+func TestRenderProposalNoteRendersAffectedTableForSplit(t *testing.T) {
+	plan := highRiskSplitPlanFixture(t)
+	out, err := RenderProposalNote(plan, model.ProposalKindSplit, time.Date(2026, 5, 20, 6, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("RenderProposalNote() error = %v", err)
+	}
+	mustContain(t, out, []string{
+		"# 拆分 MultiTopicMixed 提案",
+		"  - proposal/split",
+		"| 操作 | 原路径 | 目标路径 | 理由 |",
+		"| split | [[Knowledge/MultiTopicMixed]] | [[Knowledge/Redis-Persistence]] | mixes six unrelated topics |",
+		"| split | [[Knowledge/MultiTopicMixed]] | [[Knowledge/Kafka-Partition]] | mixes six unrelated topics |",
+	})
+	// 来源 should only list the analyzed note, not the proposed children.
+	mustContain(t, out, []string{"- [[Knowledge/MultiTopicMixed]]"})
+	mustNotContain(t, out, []string{
+		"- [[Knowledge/Redis-Persistence]]\n## 目标结构", // children must not appear under 来源 just before 目标结构
 	})
 }
 
@@ -156,6 +187,50 @@ func mustContain(t *testing.T, haystack string, needles []string) {
 		if !strings.Contains(haystack, n) {
 			t.Fatalf("expected to contain %q, full content:\n%s", n, haystack)
 		}
+	}
+}
+
+func mustNotContain(t *testing.T, haystack string, needles []string) {
+	t.Helper()
+	for _, n := range needles {
+		if strings.Contains(haystack, n) {
+			t.Fatalf("expected NOT to contain %q, full content:\n%s", n, haystack)
+		}
+	}
+}
+
+func highRiskSplitPlanFixture(t *testing.T) model.VaultPlan {
+	t.Helper()
+	source := "Knowledge/MultiTopicMixed.md"
+	child1 := "Knowledge/Redis-Persistence.md"
+	child2 := "Knowledge/Kafka-Partition.md"
+	payload, err := json.Marshal(model.RenameNotePayload{
+		SourcePath:      source,
+		DestinationPath: child1, // first child surfaces as nominal destination
+		Reason:          "mixes six unrelated topics",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return model.VaultPlan{
+		ID:               "plan_split",
+		JobID:            "job_split",
+		Purpose:          "propose Knowledge restructure (split)",
+		RiskLevel:        model.RiskHigh,
+		RequiresApproval: true,
+		Summary:          "Note mixes six unrelated topics and should be split.",
+		SourceRefs:       []string{"job_split", source, child1, child2},
+		TargetPaths:      []string{source, child1, child2},
+		Operations: []model.VaultOperation{{
+			ID:          "op_split",
+			Type:        model.OperationRenameNote,
+			TargetPath:  source,
+			PayloadJSON: string(payload),
+			Reason:      "Knowledge expander surfaced a high-risk restructure proposal.",
+			RiskLevel:   model.RiskHigh,
+		}},
+		Status:    model.PlanStatusApproved,
+		CreatedAt: time.Now().UTC(),
 	}
 }
 

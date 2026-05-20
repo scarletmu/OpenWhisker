@@ -4,31 +4,9 @@
 
 这是 Phase 3 完成 sync-aware approval execution 之后，下一阶段值得推进的设计边界。
 
-当前实现状态：Phase 1 到 Phase 3 已经验证了低风险 raw capture、中风险 approval/diff/hash guard，以及 approval apply 前后的 Headless one-shot sync。Phase 4A 已经补上 Matrix IM 入口 MVP 和长期 daemon；Phase 4B 已经补上可显式启用的真实 LLM-backed `organize last` 最小路径。默认仍使用 deterministic planner，真实 provider 优先按 OpenAI-compatible Chat Completions endpoint 接入，需要 `--organizer=openai-compatible` 和本地 API key。
+当前实现状态：Phase 1 到 Phase 3 已经验证了低风险 raw capture、中风险 approval/diff/hash guard，以及 approval apply 前后的 Headless one-shot sync。Phase 4A 已经补上 Matrix IM 入口 MVP 和长期 daemon；Phase 4B 已经补上可显式启用的真实 LLM-backed `organize last` 最小路径，并接入第一版 agent output policy gate、`organize today` grouped plan、Raw/Processed processing note。Phase 4C.1 / 4C.2 已落地（详见下方子阶段）。默认仍使用 deterministic planner，真实 provider 优先按 OpenAI-compatible Chat Completions endpoint 接入，需要 `--organizer=openai-compatible` 和本地 API key。
 
-2026-05-13 代码进展：
-
-- 已新增 Core Adapter API：支持普通文本 raw capture、`/raw`、`/organize last`、`/diff`、`/approve`、`/reject`、`/status`、`/jobs`。
-- 已新增 Matrix event 去重表和 outbox polling / delivery ack 存储能力。
-- 已把 `organize last` 的 planner 抽象为 `RawOrganizer` 合同；当前默认实现仍是 deterministic planner，OpenAI-compatible provider 已接入这个边界并可显式启用。
-- 已新增 Matrix Adapter MVP：支持 Matrix `/sync` 单次轮询、文本消息入站、调用 Core Adapter API、从 outbox 回发 Matrix 文本消息。
-- 已新增 CLI 入口 `openwhisker matrix poll-once`，用于手动验证 Matrix 单次轮询。
-- 已新增 CLI 入口 `openwhisker matrix daemon`，用于长期运行 Matrix `/sync` 循环；支持 `since` token 本地持久化、interrupt / SIGTERM 正常退出、错误退避和 pending outbox 继续投递。
-- Matrix 认证已支持账号密码登录模式：无显式 access token 时，可用 `OPENWHISKER_MATRIX_PASSWORD` 调 Matrix password login，并把 session 缓存到 ignored 的 `data/matrix-session.json`；显式 token 仍作为兼容路径保留。
-- 已新增第一版 agent output policy gate：medium-risk plan 必须有 source refs、target paths、operation reason/payload，Knowledge draft 必须有 frontmatter、受控 tag、`needs_review` 和 Raw/Processed 正文链接。
-- 已新增 `organize today` 最小 grouped plan：当天仍在 `Raw/Inbox` 的 raw captures 会生成一个 grouped Knowledge draft 和多条 approved raw move。
-
-2026-05-13 追加代码进展：
-
-- 已新增 `internal/agent` LLM reasoning adapter 边界，明确禁止 provider 直接写 vault、执行 shell 或调用 Obsidian CLI。
-- 已新增 OpenAI-compatible Chat Completions Raw Organizer 最小实现：读取受控 raw context，要求 structured JSON 输出，并把结果归一化为 medium-risk `VaultPlan`。
-- 已新增 Raw Organizer Context Builder：默认只读取 raw note、由当前 `VaultProfile` 编译出的 task-specific `VaultRawOrganizerSkill` 和当前 `VaultProfile` 摘要；显式 `--context-mode=vault-rules` 时才附带 vault root `AGENTS.md`、`Meta/README.md`、`Meta/Tagging.md`、`Raw/AGENTS.md` 和 `Knowledge/AGENTS.md`。Context builder 不读取隐藏路径、`.obsidian`、`.git`、secrets 或 vault root 外文件。
-- CLI `organize last`、Matrix `poll-once` 和 Matrix `daemon` 已支持 `--organizer deterministic|openai-compatible`；默认 deterministic，启用兼容 endpoint 时优先使用 `OPENWHISKER_LLM_API_KEY`、`OPENWHISKER_LLM_BASE_URL` 和 `OPENWHISKER_LLM_MODEL`。
-- 已扩展 `move_note` payload：approved raw move 会在 `Raw/Processed/` note 末尾追加 OpenWhisker processing note，包含 plan job、raw job、处理时间、Raw/Processed 路径、Knowledge output link 和剩余 review 项。
-- 已新增 provider contract tests、Chat Completions request tests、context builder tests 和 CLI organizer selection tests。
-- 已新增 policy regression tests，覆盖缺 source refs、缺 frontmatter、缺 Raw/Processed 正文链接、move destination 未列入 target paths 等 agent 输出拒绝场景。
-- 已新增 `internal/profile` 本地 Profile / Skill bundle 生成边界，并提供 `vault profile preview` 用于预览当前 profile 会编译出的 `VaultRawOrganizerSkill`。Profile / Skill 生成不进入 OpenWhisker runtime 主路径，改由外部 vault-local `vault-profile-analyzer` Skill 模板承接。
-- 尚未完成 Knowledge Expander。
+近期代码 / 验证进展以 [`docs/progress.md`](../progress.md) 为准；本文不再镜像 commit 级别 changelog。
 
 最小启用方式：
 
@@ -53,15 +31,7 @@ export OPENWHISKER_LLM_PROJECT_ID=...
 
 ## 设计收敛：Profile 分析与 Skill 驱动
 
-Phase 4 的外部对接原则收敛为 skill-driven adapter architecture：OpenWhisker 固定安全流程，外部对象的本地协作方式由 Profile 和 Skill 描述。
-
-在 vault 场景里：
-
-- `VaultProfile` 是被分析出来的事实：这个 vault 有哪些目录、哪些区域承担什么职责、常见标签、草稿习惯、完成态习惯、哪些位置不能碰、哪些文档像规则源。
-- `VaultProfile` 可以由用户在自己的 vault 里运行 vault-local Skill，分析本地 `AGENTS.md`、`Meta/` 规则、历史笔记和样本生成候选版本；候选版本不能自动成为真理，需要人工确认。
-- `VaultSkill` 是基于已确认 Profile 编译出的任务说明：例如 Raw Organizer 应该怎么处理输入、输出什么格式、用哪些目录和 tag、哪些事不要做。
-- 运行时发给 LLM 的主要参考物是任务 Skill，而不是完整 vault 规则大杂烩；Profile 作为可审查的事实摘要随附。
-- OpenWhisker 不把某个 vault 的现状标准化为所有人的固定格式，只校验安全契约和当前 Profile / Skill 明确声明的本地约束。
+Skill-driven adapter architecture 的原则（OpenWhisker 固定安全流程，外部对象的本地协作方式由 `VaultProfile` + `VaultSkill` 描述）以 [`architecture/overview.md`](../architecture/overview.md) "Skill-driven 外部对接" 一节为准，本文不再重复。
 
 当前代码已经把 minimal context 调整为：
 
@@ -71,19 +41,13 @@ raw note
   + OpenWhisker/VaultProfile.md
 ```
 
-其中 `VaultRawOrganizerSkill.md` 由当前 profile conventions 编译出来，是本次 Raw Organizer 的主要 vault-specific guidance；`VaultProfile.md` 是事实摘要。Profile / Skill 的生产应发生在用户 vault 侧，OpenWhisker 只负责预览和消费用户确认后的结果。
-
-本地可先预览当前配置会得到的 Profile / Skill bundle：
+本地预览当前配置会得到的 Profile / Skill bundle：
 
 ```sh
 go run ./cmd/openwhisker vault profile preview --vault-profile knowledge-vault
 ```
 
-如果要从 vault 本地规则生成候选 Profile / Skill，应使用外部 vault-local Skill，而不是 OpenWhisker runtime 命令。模板见：
-
-```text
-docs/skills/vault-profile-analyzer/SKILL.md
-```
+从 vault 本地规则生成候选 Profile / Skill 应使用外部 vault-local Skill，模板见 [`docs/skills/vault-profile-analyzer/SKILL.md`](../skills/vault-profile-analyzer/SKILL.md)。
 
 ## 下一步真实环境验证顺序
 
@@ -125,58 +89,11 @@ Phase 4 默认不把完整 vault 规则全文发送给外部 LLM。OpenWhisker �
 
 真实 vault + LLM 的规划链路已通。下一步可以二选一：先补真实 vault + LLM approve/apply 验证，或进入 Knowledge Expander、high-risk proposal policy、真实 Matrix 部署固化和多房间 / room-scoped outbox。
 
-## Phase 4B.5 planned：IM Intent Router
+## Phase 4B.5：IM Intent Router
 
-Matrix 当前先保留 `/status`、`/jobs`、`/organize last`、`/diff`、`/approve` 等显式命令作为 debug / fallback。Element 对 slash command 的客户端拦截会影响体验，但短期不急于用更多固定前缀解决。
+partial implementation。在 Matrix Adapter 和 Core Adapter API 之间增加 `IM Intent Router` 中间件，把"整理刚才 / 预览一下 / 写进去 / 先不写"等自然语言归一化为现有受控命令；slash 命令继续 passthrough 作为 debug / fallback。第一版边界、rules / hybrid / off 三模式、source-scoped binding、approval guard 和 audit 隐私边界见 [`phase-4-im-intent-router.md`](phase-4-im-intent-router.md) 和 [`architecture/im-intent-router.md`](../architecture/im-intent-router.md)。
 
-基于真实使用反馈，Phase 4 内新增一个 planned 切片：在 Matrix Adapter 和 Core Adapter API 之间增加 `IM Intent Router`。它的目标是减少日常 Matrix 使用中的命令行感，让“整理刚才”“预览一下”“写进去”“先不写”这类自然语言可以归一化为现有受控命令。
-
-```text
-Matrix text
-  -> IM Intent Router
-  -> raw_capture | organize_request | diff_request | approve_request | reject_request | unclear
-  -> Core Adapter API
-```
-
-第一版计划见：[Phase 4B.5 IM Intent Router](phase-4-im-intent-router.md)。
-
-核心收敛：
-
-- slash 命令继续 passthrough，作为 debug / fallback。
-- 非 slash Matrix 输入全部进入 intent 识别。
-- 规则优先，小模型补充；小模型使用独立 `OPENWHISKER_INTENT_*` 配置，不复用 Raw Organizer 的 `OPENWHISKER_LLM_*`。
-- 识别范围只覆盖 raw capture、organize last/today、diff、approve、reject 和 unclear。
-- 自然语言 diff / approve / reject 只在唯一 pending plan 时自动绑定，否则要求显式 plan id。
-- 低置信、不明确、普通讨论默认不写入、不执行。
-
-它只负责入口意图分类和参数归一化，例如把“帮我整理刚才那条”“预览一下”“批准这个计划”归一化为结构化 intent。它不直接写 vault、不生成 `VaultPlan`、不调用 `VaultExecutor`、不绕过 policy / approval；所有执行仍由 Core、Plan、Policy 和 Executor 决定。
-
-Phase 4 的目标不是绕过现有 executor，也不是先实现 desktop Obsidian CLI executor 或 scheduler，而是打通真实端到端 vertical slice：Matrix IM 作为首期核心交互入口，Wiki Agent Host 使用真实 LLM provider 生成结构化 `VaultPlan`，中风险变更继续经过 policy、diff、approval、hash guard 和 sync-aware executor。LLM 可以读取受控 vault context 并生成计划，但仍然不能直接写 vault、不能执行 shell、不能自由调用 Obsidian CLI；Matrix Adapter 也不能直接调用 LLM 或写 vault。
-
-## 当前 Phase 4B 使用反馈：Matrix diff 人类审批页
-
-真实 vault + OpenAI-compatible LLM 已验证到 diff/reject 后，当前最需要收敛的不是进入 Phase 4C，而是改善 Raw Organizer 的实际审批体验。
-
-原问题：Matrix `/diff` 偏工程化，展示的是 operation 清单和 executor preview，更适合调试，不适合人类判断“批准后 vault 里会写入什么”。
-
-当前状态：第一版 Matrix/Core adapter diff renderer 已实现。它不改 `VaultDiff` / executor 底层结构，而是从 `VaultOperation` payload 中提取 create / move 信息，生成面向人的审批页；底层 JSON diff 仍保留给 CLI / debug。
-
-已实现目标：
-
-- Matrix `/diff` 渲染为人类审批页。
-- 第一屏展示将写入的 Knowledge draft：路径、标题、tags、来源、正文预览和待核查项。
-- 再展示 Raw 会从哪里移动到哪里，以及 Raw/Processed processing note 会记录什么。
-- 底部展示 `//approve <plan_id>` 和 `//reject <plan_id>`。
-- 隐藏 `before_hash`、底层 payload、trace metadata 和 hash 语义等工程噪音。
-- 保留 CLI / debug 的底层 JSON diff 能力。
-- Matrix 输出必须继续同时支持 plain text fallback 和 `org.matrix.custom.html` formatted body，保证 Element 中标题、列表、代码块和转义内容正常渲染。
-- 本地 adapter 入口已预览输出效果，未经过 Matrix daemon；真实 Matrix `formatted_body` 视觉效果仍需在 Element 中确认。
-
-实现边界：
-
-- 修改 Core adapter 的 diff renderer。
-- 不改 `VaultDiff` 和 executor diff 数据结构。
-- 人类审批页从 `VaultOperation` payload 中提取 create / move 信息，不依赖截断后的 `DiffEntry.Preview` 作为主要内容来源。
+Intent Router 不直接写 vault、不生成 `VaultPlan`、不调用 `VaultExecutor`、不绕过 policy / approval；所有执行仍由 Core、Plan、Policy 和 Executor 决定。小模型使用独立 `OPENWHISKER_INTENT_*` 配置，不复用 Raw Organizer 的 `OPENWHISKER_LLM_*`。
 
 ## 本次推进结论
 

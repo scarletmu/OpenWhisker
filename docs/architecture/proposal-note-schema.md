@@ -27,20 +27,20 @@ medium-risk Raw Organizer / Knowledge Expander plan **不**进入本 schema，�
 
 ```yaml
 ---
-title: "<人类可读标题，由 plan 内 summary 字段或 fallback 生成>"
+title: "<短人类可读标题，≤ 40 字>"
 type: proposal
 status: needs-review
+risk: high
 created: "<ISO8601 UTC>"
 updated: "<ISO8601 UTC>"
 source:
   plan_id: "<完整 plan_id>"
   job_id: "<完整 job_id>"
-  origin: "<organizer | expander | other agent name>"
+  origin: "<organizer | expander>"
 tags:
   - type/proposal
   - status/needs-review
   - proposal/<kind>           # split | merge | rename | bulk-retag | bulk-link-rewrite
-aliases:
 related:
   - "[[<目标 Knowledge note 1>]]"
   - "[[<目标 Knowledge note 2>]]"
@@ -51,34 +51,70 @@ related:
 
 - `type` 必须为 `proposal`。
 - `status` 初始必须为 `needs-review`；用户手工改为 `accepted` / `rejected` / `archived` 后 OpenWhisker 不再读写。
-- `tags` 必须包含 `type/proposal` 与 `status/needs-review`，必须包含恰好一个 `proposal/<kind>`。
+- `risk` 必须为 `high`（4C.1 范围内只有高风险终态走 proposal 路径；保留字段是为后续若扩展到其它风险等级时不破坏 reader）。
+- `title` 是短人类可读标题，长度 ≤ 40 字（中文按 1 字算）；**不得**直接复用 LLM 的 summary 长句。渲染器应基于 `proposal_kind` + 主路径派生标题，例如 `拆分 MultiTopicMixed 提案`、`重命名 Foo 提案`。
+- `tags` 必须包含 `type/proposal` 与 `status/needs-review`，必须包含恰好一个 `proposal/<kind>`，且 `<kind>` 必须与 plan 的 `proposal_kind` 一致（不得硬编码 `proposal/rename`）。
 - `source.plan_id` / `source.job_id` 必须存在且与生成它的 plan 一致，用于后续审计回溯。
-- `related` 必须列出所有被 proposal 影响的 Knowledge note，使用 wikilink，方便用户在 Obsidian 内反向跳转。
+- `source.origin` 必须取 `organizer` 或 `expander`，不夹叙述句。
+- `related` 必须列出所有被 proposal 影响的 Knowledge note，使用 wikilink，方便用户在 Obsidian 内反向跳转；**不得**重复出现同一条 wikilink。
+- 空字段（如 `aliases:` 没有值）不得写入；省略即可。
+
+## 头部 Callout（强制）
+
+H1 标题之后、`## 来源` 之前必须有且仅有一个 Obsidian warning callout，向人类读者说明 proposal 的关键语义：「未对 vault 做任何写入；需人工评审后在外部工具中执行」。这是 proposal 与"已 apply 的 plan note"在视觉上的唯一区分。
+
+```markdown
+> [!warning] 高风险结构变更提案
+> 本文档由 OpenWhisker 自动生成。vault 未被修改。
+> 请人工评审 → 在外部工具（Codex / Claude Code / Obsidian）执行所需操作。
+```
+
+- callout 类型固定为 `warning`，标题固定为 `高风险结构变更提案`。
+- 正文两行 fixed template，不夹 LLM 生成内容。
+- 同一份 proposal note 出现多于一个 warning callout 视为违规。
 
 ## 必填章节
 
-proposal note 正文按以下 H2 顺序写出。任何一节缺失或为空都视为 schema 违规，应由 policy 在落地前拒绝并降级为可读错误，而不是写入半成品。
+callout 之后，正文按以下 H2 顺序写出。任何一节缺失或为空都视为 schema 违规，应由 policy 在落地前拒绝并降级为可读错误，而不是写入半成品。每个 H2 段后必须保留至少一个空行再进入下一个 H2。
 
 ```markdown
 ## 来源
 
-<!-- 来源 raw / Knowledge / 对话，每条一行，含 wikilink。说明这份 proposal 是基于什么观察生成的。 -->
+<!-- 来源 raw / Knowledge / 对话，每条一行，含 wikilink，去重。
+     不得在此重复 frontmatter 里已有的 plan_id / job_id —— 那些是元信息，不是来源。 -->
 
 ## 目标结构
 
-<!-- 描述变更后 vault 在结构上长什么样：哪些 note 存在、哪些目录、彼此引用关系。可以是文字 + 简单文件树。 -->
+<!-- 描述变更后 vault 在结构上长什么样：哪些 note 存在、哪些目录、彼此引用关系。
+     可以是文字 + 简单文件树。 -->
 
 ## 影响路径
 
-<!-- 列出受影响的所有 vault 路径与对它们的预期操作（rename / split / merge / retag / link rewrite）。每条必须含原路径、目标路径或目标状态。 -->
+<!-- 当受影响路径 ≥ 2 时，强制使用表格；只有 1 条时允许使用列表。
+     表格列顺序固定：操作 / 原路径 / 目标路径 / 理由。
+     操作枚举与 proposal_kind 对齐：split / merge / rename / bulk-retag / bulk-link-rewrite。
+     "理由" 列接 LLM 在 plan 里给出的 rationale；
+     渲染器不得回填占位字符串（例如 "Knowledge expander surfaced a high-risk restructure proposal."）。 -->
+
+| 操作  | 原路径                          | 目标路径                                  | 理由                  |
+| ---   | ---                            | ---                                       | ---                   |
+| split | [[Knowledge/MultiTopicMixed]]  | [[Knowledge/Redis-Persistence]]           | Redis 持久化主题独立  |
+| split | [[Knowledge/MultiTopicMixed]]  | [[Knowledge/Go-Goroutine-Scheduler]]      | Go 运行时调度主题独立 |
 
 ## 建议操作
 
-<!-- 给人执行的步骤建议。可以包含手工 Obsidian 操作、后续 OpenWhisker plan 拆分建议、或建议用户先做某个小 plan 再回来重新审批。 -->
+<!-- 给人执行的步骤建议。可以包含手工 Obsidian 操作、后续 OpenWhisker plan 拆分建议、
+     或建议用户先做某个小 plan 再回来重新审批。 -->
 
 ## 待人工确认问题
 
-<!-- 至少 1 条；OpenWhisker / LLM 拿不准的具体问题，给用户回答。空列表视为违规——proposal 之所以是 proposal 就因为它含不确定。 -->
+<!-- 至少 1 条；OpenWhisker / LLM 拿不准的具体问题，给用户回答。
+     空列表视为违规——proposal 之所以是 proposal 就因为它含不确定。
+     每条问题后必须挂一个 Obsidian block ID `^qN`（N 从 1 递增、连续），
+     方便用户在别的 note 里通过 [[proposal_<short>#^q1]] 反向引用特定问题。 -->
+
+- 目标路径是否会破坏现有反向链接？是否需要先扫描 backlinks？ ^q1
+- 新名称是否与现有 Knowledge note 冲突或语义重复？ ^q2
 ```
 
 ## 与 VaultPlan / vault_operation_logs 的关系

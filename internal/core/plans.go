@@ -744,54 +744,37 @@ func (s PlanService) synthesizeHighRiskDiff(plan model.VaultPlan) (*model.VaultD
 	}
 	targetPath := executor.ProposalNotePath(plan.ID, s.conventions.AgentProposalsDir)
 	summary := "⚠ 高风险计划：批准后只生成 proposal note，不写入 Knowledge。原摘要：" + plan.Summary
-	preview, err := highRiskOperationsPreview(plan.Operations)
+
+	rows, err := executor.BuildAffectedRows(plan, kind)
 	if err != nil {
 		return nil, err
+	}
+
+	// The terminal "write proposal" entry leads the list so existing adapter
+	// renderers (matrix/CLI) that read Entries[0] for the proposal path keep
+	// working; per-affected-path previews follow it so users see the full
+	// scope before approving. Each preview carries the "→ proposal only"
+	// suffix mandated by docs/architecture/proposal-note-schema.md.
+	entries := []model.DiffEntry{{
+		OperationID: plan.ID,
+		Type:        model.OperationWriteProposal,
+		TargetPath:  targetPath,
+		Summary:     fmt.Sprintf("write proposal note (proposal/%s)", kind),
+	}}
+	for _, r := range rows {
+		entries = append(entries, model.DiffEntry{
+			OperationID: plan.ID,
+			Type:        r.Action,
+			TargetPath:  r.Target,
+			Summary:     fmt.Sprintf("%s: %s → %s → proposal only", r.Action, r.Source, r.Target),
+			Preview:     r.Rationale,
+		})
 	}
 	return &model.VaultDiff{
 		PlanID:  plan.ID,
 		Summary: summary,
-		Entries: []model.DiffEntry{{
-			OperationID: plan.ID,
-			Type:        model.OperationWriteProposal,
-			TargetPath:  targetPath,
-			Summary:     fmt.Sprintf("write proposal note (proposal/%s)", kind),
-			Preview:     preview,
-		}},
+		Entries: entries,
 	}, nil
-}
-
-func highRiskOperationsPreview(operations []model.VaultOperation) (string, error) {
-	var lines []string
-	for _, op := range operations {
-		switch op.Type {
-		case model.OperationRenameNote:
-			var payload model.RenameNotePayload
-			if err := json.Unmarshal([]byte(op.PayloadJSON), &payload); err != nil {
-				return "", fmt.Errorf("decode rename_note payload for %s: %w", op.ID, err)
-			}
-			lines = append(lines, fmt.Sprintf("rename: %s → %s", payload.SourcePath, payload.DestinationPath))
-		case model.OperationBulkRetag:
-			var payload model.BulkRetagPayload
-			if err := json.Unmarshal([]byte(op.PayloadJSON), &payload); err != nil {
-				return "", fmt.Errorf("decode bulk_retag payload for %s: %w", op.ID, err)
-			}
-			lines = append(lines, fmt.Sprintf("bulk-retag: 影响 %d 篇 (add=%s remove=%s)",
-				len(payload.AffectedPaths),
-				strings.Join(payload.AddTags, ","),
-				strings.Join(payload.RemoveTags, ",")))
-		case model.OperationBulkLinkRewrite:
-			var payload model.BulkLinkRewritePayload
-			if err := json.Unmarshal([]byte(op.PayloadJSON), &payload); err != nil {
-				return "", fmt.Errorf("decode bulk_link_rewrite payload for %s: %w", op.ID, err)
-			}
-			lines = append(lines, fmt.Sprintf("bulk-link-rewrite: %s → %s (影响 %d 篇)",
-				payload.FromPath, payload.ToPath, len(payload.AffectedPaths)))
-		default:
-			lines = append(lines, fmt.Sprintf("unknown high-risk op: %s", op.Type))
-		}
-	}
-	return strings.Join(lines, "\n"), nil
 }
 
 func (s PlanService) Approve(ctx context.Context, identifier string) (PlanActionResult, error) {
@@ -1379,83 +1362,116 @@ func jobIDs(jobs []model.WikiJob) []string {
 
 func renderKnowledgeDraft(job, rawJob model.WikiJob, rawPath, processedPath string, conventions policy.Conventions, createdAt time.Time) string {
 	return fmt.Sprintf(`---
-openwhisker_job_id: %s
-openwhisker_job_type: %s
-source_raw_job_id: %s
-source_raw_path: %s
-source_processed_path: %s
-status: draft
-needs_review: true
-created_at: %s
+title: "Knowledge Draft from %s"
 tags:
 %s
+related:
+  - "[[%s]]"
+openwhisker:
+  job_id: %s
+  job_type: %s
+  raw_job_id: %s
+  raw_path: %s
+  processed_path: %s
+  created_at: %s
 ---
 
 # Knowledge Draft from %s
 
-## Source
+> [!todo] OpenWhisker Raw Organizer 草稿
+> 由 OpenWhisker 从 raw 输入整理。请人工审阅 → 补全 → 转写为正式 Knowledge note 后归档此 draft。
 
-- Raw job: %s
-- Raw path before approval: %s
-- Raw path after approval: %s
+## 摘要
 
-## Draft
+Deterministic Phase 2 draft；待 LLM 替换正文。
+
+## 笔记
 
 This deterministic Phase 2 draft preserves traceability and proves the approval-before-write path. Replace this section with LLM-backed organization in a later phase.
-`, job.ID, job.Type, rawJob.ID, rawPath, processedPath, createdAt.Format(time.RFC3339), renderYAMLList(conventions.RequiredDraftTags), rawJob.ID,
-		rawJob.ID, rawPath, processedPath)
+
+## 来源
+
+- [[%s]]
+
+## 待核查
+
+> [!todo] 待核查
+> - 核对从 raw 输入推断出的内容是否准确。
+`,
+		rawJob.ID,
+		renderYAMLList(mergeKnowledgeDraftTags(conventions.RequiredDraftTags)),
+		trimVaultExt(processedPath),
+		job.ID, job.Type, rawJob.ID, rawPath, processedPath, createdAt.Format(time.RFC3339),
+		rawJob.ID,
+		trimVaultExt(processedPath),
+	)
 }
 
 func renderTodayKnowledgeDraft(req RawTodayOrganizerRequest, title, body string) string {
-	var rawJobLines, rawPathLines, processedPathLines, sourceLines []string
+	var rawJobLines, rawPathLines, processedPathLines, relatedLines, sourceLines []string
 	for i, rawJob := range req.RawJobs {
 		rawPath := req.RawPaths[i]
 		processedPath := joinVaultPath(req.Conventions.RawProcessedDir, strings.TrimSuffix(filepath.Base(rawPath), filepath.Ext(rawPath))+".md")
-		rawJobLines = append(rawJobLines, "  - "+rawJob.ID)
-		rawPathLines = append(rawPathLines, "  - "+rawPath)
-		processedPathLines = append(processedPathLines, "  - "+processedPath)
-		sourceLines = append(sourceLines, fmt.Sprintf("- %s: %s -> %s", rawJob.ID, rawPath, processedPath))
+		rawJobLines = append(rawJobLines, "    - "+rawJob.ID)
+		rawPathLines = append(rawPathLines, "    - "+rawPath)
+		processedPathLines = append(processedPathLines, "    - "+processedPath)
+		relatedLines = append(relatedLines, fmt.Sprintf("  - \"[[%s]]\"", trimVaultExt(processedPath)))
+		sourceLines = append(sourceLines, fmt.Sprintf("- [[%s]]", trimVaultExt(processedPath)))
 	}
 	firstProcessed := joinVaultPath(req.Conventions.RawProcessedDir, "unknown.md")
 	if len(req.RawPaths) > 0 {
 		firstProcessed = joinVaultPath(req.Conventions.RawProcessedDir, strings.TrimSuffix(filepath.Base(req.RawPaths[0]), filepath.Ext(req.RawPaths[0]))+".md")
 	}
 	return fmt.Sprintf(`---
-openwhisker_job_id: %s
-openwhisker_job_type: %s
-source_raw_job_id: batch
-source_raw_path: %s
-source_processed_path: %s
-source_raw_job_ids:
-%s
-source_raw_paths:
-%s
-source_processed_paths:
-%s
-status: draft
-needs_review: true
-created_at: %s
+title: "%s"
 tags:
 %s
+related:
+%s
+openwhisker:
+  job_id: %s
+  job_type: %s
+  raw_job_id: batch
+  raw_path: %s
+  processed_path: %s
+  raw_job_ids:
+%s
+  raw_paths:
+%s
+  processed_paths:
+%s
+  created_at: %s
 ---
 
 # %s
+
+> [!todo] OpenWhisker Raw Organizer 草稿
+> 由 OpenWhisker 从 raw 输入整理。请人工审阅 → 补全 → 转写为正式 Knowledge note 后归档此 draft。
 
 ## 摘要
 
 %s
 
-## Sources
+## 来源
 
 %s
 
 ## 待核查
 
-- 核对每条 raw 输入是否应该进入同一个 Knowledge draft。
-- 核对是否需要拆分成多个主题笔记。
-`, req.Job.ID, req.Job.Type, req.Conventions.RawInboxDir, firstProcessed, strings.Join(rawJobLines, "\n"), strings.Join(rawPathLines, "\n"),
-		strings.Join(processedPathLines, "\n"), req.Now.Format(time.RFC3339), renderYAMLList(req.Conventions.RequiredDraftTags), strings.TrimSpace(title),
-		strings.TrimSpace(body), strings.Join(sourceLines, "\n"))
+> [!todo] 待核查
+> - 核对每条 raw 输入是否应该进入同一个 Knowledge draft。
+> - 核对是否需要拆分成多个主题笔记。
+`,
+		strings.TrimSpace(title),
+		renderYAMLList(mergeKnowledgeDraftTags(req.Conventions.RequiredDraftTags)),
+		strings.Join(relatedLines, "\n"),
+		req.Job.ID, req.Job.Type, req.Conventions.RawInboxDir, firstProcessed,
+		strings.Join(rawJobLines, "\n"), strings.Join(rawPathLines, "\n"), strings.Join(processedPathLines, "\n"),
+		req.Now.Format(time.RFC3339),
+		strings.TrimSpace(title),
+		strings.TrimSpace(body),
+		strings.Join(sourceLines, "\n"),
+	)
 }
 
 func renderProcessedRawNote(job, rawJob model.WikiJob, rawPath, processedPath string, outputPaths []string, processedAt time.Time, note string) string {
@@ -1463,7 +1479,7 @@ func renderProcessedRawNote(job, rawJob model.WikiJob, rawPath, processedPath st
 	for _, path := range outputPaths {
 		path = strings.TrimSpace(path)
 		if path != "" {
-			outputLines = append(outputLines, "- "+path)
+			outputLines = append(outputLines, fmt.Sprintf("- [[%s]]", trimVaultExt(path)))
 		}
 	}
 	if len(outputLines) == 0 {
@@ -1473,22 +1489,29 @@ func renderProcessedRawNote(job, rawJob model.WikiJob, rawPath, processedPath st
 
 ---
 
-## OpenWhisker Processing
-
-- Plan job: %s
-- Raw job: %s
-- Raw path before approval: %s
-- Raw path after approval: %s
-- Processed at: %s
+> [!note] OpenWhisker Processing
+> 由 OpenWhisker 处理为 Knowledge draft；以下为处理元信息与输出。
 
 ### Outputs
 
 %s
 
-### Processing note
+### Processing Note
 
 %s
-`, job.ID, rawJob.ID, rawPath, processedPath, processedAt.Format(time.RFC3339), strings.Join(outputLines, "\n"), strings.TrimSpace(note))
+
+### Trace
+
+- plan_job: `+"`%s`"+`
+- raw_job: `+"`%s`"+`
+- raw_path: `+"`%s`"+`
+- processed_path: `+"`%s`"+`
+- processed_at: `+"`%s`"+`
+`,
+		strings.Join(outputLines, "\n"),
+		strings.TrimSpace(note),
+		job.ID, rawJob.ID, rawPath, processedPath, processedAt.Format(time.RFC3339),
+	)
 }
 
 func joinVaultPath(dir, name string) string {
@@ -1525,4 +1548,33 @@ func renderYAMLList(values []string) string {
 		return "  []"
 	}
 	return strings.Join(lines, "\n")
+}
+
+func trimVaultExt(path string) string {
+	return strings.TrimSuffix(strings.TrimSpace(path), ".md")
+}
+
+func mergeKnowledgeDraftTags(required []string) []string {
+	defaults := []string{"type/knowledge-draft", "status/needs-review"}
+	seen := make(map[string]struct{}, len(defaults)+len(required))
+	out := make([]string, 0, len(defaults)+len(required))
+	for _, tag := range defaults {
+		if _, ok := seen[tag]; ok {
+			continue
+		}
+		seen[tag] = struct{}{}
+		out = append(out, tag)
+	}
+	for _, tag := range required {
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			continue
+		}
+		if _, ok := seen[tag]; ok {
+			continue
+		}
+		seen[tag] = struct{}{}
+		out = append(out, tag)
+	}
+	return out
 }

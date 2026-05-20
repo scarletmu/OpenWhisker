@@ -61,10 +61,3 @@ OpenWhisker 的关键外部对接节点不应主要靠硬编码业务规则驱�
 - Core、Policy 和 Executor 仍固定安全契约：plan-before-write、path safety、risk、approval、hash guard、traceability 和 deterministic execution。
 
 当前 Phase 4 的第一处实践是 `VaultProfile -> VaultRawOrganizerSkill -> VaultPlan`。后续 Matrix room、Web source、Git、Calendar 或 Task 系统也应沿用同一原则：adapter 固定接入和安全边界，Profile / Skill 描述本地协作方式。
-
-## 已收敛的旧 ADR
-
-- `ADR 0001：VaultPlan Before Vault Write`：并入本文第 1 条。
-- `ADR 0002：Phase 1 Execution Defaults`：并入本文第 2 条和 Phase 1 文档。
-
-旧 `docs/decisions/` 目录不再作为活跃文档入口维护。

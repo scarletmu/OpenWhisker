@@ -491,27 +491,32 @@ func renderLLMKnowledgeDraft(req core.RawOrganizerRequest, output rawOrganizerLL
 	for _, item := range reviewItems {
 		item = strings.TrimSpace(item)
 		if item != "" {
-			reviewLines = append(reviewLines, "- "+item)
+			reviewLines = append(reviewLines, "> - "+item)
 		}
 	}
 	if len(reviewLines) == 0 {
-		reviewLines = []string{"- 核对从 raw 输入推断出的内容是否准确。"}
+		reviewLines = []string{"> - 核对从 raw 输入推断出的内容是否准确。"}
 	}
 	return fmt.Sprintf(`---
-openwhisker_job_id: %s
-openwhisker_job_type: %s
-source_raw_job_id: %s
-source_raw_path: %s
-source_processed_path: %s
-raw_kind: %s
-status: draft
-needs_review: true
-created_at: %s
+title: "%s"
 tags:
 %s
+related:
+  - "[[%s]]"
+openwhisker:
+  job_id: %s
+  job_type: %s
+  raw_job_id: %s
+  raw_path: %s
+  processed_path: %s
+  raw_kind: %s
+  created_at: %s
 ---
 
 # %s
+
+> [!todo] OpenWhisker Raw Organizer 草稿
+> 由 OpenWhisker 从 raw 输入整理。请人工审阅 → 补全 → 转写为正式 Knowledge note 后归档此 draft。
 
 ## 摘要
 
@@ -521,29 +526,38 @@ tags:
 
 %s
 
+## 来源
+
+- [[%s]]
+
 ## 待核查
 
+> [!todo] 待核查
 %s
-
-## Source
-
-- Raw job: %s
-- Raw path before approval: %s
-- Raw path after approval: %s
-`, req.Job.ID, req.Job.Type, req.RawJob.ID, req.RawPath, processedPath, output.RawKind,
-		req.Now.Format(time.RFC3339), renderYAMLList(requiredTags), strings.TrimSpace(output.Title), strings.TrimSpace(output.Summary),
-		strings.TrimSpace(output.DraftBody), strings.Join(reviewLines, "\n"), req.RawJob.ID, req.RawPath, processedPath)
+`,
+		escapeYAMLString(strings.TrimSpace(output.Title)),
+		renderYAMLList(mergeKnowledgeDraftTags(requiredTags)),
+		trimVaultExt(processedPath),
+		req.Job.ID, req.Job.Type, req.RawJob.ID, req.RawPath, processedPath, output.RawKind,
+		req.Now.Format(time.RFC3339),
+		strings.TrimSpace(output.Title),
+		strings.TrimSpace(output.Summary),
+		strings.TrimSpace(output.DraftBody),
+		trimVaultExt(processedPath),
+		strings.Join(reviewLines, "\n"),
+	)
 }
 
 func renderLLMTodayKnowledgeDraft(req core.RawTodayOrganizerRequest, output rawOrganizerLLMOutput, processedPaths []string, requiredTags []string) string {
-	var rawJobLines, rawPathLines, processedPathLines, sourceLines []string
+	var rawJobLines, rawPathLines, processedPathLines, relatedLines, sourceLines []string
 	for i, rawJob := range req.RawJobs {
 		rawPath := req.RawPaths[i]
 		processedPath := processedPaths[i]
-		rawJobLines = append(rawJobLines, "  - "+rawJob.ID)
-		rawPathLines = append(rawPathLines, "  - "+rawPath)
-		processedPathLines = append(processedPathLines, "  - "+processedPath)
-		sourceLines = append(sourceLines, fmt.Sprintf("- %s: %s -> %s", rawJob.ID, rawPath, processedPath))
+		rawJobLines = append(rawJobLines, "    - "+rawJob.ID)
+		rawPathLines = append(rawPathLines, "    - "+rawPath)
+		processedPathLines = append(processedPathLines, "    - "+processedPath)
+		relatedLines = append(relatedLines, fmt.Sprintf("  - \"[[%s]]\"", trimVaultExt(processedPath)))
+		sourceLines = append(sourceLines, fmt.Sprintf("- [[%s]]", trimVaultExt(processedPath)))
 	}
 	reviewItems := output.ReviewItems
 	if len(reviewItems) == 0 {
@@ -553,33 +567,38 @@ func renderLLMTodayKnowledgeDraft(req core.RawTodayOrganizerRequest, output rawO
 	for _, item := range reviewItems {
 		item = strings.TrimSpace(item)
 		if item != "" {
-			reviewLines = append(reviewLines, "- "+item)
+			reviewLines = append(reviewLines, "> - "+item)
 		}
 	}
 	if len(reviewLines) == 0 {
-		reviewLines = []string{"- 核对从 raw 输入推断出的内容是否准确。"}
+		reviewLines = []string{"> - 核对从 raw 输入推断出的内容是否准确。"}
 	}
 	return fmt.Sprintf(`---
-openwhisker_job_id: %s
-openwhisker_job_type: %s
-source_raw_job_id: batch
-source_raw_path: %s
-source_processed_path: %s
-source_raw_job_ids:
-%s
-source_raw_paths:
-%s
-source_processed_paths:
-%s
-raw_kind: %s
-status: draft
-needs_review: true
-created_at: %s
+title: "%s"
 tags:
 %s
+related:
+%s
+openwhisker:
+  job_id: %s
+  job_type: %s
+  raw_job_id: batch
+  raw_path: %s
+  processed_path: %s
+  raw_job_ids:
+%s
+  raw_paths:
+%s
+  processed_paths:
+%s
+  raw_kind: %s
+  created_at: %s
 ---
 
 # %s
+
+> [!todo] OpenWhisker Raw Organizer 草稿
+> 由 OpenWhisker 从 raw 输入整理。请人工审阅 → 补全 → 转写为正式 Knowledge note 后归档此 draft。
 
 ## 摘要
 
@@ -589,17 +608,24 @@ tags:
 
 %s
 
-## Sources
+## 来源
 
 %s
 
 ## 待核查
 
+> [!todo] 待核查
 %s
-`, req.Job.ID, req.Job.Type, req.Conventions.RawInboxDir, processedPaths[0], strings.Join(rawJobLines, "\n"), strings.Join(rawPathLines, "\n"),
-		strings.Join(processedPathLines, "\n"), output.RawKind, req.Now.Format(time.RFC3339), renderYAMLList(requiredTags),
+`,
+		escapeYAMLString(strings.TrimSpace(output.Title)),
+		renderYAMLList(mergeKnowledgeDraftTags(requiredTags)),
+		strings.Join(relatedLines, "\n"),
+		req.Job.ID, req.Job.Type, req.Conventions.RawInboxDir, processedPaths[0],
+		strings.Join(rawJobLines, "\n"), strings.Join(rawPathLines, "\n"), strings.Join(processedPathLines, "\n"),
+		output.RawKind, req.Now.Format(time.RFC3339),
 		strings.TrimSpace(output.Title), strings.TrimSpace(output.Summary), strings.TrimSpace(output.DraftBody),
-		strings.Join(sourceLines, "\n"), strings.Join(reviewLines, "\n"))
+		strings.Join(sourceLines, "\n"), strings.Join(reviewLines, "\n"),
+	)
 }
 
 func renderLLMProcessedRawNote(req core.RawOrganizerRequest, output rawOrganizerLLMOutput, processedPath string, outputPaths []string) string {
@@ -607,7 +633,7 @@ func renderLLMProcessedRawNote(req core.RawOrganizerRequest, output rawOrganizer
 	for _, path := range outputPaths {
 		path = strings.TrimSpace(path)
 		if path != "" {
-			outputLines = append(outputLines, "- "+path)
+			outputLines = append(outputLines, fmt.Sprintf("- [[%s]]", trimVaultExt(path)))
 		}
 	}
 	if len(outputLines) == 0 {
@@ -617,38 +643,46 @@ func renderLLMProcessedRawNote(req core.RawOrganizerRequest, output rawOrganizer
 	for _, item := range output.ReviewItems {
 		item = strings.TrimSpace(item)
 		if item != "" {
-			reviewLines = append(reviewLines, "- "+item)
+			reviewLines = append(reviewLines, "> - "+item)
 		}
 	}
 	if len(reviewLines) == 0 {
-		reviewLines = []string{"- 核对从 raw 输入推断出的内容是否准确。"}
+		reviewLines = []string{"> - 核对从 raw 输入推断出的内容是否准确。"}
 	}
 	return fmt.Sprintf(`
 
 ---
 
-## OpenWhisker Processing
-
-- Plan job: %s
-- Raw job: %s
-- Raw path before approval: %s
-- Raw path after approval: %s
-- Processed at: %s
-- Raw kind: %s
+> [!note] OpenWhisker Processing
+> 由 OpenWhisker 处理为 Knowledge draft；以下为处理元信息与输出。
 
 ### Outputs
 
 %s
 
-### Processing note
+### Processing Note
 
 %s
 
-### Remaining review
+### Remaining Review
 
+> [!todo] Remaining Review
 %s
-`, req.Job.ID, req.RawJob.ID, req.RawPath, processedPath, req.Now.Format(time.RFC3339),
-		output.RawKind, strings.Join(outputLines, "\n"), strings.TrimSpace(output.Summary), strings.Join(reviewLines, "\n"))
+
+### Trace
+
+- plan_job: `+"`%s`"+`
+- raw_job: `+"`%s`"+`
+- raw_path: `+"`%s`"+`
+- processed_path: `+"`%s`"+`
+- processed_at: `+"`%s`"+`
+- raw_kind: `+"`%s`"+`
+`,
+		strings.Join(outputLines, "\n"),
+		strings.TrimSpace(output.Summary),
+		strings.Join(reviewLines, "\n"),
+		req.Job.ID, req.RawJob.ID, req.RawPath, processedPath, req.Now.Format(time.RFC3339), output.RawKind,
+	)
 }
 
 func renderLLMTodayProcessedRawNote(req core.RawTodayOrganizerRequest, output rawOrganizerLLMOutput, index int, processedPath string, outputPaths []string) string {
@@ -656,7 +690,7 @@ func renderLLMTodayProcessedRawNote(req core.RawTodayOrganizerRequest, output ra
 	for _, path := range outputPaths {
 		path = strings.TrimSpace(path)
 		if path != "" {
-			outputLines = append(outputLines, "- "+path)
+			outputLines = append(outputLines, fmt.Sprintf("- [[%s]]", trimVaultExt(path)))
 		}
 	}
 	if len(outputLines) == 0 {
@@ -666,39 +700,46 @@ func renderLLMTodayProcessedRawNote(req core.RawTodayOrganizerRequest, output ra
 	for _, item := range output.ReviewItems {
 		item = strings.TrimSpace(item)
 		if item != "" {
-			reviewLines = append(reviewLines, "- "+item)
+			reviewLines = append(reviewLines, "> - "+item)
 		}
 	}
 	if len(reviewLines) == 0 {
-		reviewLines = []string{"- 核对从 raw 输入推断出的内容是否准确。"}
+		reviewLines = []string{"> - 核对从 raw 输入推断出的内容是否准确。"}
 	}
 	return fmt.Sprintf(`
 
 ---
 
-## OpenWhisker Processing
-
-- Plan job: %s
-- Raw job: %s
-- Raw path before approval: %s
-- Raw path after approval: %s
-- Processed at: %s
-- Raw kind: %s
+> [!note] OpenWhisker Processing
+> 由 OpenWhisker 处理为 Knowledge draft；以下为处理元信息与输出。
 
 ### Outputs
 
 %s
 
-### Processing note
+### Processing Note
 
 Grouped by OpenWhisker Raw Organizer for %s. %s
 
-### Remaining review
+### Remaining Review
 
+> [!todo] Remaining Review
 %s
-`, req.Job.ID, req.RawJobs[index].ID, req.RawPaths[index], processedPath, req.Now.Format(time.RFC3339),
-		output.RawKind, strings.Join(outputLines, "\n"), req.Day.Format("2006-01-02"),
-		strings.TrimSpace(output.Summary), strings.Join(reviewLines, "\n"))
+
+### Trace
+
+- plan_job: `+"`%s`"+`
+- raw_job: `+"`%s`"+`
+- raw_path: `+"`%s`"+`
+- processed_path: `+"`%s`"+`
+- processed_at: `+"`%s`"+`
+- raw_kind: `+"`%s`"+`
+`,
+		strings.Join(outputLines, "\n"),
+		req.Day.Format("2006-01-02"), strings.TrimSpace(output.Summary),
+		strings.Join(reviewLines, "\n"),
+		req.Job.ID, req.RawJobs[index].ID, req.RawPaths[index], processedPath, req.Now.Format(time.RFC3339), output.RawKind,
+	)
 }
 
 func rawTodayJobIDs(jobs []model.WikiJob) []string {
@@ -744,4 +785,39 @@ func renderYAMLList(values []string) string {
 		return "  []"
 	}
 	return strings.Join(lines, "\n")
+}
+
+func trimVaultExt(path string) string {
+	return strings.TrimSuffix(strings.TrimSpace(path), ".md")
+}
+
+func escapeYAMLString(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "\"", "\\\"")
+	return s
+}
+
+func mergeKnowledgeDraftTags(required []string) []string {
+	defaults := []string{"type/knowledge-draft", "status/needs-review"}
+	seen := make(map[string]struct{}, len(defaults)+len(required))
+	out := make([]string, 0, len(defaults)+len(required))
+	for _, tag := range defaults {
+		if _, ok := seen[tag]; ok {
+			continue
+		}
+		seen[tag] = struct{}{}
+		out = append(out, tag)
+	}
+	for _, tag := range required {
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			continue
+		}
+		if _, ok := seen[tag]; ok {
+			continue
+		}
+		seen[tag] = struct{}{}
+		out = append(out, tag)
+	}
+	return out
 }

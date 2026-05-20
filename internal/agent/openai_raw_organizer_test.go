@@ -52,7 +52,7 @@ func TestOpenAIRawOrganizerBuildsMediumRiskPlan(t *testing.T) {
 		t.Fatalf("create payload = %s, want LLM draft body", plan.Operations[0].PayloadJSON)
 	}
 	if !strings.Contains(plan.Operations[1].PayloadJSON, "Raw/Processed/job_raw.md") ||
-		!strings.Contains(plan.Operations[1].PayloadJSON, "Knowledge/Drafts/job_raw.md") ||
+		!strings.Contains(plan.Operations[1].PayloadJSON, "[[Knowledge/Drafts/job_raw]]") ||
 		!strings.Contains(plan.Operations[1].PayloadJSON, "确认是否需要补充 Matrix 入口说明") {
 		t.Fatalf("move payload = %s, want processing note with output and review trace", plan.Operations[1].PayloadJSON)
 	}
