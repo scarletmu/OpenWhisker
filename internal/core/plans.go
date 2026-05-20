@@ -1209,6 +1209,88 @@ func (s PlanService) previewLatestRawContext(ctx context.Context) (RawOrganizerC
 	}, rawJob, nil
 }
 
+// parseExpanderSourceTracePaths extracts raw / processed note paths recorded
+// inside the target Knowledge note's YAML frontmatter under the openwhisker
+// nested block. It recognizes scalar fields raw_path / processed_path and list
+// fields raw_paths / processed_paths, matching knowledge-draft-schema.md. The
+// returned slice preserves declaration order and is deduplicated.
+func parseExpanderSourceTracePaths(content string) []string {
+	content = strings.TrimLeft(content, "\ufeff")
+	if !strings.HasPrefix(content, "---\n") {
+		return nil
+	}
+	end := strings.Index(content[len("---\n"):], "\n---")
+	if end < 0 {
+		return nil
+	}
+	frontmatter := content[len("---\n") : len("---\n")+end]
+	lines := strings.Split(frontmatter, "\n")
+	inOpenwhisker := false
+	openwhiskerIndent := -1
+	var (
+		results  []string
+		seen     = map[string]struct{}{}
+		listKey  string
+		listSeen bool
+	)
+	add := func(raw string) {
+		raw = strings.TrimSpace(raw)
+		raw = strings.Trim(raw, `"'`)
+		if raw == "" {
+			return
+		}
+		if _, ok := seen[raw]; ok {
+			return
+		}
+		seen[raw] = struct{}{}
+		results = append(results, raw)
+	}
+	for _, line := range lines {
+		trimmedLeft := strings.TrimLeft(line, " \t")
+		indent := len(line) - len(trimmedLeft)
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if !inOpenwhisker {
+			if indent == 0 && strings.HasPrefix(trimmedLeft, "openwhisker:") {
+				inOpenwhisker = true
+				openwhiskerIndent = -1
+				listSeen = false
+			}
+			continue
+		}
+		if indent == 0 {
+			// left the openwhisker block at a new top-level key
+			break
+		}
+		if openwhiskerIndent < 0 {
+			openwhiskerIndent = indent
+		}
+		if indent == openwhiskerIndent {
+			listSeen = false
+			listKey = ""
+			rest := trimmedLeft
+			switch {
+			case strings.HasPrefix(rest, "raw_path:"):
+				add(strings.TrimPrefix(rest, "raw_path:"))
+			case strings.HasPrefix(rest, "processed_path:"):
+				add(strings.TrimPrefix(rest, "processed_path:"))
+			case strings.HasPrefix(rest, "raw_paths:"):
+				listKey = "raw_paths"
+				listSeen = true
+			case strings.HasPrefix(rest, "processed_paths:"):
+				listKey = "processed_paths"
+				listSeen = true
+			}
+			continue
+		}
+		if listSeen && (listKey == "raw_paths" || listKey == "processed_paths") && strings.HasPrefix(trimmedLeft, "- ") {
+			add(strings.TrimPrefix(trimmedLeft, "- "))
+		}
+	}
+	return results
+}
+
 func buildKnowledgeExpanderContext(ctx context.Context, vaultRoot, targetPath, contextMode string, conventions policy.Conventions) (KnowledgeExpanderContext, error) {
 	if vaultRoot == "" {
 		return KnowledgeExpanderContext{}, errors.New("vault root is required")
@@ -1224,6 +1306,26 @@ func buildKnowledgeExpanderContext(ctx context.Context, vaultRoot, targetPath, c
 	context := KnowledgeExpanderContext{
 		TargetPath:    targetPath,
 		TargetContent: string(noteContent),
+	}
+	for _, relPath := range parseExpanderSourceTracePaths(string(noteContent)) {
+		if relPath == "" || relPath == targetPath {
+			continue
+		}
+		fullPath, err := executor.ResolveVaultPath(vaultRoot, relPath)
+		if err != nil {
+			continue
+		}
+		content, err := os.ReadFile(fullPath)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return KnowledgeExpanderContext{}, fmt.Errorf("read knowledge expander related note %s: %w", relPath, err)
+		}
+		context.RelatedNotes = append(context.RelatedNotes, VaultContextDocument{
+			Path:    relPath,
+			Content: string(content),
+		})
 	}
 	for _, doc := range profile.KnowledgeExpanderContextDocuments(conventions) {
 		context.Documents = append(context.Documents, VaultContextDocument{

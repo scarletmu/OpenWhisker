@@ -40,7 +40,7 @@ max_output_tokens = 4096（与 Raw Organizer 默认对齐）
 第一版 Knowledge Expander 上下文构造与 Raw Organizer 默认 `minimal` 模式对齐，只读取：
 
 - 目标 Knowledge note 全文（必填，由 CLI / Matrix 显式指定路径）。
-- 由 source trace 选出的关联 raw / processed note（可选，第一版只用 note 内 backlink / `source_raw_path` / `source_processed_path` frontmatter 指向的 path）。
+- 由 source trace 选出的关联 raw / processed note（可选，第一版只读取目标 note 的 YAML frontmatter 中 `openwhisker.raw_path` / `openwhisker.processed_path` 标量与 `openwhisker.raw_paths` / `openwhisker.processed_paths` 列表，对应 [knowledge-draft-schema](knowledge-draft-schema.md) 写入的字段；缺失的 path 静默跳过，不读取 `related:` wikilink 中可能指向其他 Knowledge note 的项以保留 privacy boundary）。
 - 当前 `VaultProfile` 编译出的 `VaultKnowledgeExpanderSkill`（task-specific guidance；profile 缺失时使用 generic skill 文本）。
 - 当前 `VaultProfile` 摘要。
 

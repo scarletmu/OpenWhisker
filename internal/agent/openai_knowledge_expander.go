@@ -178,6 +178,10 @@ func buildKnowledgeAppendPlan(req core.KnowledgeExpanderRequest, out knowledgeEx
 	if err != nil {
 		return model.VaultPlan{}, err
 	}
+	sourceRefs := []string{req.Job.ID, req.TargetPath}
+	for _, doc := range req.VaultContext.RelatedNotes {
+		sourceRefs = append(sourceRefs, doc.Path)
+	}
 	return model.VaultPlan{
 		ID:               model.NewID("plan"),
 		JobID:            req.Job.ID,
@@ -185,7 +189,7 @@ func buildKnowledgeAppendPlan(req core.KnowledgeExpanderRequest, out knowledgeEx
 		RiskLevel:        model.RiskMedium,
 		RequiresApproval: true,
 		Summary:          strings.TrimSpace(out.Summary),
-		SourceRefs:       []string{req.Job.ID, req.TargetPath},
+		SourceRefs:       sourceRefs,
 		TargetPaths:      []string{req.TargetPath},
 		Operations: []model.VaultOperation{{
 			ID:          model.NewID("op"),
@@ -227,6 +231,9 @@ func buildKnowledgeRestructurePlan(req core.KnowledgeExpanderRequest, out knowle
 	operations = append(operations, op)
 	targetPaths := append([]string{req.TargetPath}, out.Restructure.AffectedPaths...)
 	sourceRefs := append([]string{req.Job.ID, req.TargetPath}, out.Restructure.AffectedPaths...)
+	for _, doc := range req.VaultContext.RelatedNotes {
+		sourceRefs = append(sourceRefs, doc.Path)
+	}
 	return model.VaultPlan{
 		ID:               model.NewID("plan"),
 		JobID:            req.Job.ID,
