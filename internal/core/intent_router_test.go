@@ -287,7 +287,7 @@ func TestIntentRouterAuditExecutedActionRejectedNoActiveBucket(t *testing.T) {
 	}
 }
 
-func TestIntentRouterClassifierMediumCreatesPendingClarification(t *testing.T) {
+func TestIntentRouterClassifierUnclearRelationCreatesPendingClarification(t *testing.T) {
 	service, cleanup := newIntentRouterTestService(t, fakeIntentClassifier{})
 	defer cleanup()
 	if _, err := service.HandleText(context.Background(), AdapterRequest{
@@ -298,6 +298,9 @@ func TestIntentRouterClassifierMediumCreatesPendingClarification(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// High confidence label, but bucket_relation is "unclear": the classifier
+	// is sure this is a raw capture yet cannot tell whether it belongs to the
+	// active bucket. That structural ambiguity is what triggers clarification.
 	service.intentClassifier = fakeIntentClassifier{
 		result: IntentClassifierResult{
 			Intent:          "raw_capture",
@@ -305,8 +308,8 @@ func TestIntentRouterClassifierMediumCreatesPendingClarification(t *testing.T) {
 			CaptureAction:   "append",
 			BucketRelation:  "unclear",
 			PayloadText:     "另一段材料",
-			ConfidenceLabel: "medium",
-			Confidence:      0.55,
+			ConfidenceLabel: "high",
+			Confidence:      0.9,
 		},
 	}
 	response, err := service.HandleText(context.Background(), AdapterRequest{
@@ -337,7 +340,11 @@ func TestIntentRouterClassifierMediumCreatesPendingClarification(t *testing.T) {
 	}
 }
 
-func TestIntentRouterClassifierMediumWithoutActiveBucketOffersTwoCandidates(t *testing.T) {
+func TestIntentRouterUnclearRelationWithoutActiveBucketSkipsClarification(t *testing.T) {
+	// raw_capture + bucket_relation "unclear" but no active bucket: there is
+	// nothing to append to, so the append-vs-new question is meaningless.
+	// The router falls through to unclear instead of asking. Medium confidence
+	// keeps modelIntentToRuleResult (high-only) from auto-creating the bucket.
 	service, cleanup := newIntentRouterTestService(t, fakeIntentClassifier{
 		result: IntentClassifierResult{
 			Intent:          "raw_capture",
@@ -359,67 +366,58 @@ func TestIntentRouterClassifierMediumWithoutActiveBucketOffersTwoCandidates(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.Status != "clarification_requested" {
-		t.Fatalf("response = %+v, want clarification_requested", response)
+	if response.Status != "unclear" {
+		t.Fatalf("response = %+v, want unclear without an active bucket to disambiguate", response)
 	}
-	if !strings.Contains(response.Body, "1. 新建一组") || !strings.Contains(response.Body, "2. 取消") {
-		t.Fatalf("response body = %q, want 2 candidates (new/cancel)", response.Body)
-	}
-	if strings.Contains(response.Body, "补充到上一组") {
-		t.Fatalf("response body = %q, must not offer append without active bucket", response.Body)
-	}
-	pending, err := service.store.ActivePendingClarification("matrix:room:user", time.Now().UTC())
-	if err != nil {
-		t.Fatalf("expected pending clarification, got err = %v", err)
-	}
-	if len(pending.CandidateActions) != 2 {
-		t.Fatalf("candidates = %+v, want 2", pending.CandidateActions)
-	}
-	if pending.CandidateActions[0].Action != model.ClarificationActionRawCreate ||
-		pending.CandidateActions[1].Action != model.ClarificationActionCancel {
-		t.Fatalf("candidates = %+v, want [raw_create, cancel]", pending.CandidateActions)
+	if _, err := service.store.ActivePendingClarification("matrix:room:user", time.Now().UTC()); err == nil {
+		t.Fatalf("no pending clarification should be created without an active bucket")
 	}
 }
 
-func TestIntentRouterClarificationReplyCreatesBucketWhenNoActiveBucket(t *testing.T) {
-	service, cleanup := newIntentRouterTestService(t, fakeIntentClassifier{
+func TestIntentRouterClarificationReplyCreatesNewBucket(t *testing.T) {
+	service, cleanup := newIntentRouterTestService(t, fakeIntentClassifier{})
+	defer cleanup()
+	if _, err := service.HandleText(context.Background(), AdapterRequest{
+		Adapter:   model.AdapterMatrix,
+		SourceKey: "matrix:room:user",
+		Text:      "记录一下：第一条材料",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	service.intentClassifier = fakeIntentClassifier{
 		result: IntentClassifierResult{
 			Intent:          "raw_capture",
 			Target:          "new_bucket",
 			CaptureAction:   "create",
 			BucketRelation:  "unclear",
-			ConfidenceLabel: "medium",
-			Confidence:      0.5,
+			ConfidenceLabel: "high",
+			Confidence:      0.9,
 		},
-	})
-	defer cleanup()
-
+	}
 	if _, err := service.HandleText(context.Background(), AdapterRequest{
 		Adapter:   model.AdapterMatrix,
 		SourceKey: "matrix:room:user",
-		Text:      "也许该记下这一段",
+		Text:      "另起一段不太相关的内容",
 	}); err != nil {
 		t.Fatal(err)
 	}
 
+	// Reply "2" picks 新建一组 from the [append, create, cancel] candidates.
 	service.intentClassifier = fakeIntentClassifier{}
 	response, err := service.HandleText(context.Background(), AdapterRequest{
 		Adapter:   model.AdapterMatrix,
 		SourceKey: "matrix:room:user",
-		Text:      "1",
+		Text:      "2",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if response.Status != model.JobStatusDone || !strings.Contains(response.Body, "创建当前记录组") {
-		t.Fatalf("reply response = %+v, want bucket create", response)
+		t.Fatalf("reply response = %+v, want new bucket create", response)
 	}
-	bucket, err := service.store.ActiveCaptureBucket("matrix:room:user")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bucket.AppendCount != 1 {
-		t.Fatalf("append count = %d, want 1 for fresh create", bucket.AppendCount)
+	if _, err := service.store.ActivePendingClarification("matrix:room:user", time.Now().UTC()); err == nil {
+		t.Fatalf("expected pending clarification resolved after reply")
 	}
 }
 
@@ -439,8 +437,8 @@ func TestIntentRouterReplyResolvesPendingClarificationAndAppends(t *testing.T) {
 			Target:          "active_bucket",
 			CaptureAction:   "append",
 			BucketRelation:  "unclear",
-			ConfidenceLabel: "medium",
-			Confidence:      0.55,
+			ConfidenceLabel: "high",
+			Confidence:      0.9,
 		},
 	}
 	if _, err := service.HandleText(context.Background(), AdapterRequest{
@@ -491,8 +489,8 @@ func TestIntentRouterNewMessageAutoCancelsPendingClarification(t *testing.T) {
 			Target:          "active_bucket",
 			CaptureAction:   "append",
 			BucketRelation:  "unclear",
-			ConfidenceLabel: "medium",
-			Confidence:      0.55,
+			ConfidenceLabel: "high",
+			Confidence:      0.9,
 		},
 	}
 	if _, err := service.HandleText(context.Background(), AdapterRequest{
@@ -571,7 +569,6 @@ func TestClassifyIntentRulesCoversCommonPhrasings(t *testing.T) {
 		"到这里":       {intent: "raw_close"},
 		"整理一下":      {intent: "organize", target: "active"},
 		"处理一下":      {intent: "organize", target: "active"},
-		"整理今天的":     {intent: "organize", target: "today"},
 		"看一下":       {intent: "diff"},
 		"看看":        {intent: "diff"},
 		"看一下 diff":  {intent: "diff"},

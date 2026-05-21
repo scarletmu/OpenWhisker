@@ -1,10 +1,10 @@
 # Phase 4 Wiki Agent Workflow
 
-状态：推进中。Phase 4A 已完成第一版代码切片；Phase 4B 已接入真实 LLM-backed Raw Organizer 的最小版本，并补上第一版 agent output policy gate、长期 Matrix daemon 和 `organize today` grouped plan。默认仍使用 deterministic planner，真实 provider 需要显式启用。
+状态：推进中。Phase 4A 已完成第一版代码切片；Phase 4B 已接入真实 LLM-backed Raw Organizer 的最小版本，并补上第一版 agent output policy gate 和长期 Matrix daemon。默认仍使用 deterministic planner，真实 provider 需要显式启用。
 
 这是 Phase 3 完成 sync-aware approval execution 之后，下一阶段值得推进的设计边界。
 
-当前实现状态：Phase 1 到 Phase 3 已经验证了低风险 raw capture、中风险 approval/diff/hash guard，以及 approval apply 前后的 Headless one-shot sync。Phase 4A 已经补上 Matrix IM 入口 MVP 和长期 daemon；Phase 4B 已经补上可显式启用的真实 LLM-backed `organize last` 最小路径，并接入第一版 agent output policy gate、`organize today` grouped plan、Raw/Processed processing note。Phase 4C.1 / 4C.2 已落地（详见下方子阶段）。默认仍使用 deterministic planner，真实 provider 优先按 OpenAI-compatible Chat Completions endpoint 接入，需要 `--organizer=openai-compatible` 和本地 API key。
+当前实现状态：Phase 1 到 Phase 3 已经验证了低风险 raw capture、中风险 approval/diff/hash guard，以及 approval apply 前后的 Headless one-shot sync。Phase 4A 已经补上 Matrix IM 入口 MVP 和长期 daemon；Phase 4B 已经补上可显式启用的真实 LLM-backed `organize last` 最小路径，并接入第一版 agent output policy gate 和 Raw/Processed processing note。Phase 4C.1 / 4C.2 已落地（详见下方子阶段）。默认仍使用 deterministic planner，真实 provider 优先按 OpenAI-compatible Chat Completions endpoint 接入，需要 `--organizer=openai-compatible` 和本地 API key。
 
 近期代码 / 验证进展以 [`docs/progress.md`](../progress.md) 为准；本文不再镜像 commit 级别 changelog。
 
@@ -15,7 +15,6 @@ export OPENWHISKER_LLM_API_KEY=...
 export OPENWHISKER_LLM_BASE_URL=https://your-compatible-endpoint.example/v1
 export OPENWHISKER_LLM_MODEL=your-model
 go run ./cmd/openwhisker organize last --organizer=openai-compatible
-go run ./cmd/openwhisker organize today --organizer=openai-compatible
 go run ./cmd/openwhisker matrix poll-once --organizer=openai-compatible
 go run ./cmd/openwhisker matrix daemon --organizer=openai-compatible
 ```
@@ -55,7 +54,7 @@ Phase 4 代码闭环已经进入真实环境验证。当前已完成真实 Matri
 
 真实环境验证顺序保持保守：
 
-1. **真实 Matrix + test vault**：先运行 `matrix daemon --vault testdata/vault --organizer=deterministic`，验证 IM 收发、event 去重、outbox 投递、`/organize last`、`/organize today`、`/diff`、`/approve` 和 `since` token 持久化，不污染真实 vault。
+1. **真实 Matrix + test vault**：先运行 `matrix daemon --vault testdata/vault --organizer=deterministic`，验证 IM 收发、event 去重、outbox 投递、`/organize last`、`/diff`、`/approve` 和 `since` token 持久化，不污染真实 vault。
 2. **真实 vault + deterministic organizer**：再切到 `/Users/wang/Documents/KnowLedge`，验证 `Raw/Inbox`、`Raw/Processed`、`Knowledge/Drafts`、approval apply 和 Headless Sync 行为，保持输出稳定可控。真实 vault 验证应使用独立本地 SQLite，例如 `OPENWHISKER_DEBUG_DB=data/openwhisker-real.db`，避免和 test vault 的 job / plan / operation log 混在一起。
 3. **真实 vault + OpenAI-compatible LLM**：diff/reject 已验证。2026-05-19 完成 approve/apply 闭环（CLI 路径，DeepSeek `deepseek-v4-flash`，`--sync=off`，独立 `data/openwhisker-real-llm-approve.db`），覆盖 `direct_fs_executor` 真实写入、`move_note` Raw/Processed processing note、`vault_operation_logs` 两条 `applied`、`move_note.before_hash` 命中 ingest 时记录的 raw hash。这次验证暴露 Raw Organizer 仍在用 `response_format: json_schema`，与 DeepSeek 不兼容；按 intent classifier 已有的迁移路径切到 `json_object` + 客户端 `validateRawOrganizerOutput` 硬校验，并补单次空 content 重试。中风险 plan 仍必须走 diff、approval、hash guard 和 `VaultExecutor`，不直接写正式 Knowledge note。
 
@@ -101,7 +100,7 @@ Phase 4 主线是真实 LLM + Matrix IM approval workflow，拆成三个连续�
 
 1. **Phase 4A：Core Adapter API + Matrix Adapter MVP + Agent Host Contract**。先定义 Core 给 IM adapter 使用的稳定入口、Matrix 入站/出站最小闭环、Wiki Agent Host 的输入输出边界、vault context 读取范围、结构化 plan 校验和 fake/fixture agent 验证方式。
 2. **Phase 4B：Real LLM-backed Raw Organizer**。接入真实 LLM provider，让 Matrix `/organize last` 从 raw note、VaultRawOrganizerSkill、VaultProfile 摘要、可选 vault rules 和已有 wiki context 中生成可审批 `VaultPlan`，并通过 Matrix 完成 diff、approval、reject 和结果回传。当前已完成最小 OpenAI-compatible provider 接入，后续补齐更完整的 validator、上下文检索和 Raw/Processed 处理记录。
-3. **Phase 4C：Organize Today + Knowledge Expander + Proposal Policy**。让 `organize today` 支持多 raw 分组整理，并让 Knowledge Expander 支持扩展、拆分建议、hub / child note proposal；高风险 split / merge 默认只生成 proposal note。
+3. **Phase 4C：Knowledge Expander + Proposal Policy**。让 Knowledge Expander 支持扩展、拆分建议、hub / child note proposal；高风险 split / merge 默认只生成 proposal note。
 
 Phase 4 必须包含真实 LLM provider 接入；fake / fixture agent 只作为 contract、validator 和 regression test 的替身。Provider 细节必须被隔离在 Agent Host 边界内。Core、Policy、Executor 和 Matrix Adapter 只消费结构化 job、plan、outbox 或 command result，不依赖具体模型或 SDK。
 
@@ -141,18 +140,6 @@ Matrix /organize last or CLI organize last
   -> Matrix reply when invoked from Matrix
 ```
 
-Organize today：
-
-```text
-Matrix /organize today or CLI organize today
-  -> unprocessed Raw/Inbox notes from current day
-  -> grouped WikiJob(type=organize_raw_today)
-  -> Raw Organizer generates grouped draft or deterministic grouped fallback
-  -> one grouped VaultPlan
-  -> approval prompt with grouped summary
-  -> Matrix approval prompt when invoked from Matrix
-```
-
 Knowledge Expander：
 
 ```text
@@ -183,7 +170,6 @@ Matrix command, CLI command, or selected topic
 范围外：
 
 - 真实 LLM provider 的完整生产化；Phase 4B 已有最小 OpenAI-compatible provider，后续补齐重试、更多 validator 和真实 Matrix 环境验证。
-- `organize today`。
 - Knowledge Expander。
 - scheduler 和 maintenance agent。
 - sandbox runtime。
@@ -207,7 +193,7 @@ vault context 不读取 .obsidian、.git、secrets、隐藏路径或 vault root 
 
 范围内：
 
-- 选择并接入第一版真实 LLM provider；模型、密钥、超时和结构化输出解析隔离在 Wiki Agent Host 内。第一版优先接入 OpenAI-compatible Chat Completions API。结构化输出契约：`response_format: {"type": "json_object"}`，schema 约束（字段名、`raw_kind` enum、字符串/数组类型）以英文规则 + JSON 示例形式写在 system prompt 里，依赖客户端 `validateRawOrganizerOutput` 做硬校验；不使用 OpenAI 的 strict `json_schema`，以兼容 DeepSeek 等只支持 `json_object` 的 OpenAI-compatible 端点。空 content 在 `OrganizeRaw` / `OrganizeRawToday` 共享的 `createWithRetry` helper 中做一次同请求体重试（无指数退避），两次都空则返回 `empty content after one retry` 错误。该实现与 [`docs/architecture/intent-router-model-contract.md`](../architecture/intent-router-model-contract.md) 里的 intent classifier 迁移备注同源（见 commit 890013a 与 2026-05-19 验证记录）。
+- 选择并接入第一版真实 LLM provider；模型、密钥、超时和结构化输出解析隔离在 Wiki Agent Host 内。第一版优先接入 OpenAI-compatible Chat Completions API。结构化输出契约：`response_format: {"type": "json_object"}`，schema 约束（字段名、`raw_kind` enum、字符串/数组类型）以英文规则 + JSON 示例形式写在 system prompt 里，依赖客户端 `validateRawOrganizerOutput` 做硬校验；不使用 OpenAI 的 strict `json_schema`，以兼容 DeepSeek 等只支持 `json_object` 的 OpenAI-compatible 端点。空 content 在 `OrganizeRaw` 的 `createWithRetry` helper 中做一次同请求体重试（无指数退避），两次都空则返回 `empty content after one retry` 错误。该实现与 [`docs/architecture/intent-router-model-contract.md`](../architecture/intent-router-model-contract.md) 里的 intent classifier 迁移备注同源（见 commit 890013a 与 2026-05-19 验证记录）。
 - CLI `organize last` 和 Matrix `/organize last` 都可以通过 `--organizer=openai-compatible` 使用 Raw Organizer 生成 plan；默认仍保持 deterministic，避免无意触发外部模型调用。
 - Matrix `/diff <job_id>`、`/approve <job_id>`、`/reject <job_id>` 返回用户可读的审批和执行结果。
 - 支持 `raw_kind` 推断：`concept-seed`、`web-clip`、`todo-list`、`llm-chat`、`mixed`。
@@ -217,7 +203,6 @@ vault context 不读取 .obsidian、.git、secrets、隐藏路径或 vault root 
 
 范围外：
 
-- 更细粒度的 `organize today` 自动主题聚类和 proposal 拆分策略。
 - 把 Raw 直接复制进 `Knowledge/`。
 - 未审批地 patch 正式 Knowledge note。
 - 外部网页抓取和当前资料核验的完整自动化；需要外部验证时先标记 review 或在后续工具阶段处理。
@@ -231,14 +216,12 @@ Raw/Processed 记录包含原始来源、产出链接、处理说明和剩余 re
 fixture agent 仍可在测试中替代真实 provider。
 ```
 
-## Phase 4C：Organize Today + Knowledge Expander + Proposal Policy
+## Phase 4C：Knowledge Expander + Proposal Policy
 
-目标：让 agent 可以批量整理当天 raw 并维护长期 `Knowledge/`，但对结构性重构保持保守。
+目标：让 agent 可以维护长期 `Knowledge/`，但对结构性重构保持保守。
 
 范围内：
 
-- `organize today` 为多条 raw 生成分组摘要、目标路径和审批计划。第一版已生成单个 grouped plan。
-- Matrix `/organize today` 返回 grouped approval prompt。第一版已接入 Core Adapter API。
 - 扩展现有 thin Knowledge note。
 - 为已有 topic 生成 append plan 或 child note proposal。
 - 支持 hub / child note 结构建议。
@@ -260,11 +243,11 @@ fixture agent 仍可在测试中替代真实 provider。
 proposal note 能让用户理解结构变化、来源依据、影响路径和下一步审批方式。
 ```
 
-Phase 4C 进一步拆为四个子阶段，每个子阶段独立可 commit、独立可验收，按依赖顺序推进。子阶段之间不耦合 LLM 调通节奏，便于在不同时间窗口内分别推进。
+Phase 4C 进一步拆为两个子阶段，每个子阶段独立可 commit、独立可验收。
 
 ### 4C.1：High-risk proposal-only policy
 
-目标：在引入新 LLM agent 之前，先把 high-risk plan 的安全出口铺好。让 4C.2 / 4C.3 在判断不准时可以稳定降级为 proposal，而不是被迫硬写或拒绝。
+目标：在引入新 LLM agent 之前，先把 high-risk plan 的安全出口铺好。让 4C.2 在判断不准时可以稳定降级为 proposal，而不是被迫硬写或拒绝。
 
 范围内：
 
@@ -305,7 +288,7 @@ Phase 4C 进一步拆为四个子阶段，每个子阶段独立可 commit、独�
 - 输出仅两种 kind：
   - `append`（medium-risk）：对已有 Knowledge note 末尾追加 H2 章节，必须有 `before_hash`；
   - `propose_restructure`（high-risk）：split / merge / rename / bulk-retag / bulk-link-rewrite，由 4C.1 写一份 proposal note 到 `Raw/Agent-Proposals/`，由人在外部工具中实际执行。**新建子 note 也归到这条路径**（建议 `proposal_kind = split`）。
-- CLI 入口最小形态：`expand <knowledge_path>`。Matrix 入口在 4C.4 接入。
+- CLI 入口最小形态：`expand <knowledge_path>`。Knowledge Expander 保持 CLI-only，不接入 Matrix 自然语言入口。
 - 契约文档：[`docs/architecture/knowledge-expander-model-contract.md`](../architecture/knowledge-expander-model-contract.md)。
 
 范围外：
@@ -313,7 +296,7 @@ Phase 4C 进一步拆为四个子阶段，每个子阶段独立可 commit、独�
 - **直接新建子 note**。第一版有意不支持 `create_child_note` kind。任何新建 note 的需求都走 `propose_restructure`。这避免了 expander 输出落到 `Knowledge/Drafts/` 这种 policy 例外。
 - 主动「扫描整个 vault 找扩展机会」。本阶段只在用户显式指定 Knowledge note 时工作。
 - 自动选择关联 raw。第一版只用 source trace 中已写入的反向引用。
-- IM 自然语言入口（4C.4）。
+- IM 自然语言入口。Knowledge Expander 的产出（append plan / proposal note）本身就是普通文档，会自然回流到既有 capture / review 链路，不需要为非关键模块单独做 Matrix 交互 UX。
 
 验收：
 
@@ -323,57 +306,6 @@ Phase 4C 进一步拆为四个子阶段，每个子阶段独立可 commit、独�
 - plan diff / approve --sync=off 能正常落地，append 命中 before_hash；
 - 若 LLM 输出 split/merge/rename/bulk-* 类操作，plan 被判定 high-risk 并走 4C.1 proposal 出口；
 - 单测覆盖 schema 校验（含 create_child_note 已被拒）、空 content 重试、high-risk 降级三条路径。
-```
-
-### 4C.3：Organize Today 多 topic 分组
-
-目标：把 `organize today` 从「单 grouped plan」升级为「按 topic 分组的多 plan」，提升用户一次性整理一天 raw 的吞吐量。
-
-范围内：
-
-- `organize today` 在 raw topic 明显分歧时，返回多个独立 `plan_id`，每个对应一个 topic 分组，独立 diff / approve / reject。
-- 分组判定优先复用 Raw Organizer 已有的 `raw_kind` 推断和文本聚类，**不**引入新 LLM 调用 round。
-- Matrix `/organize today` 返回所有 plan_id 的列表，用户用 `/diff <plan_id>` 选择性预览。
-- 单 topic 输入行为与现状一致（回归测试）。
-
-范围外：
-
-- 自动跨天聚合（涉及历史 raw 重组，超出 organize today 的语义）。
-- 自动决定哪个 group 应该走 Knowledge Expander 进一步扩展。
-
-验收：
-
-```text
-给一组明显跨 ≥2 topic 的 raw，organize today --organizer=openai-compatible 返回 ≥2 grouped plan；
-每个 plan 可独立 diff / approve / reject；
-单 topic 输入仍只返回 1 个 plan，行为与 Phase 4B 一致；
-对应 grouped plan 测试和 Matrix 入口测试全绿。
-```
-
-### 4C.4：IM 自然语言入口 + intent router 扩展
-
-目标：把 4C.2 / 4C.3 的能力暴露到 Matrix 自然语言入口，并通过 intent router 覆盖典型说法。
-
-范围内：
-
-- intent router rules-only 短句词表新增：`扩展一下 <topic>` / `这块要拆` / `这两个合并` / `重命名 <path>` / `处理今天分组` 等高频说法（先用直觉版词表，落地后基于真实未命中样本扩张）。
-- intent classifier 输出枚举新增 `knowledge_expand` / `propose_restructure`，[`docs/architecture/intent-router-model-contract.md`](../architecture/intent-router-model-contract.md) 同步更新。
-- Matrix `/diff` 渲染层适配：对 high-risk plan 显示 proposal-only 提示；对多 plan organize today 输出 plan 列表 + 每个 plan 独立 approval 入口。
-- intent audit `executed_action` 枚举新增 `expand_pending_approval` / `proposal_written`。
-
-范围外：
-
-- 多模态输入（图片 / 文件 / 语音）。仍由后续阶段承接。
-- 全自动批量审批 / 一键 approve 所有 grouped plan。
-
-验收：
-
-```text
-真实 Matrix 上：
-- 自然语言「扩展一下 <某 Knowledge>」走通：classifier → expand plan → /diff → 同意 → 落地；
-- 自然语言「这两个合并」走通：classifier → high-risk plan → /diff 显示 proposal-only → 同意 → proposal note 写入 Raw/Agent-Proposals/；
-- audit jsonl 包含 expand_pending_approval / proposal_written 行；
-- 单 plan organize today 行为不变。
 ```
 
 ## 已确认的 Phase 4 决策
@@ -389,6 +321,8 @@ Phase 4C 进一步拆为四个子阶段，每个子阶段独立可 commit、独�
 - 默认 vault target 仍是本地 test vault；真实 vault 仍需用户显式传入。
 - 真实 vault approval 继续继承 Phase 3 的 sync-aware apply 行为。
 - scheduler、maintenance agent 和 sandbox runtime 留给后续阶段或独立文档。
+- `organize today` 批量整理入口已移除：capture bucket 已在输入期由用户完成 topic 分组，再在整理期做一次机器聚类会与捕获期决策冲突。整理链路统一为 capture bucket（`OrganizeCaptureBucket`）和 source-last（`OrganizeSourceLast`）两条。原计划的 4C.3（organize today 多 topic 分组）因此一并取消。
+- Knowledge Expander 保持 CLI-only。其产出只是一份文档建议（append plan 或 proposal note），会自然回流到既有 capture / review 链路；不为非关键模块单独构建 Matrix 自然语言 UX。原计划的 4C.4（IM 自然语言入口）因此一并取消。
 
 ## 范围外
 
@@ -444,7 +378,6 @@ Phase 4 继续保留 CLI regression 命令：
 
 ```sh
 go run ./cmd/openwhisker organize last
-go run ./cmd/openwhisker organize today
 go run ./cmd/openwhisker plan diff <plan_id|job_id>
 go run ./cmd/openwhisker plan approve <plan_id|job_id>
 go run ./cmd/openwhisker plan reject <plan_id|job_id>
@@ -456,7 +389,6 @@ Matrix 文档层面的目标命令：
 普通文本
 /raw <text>
 /organize last
-/organize today
 /diff <job_id>
 /approve <job_id>
 /reject <job_id>
@@ -484,7 +416,6 @@ go run ./cmd/openwhisker knowledge expand <path-or-topic>
 - agent 输出越界路径、hidden path、absolute path 或未知 operation 时，被 policy 拒绝。
 - agent 输出缺 source trace 的 Knowledge plan 时，被 policy 拒绝。
 - `organize last` 保留 Phase 2 approval、reject、conflict regression。
-- `organize today` 能把多条 raw 分组，并保留每条 raw 的 source trace。第一版已落地为单 grouped plan。
 - mixed raw 在边界不清时生成 proposal，而不是直接创建多个长期 note。
 - high-risk split / merge 只写 proposal note，不修改正式 Knowledge note。
 - Phase 3 sync-aware approval 行为继续保持：pre-sync failure 不写 vault，post-sync failure 只产生 warning。
@@ -496,7 +427,6 @@ go run ./cmd/openwhisker knowledge expand <path-or-topic>
 - Matrix Adapter MVP 与 Synapse / Caddy / Docker Compose 部署是否放在同一 Phase 4A PR，还是拆成运行部署文档和 adapter 代码两步。
 - proposal note 的默认路径是 `Meta/Proposals/`，还是继续使用 `Knowledge/Drafts/` 作为 staging 区。
 - `Knowledge/Drafts/` 在 Phase 4 后是保留为草稿区，还是只服务 Phase 2 deterministic workflow。
-- `organize today` 第一版已生成单个 grouped plan；后续是否按主题自动拆成多个 plan 仍需在真实使用后评估。
 - `expand knowledge` 的第一版入口是 CLI topic/path，还是只作为内部 workflow。
 - frontmatter 和 controlled tags 的第一版硬闸门已放在 policy 层；后续可在 provider 侧补更早的友好错误，但不能替代 policy。
 - `/replan` 是否应在 Phase 4B 一起设计，还是等 agent workflow 稳定后再加入。

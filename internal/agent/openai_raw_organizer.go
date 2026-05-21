@@ -131,30 +131,6 @@ func (o OpenAIRawOrganizer) OrganizeRaw(ctx context.Context, req core.RawOrganiz
 	return buildLLMOrganizePlan(req, output)
 }
 
-func (o OpenAIRawOrganizer) OrganizeRawToday(ctx context.Context, req core.RawTodayOrganizerRequest) (model.VaultPlan, error) {
-	if o.Client == nil {
-		return model.VaultPlan{}, errors.New("openai raw organizer client is required")
-	}
-	outputText, err := o.createWithRetry(ctx, openAIResponseRequest{
-		Instructions:    rawOrganizerInstructions(),
-		Input:           renderRawTodayOrganizerInput(req),
-		Text:            openAITextSpec{Format: rawOrganizerResponseFormat()},
-		MaxOutputTokens: 4096,
-		Store:           false,
-	})
-	if err != nil {
-		return model.VaultPlan{}, err
-	}
-	var output rawOrganizerLLMOutput
-	if err := json.Unmarshal([]byte(outputText), &output); err != nil {
-		return model.VaultPlan{}, fmt.Errorf("decode raw today organizer structured output: %w", err)
-	}
-	if err := validateRawOrganizerOutput(output); err != nil {
-		return model.VaultPlan{}, err
-	}
-	return buildLLMTodayPlan(req, output)
-}
-
 func (o OpenAIRawOrganizer) createWithRetry(ctx context.Context, req openAIResponseRequest) (string, error) {
 	out, err := o.Client.CreateResponse(ctx, req)
 	if err != nil {
@@ -296,11 +272,11 @@ The JSON object MUST contain exactly these fields:
 - title: string. Short Chinese title for the Knowledge draft.
 - raw_kind: one of ["concept-seed", "web-clip", "todo-list", "llm-chat", "mixed"].
 - summary: string. One or two Chinese sentences summarizing the intended draft.
-- draft_body: string. Chinese markdown body without YAML frontmatter and without a top-level H1.
+- draft_body: string. Chinese markdown body without YAML frontmatter and without a top-level H1. This text is inserted under a "## 笔记" H2 section, so every heading inside draft_body MUST start at H3 ("### ") or deeper. Never emit H1 or H2 headings here — they would break the Knowledge note outline.
 - review_items: array of strings. Items the user should still verify.
 
 Example JSON output:
-{"title":"Phase4 记忆模型","raw_kind":"concept-seed","summary":"整理 Phase4 agent 记忆模型。","draft_body":"## 核心观点\n\nagent 的长期记忆来自 vault。","review_items":["确认是否需要补充 Matrix 入口说明。"]}
+{"title":"Phase4 记忆模型","raw_kind":"concept-seed","summary":"整理 Phase4 agent 记忆模型。","draft_body":"### 核心观点\n\nagent 的长期记忆来自 vault。","review_items":["确认是否需要补充 Matrix 入口说明。"]}
 
 Follow the task-specific Vault Skill documents in the provided context.
 Generate Chinese knowledge draft content by default.
@@ -318,25 +294,6 @@ func renderRawOrganizerInput(req core.RawOrganizerRequest) string {
 		fmt.Fprintf(&b, "## Context: %s\n%s\n\n", doc.Path, limitString(doc.Content, 6000))
 	}
 	fmt.Fprintf(&b, "## Raw note\n%s\n", limitString(req.VaultContext.RawNote, 24000))
-	return b.String()
-}
-
-func renderRawTodayOrganizerInput(req core.RawTodayOrganizerRequest) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "Organize today's raw Obsidian notes into one grouped reviewable Knowledge draft.\n")
-	fmt.Fprintf(&b, "Date: %s\n", req.Day.Format("2006-01-02"))
-	fmt.Fprintf(&b, "Plan job id: %s\n\n", req.Job.ID)
-	if len(req.VaultContext) > 0 {
-		for _, doc := range req.VaultContext[0].Documents {
-			fmt.Fprintf(&b, "## Context: %s\n%s\n\n", doc.Path, limitString(doc.Content, 6000))
-		}
-	}
-	for i, rawJob := range req.RawJobs {
-		fmt.Fprintf(&b, "## Raw note %d\n", i+1)
-		fmt.Fprintf(&b, "Raw job id: %s\n", rawJob.ID)
-		fmt.Fprintf(&b, "Raw path: %s\n", req.RawPaths[i])
-		fmt.Fprintf(&b, "%s\n\n", limitString(req.VaultContext[i].RawNote, 12000))
-	}
 	return b.String()
 }
 
@@ -420,68 +377,6 @@ func buildLLMOrganizePlan(req core.RawOrganizerRequest, output rawOrganizerLLMOu
 	}, nil
 }
 
-func buildLLMTodayPlan(req core.RawTodayOrganizerRequest, output rawOrganizerLLMOutput) (model.VaultPlan, error) {
-	if len(req.RawJobs) == 0 || len(req.RawJobs) != len(req.RawPaths) {
-		return model.VaultPlan{}, errors.New("raw today plan requires matching raw jobs and paths")
-	}
-	conventions := req.Conventions.Normalize()
-	date := req.Day.Format("2006-01-02")
-	knowledgePath := joinVaultPath(conventions.KnowledgeDraftDir, fmt.Sprintf("%s-raw-review-%s.md", date, req.Job.ID))
-	var processedPaths []string
-	for _, rawPath := range req.RawPaths {
-		base := strings.TrimSuffix(filepath.Base(rawPath), filepath.Ext(rawPath))
-		processedPaths = append(processedPaths, joinVaultPath(conventions.RawProcessedDir, base+".md"))
-	}
-	createPayload, err := json.Marshal(model.CreateNotePayload{
-		Content: renderLLMTodayKnowledgeDraft(req, output, processedPaths, conventions.RequiredDraftTags),
-	})
-	if err != nil {
-		return model.VaultPlan{}, err
-	}
-	operations := []model.VaultOperation{{
-		ID:          model.NewID("op"),
-		Type:        model.OperationCreateNote,
-		TargetPath:  knowledgePath,
-		PayloadJSON: string(createPayload),
-		Reason:      "Create an LLM-organized grouped Knowledge draft for today's raw captures.",
-		RiskLevel:   model.RiskMedium,
-	}}
-	for i, rawPath := range req.RawPaths {
-		movePayload, err := json.Marshal(model.MoveNotePayload{
-			DestinationPath: processedPaths[i],
-			ProcessingNote:  renderLLMTodayProcessedRawNote(req, output, i, processedPaths[i], []string{knowledgePath}),
-		})
-		if err != nil {
-			return model.VaultPlan{}, err
-		}
-		operations = append(operations, model.VaultOperation{
-			ID:          model.NewID("op"),
-			Type:        model.OperationMoveNote,
-			TargetPath:  rawPath,
-			PayloadJSON: string(movePayload),
-			Reason:      "Mark the raw capture as processed only after the grouped Knowledge draft is approved.",
-			RiskLevel:   model.RiskMedium,
-		})
-	}
-	targetPaths := append([]string{knowledgePath}, req.RawPaths...)
-	targetPaths = append(targetPaths, processedPaths...)
-	sourceRefs := append([]string{}, rawTodayJobIDs(req.RawJobs)...)
-	sourceRefs = append(sourceRefs, req.RawPaths...)
-	return model.VaultPlan{
-		ID:               model.NewID("plan"),
-		JobID:            req.Job.ID,
-		Purpose:          "organize today's raw captures into a grouped Knowledge draft with LLM",
-		RiskLevel:        model.RiskMedium,
-		RequiresApproval: true,
-		Summary:          output.Summary,
-		SourceRefs:       sourceRefs,
-		TargetPaths:      targetPaths,
-		Operations:       operations,
-		Status:           model.PlanStatusProposed,
-		CreatedAt:        req.Now,
-	}, nil
-}
-
 func renderLLMKnowledgeDraft(req core.RawOrganizerRequest, output rawOrganizerLLMOutput, processedPath string, requiredTags []string) string {
 	reviewItems := output.ReviewItems
 	if len(reviewItems) == 0 {
@@ -548,86 +443,6 @@ openwhisker:
 	)
 }
 
-func renderLLMTodayKnowledgeDraft(req core.RawTodayOrganizerRequest, output rawOrganizerLLMOutput, processedPaths []string, requiredTags []string) string {
-	var rawJobLines, rawPathLines, processedPathLines, relatedLines, sourceLines []string
-	for i, rawJob := range req.RawJobs {
-		rawPath := req.RawPaths[i]
-		processedPath := processedPaths[i]
-		rawJobLines = append(rawJobLines, "    - "+rawJob.ID)
-		rawPathLines = append(rawPathLines, "    - "+rawPath)
-		processedPathLines = append(processedPathLines, "    - "+processedPath)
-		relatedLines = append(relatedLines, fmt.Sprintf("  - \"[[%s]]\"", trimVaultExt(processedPath)))
-		sourceLines = append(sourceLines, fmt.Sprintf("- [[%s]]", trimVaultExt(processedPath)))
-	}
-	reviewItems := output.ReviewItems
-	if len(reviewItems) == 0 {
-		reviewItems = []string{"核对从 raw 输入推断出的内容是否准确。"}
-	}
-	var reviewLines []string
-	for _, item := range reviewItems {
-		item = strings.TrimSpace(item)
-		if item != "" {
-			reviewLines = append(reviewLines, "> - "+item)
-		}
-	}
-	if len(reviewLines) == 0 {
-		reviewLines = []string{"> - 核对从 raw 输入推断出的内容是否准确。"}
-	}
-	return fmt.Sprintf(`---
-title: "%s"
-tags:
-%s
-related:
-%s
-openwhisker:
-  job_id: %s
-  job_type: %s
-  raw_job_id: batch
-  raw_path: %s
-  processed_path: %s
-  raw_job_ids:
-%s
-  raw_paths:
-%s
-  processed_paths:
-%s
-  raw_kind: %s
-  created_at: %s
----
-
-# %s
-
-> [!todo] OpenWhisker Raw Organizer 草稿
-> 由 OpenWhisker 从 raw 输入整理。请人工审阅 → 补全 → 转写为正式 Knowledge note 后归档此 draft。
-
-## 摘要
-
-%s
-
-## 笔记
-
-%s
-
-## 来源
-
-%s
-
-## 待核查
-
-> [!todo] 待核查
-%s
-`,
-		escapeYAMLString(strings.TrimSpace(output.Title)),
-		renderYAMLList(mergeKnowledgeDraftTags(requiredTags)),
-		strings.Join(relatedLines, "\n"),
-		req.Job.ID, req.Job.Type, req.Conventions.RawInboxDir, processedPaths[0],
-		strings.Join(rawJobLines, "\n"), strings.Join(rawPathLines, "\n"), strings.Join(processedPathLines, "\n"),
-		output.RawKind, req.Now.Format(time.RFC3339),
-		strings.TrimSpace(output.Title), strings.TrimSpace(output.Summary), strings.TrimSpace(output.DraftBody),
-		strings.Join(sourceLines, "\n"), strings.Join(reviewLines, "\n"),
-	)
-}
-
 func renderLLMProcessedRawNote(req core.RawOrganizerRequest, output rawOrganizerLLMOutput, processedPath string, outputPaths []string) string {
 	var outputLines []string
 	for _, path := range outputPaths {
@@ -683,71 +498,6 @@ func renderLLMProcessedRawNote(req core.RawOrganizerRequest, output rawOrganizer
 		strings.Join(reviewLines, "\n"),
 		req.Job.ID, req.RawJob.ID, req.RawPath, processedPath, req.Now.Format(time.RFC3339), output.RawKind,
 	)
-}
-
-func renderLLMTodayProcessedRawNote(req core.RawTodayOrganizerRequest, output rawOrganizerLLMOutput, index int, processedPath string, outputPaths []string) string {
-	var outputLines []string
-	for _, path := range outputPaths {
-		path = strings.TrimSpace(path)
-		if path != "" {
-			outputLines = append(outputLines, fmt.Sprintf("- [[%s]]", trimVaultExt(path)))
-		}
-	}
-	if len(outputLines) == 0 {
-		outputLines = []string{"- 待补充"}
-	}
-	var reviewLines []string
-	for _, item := range output.ReviewItems {
-		item = strings.TrimSpace(item)
-		if item != "" {
-			reviewLines = append(reviewLines, "> - "+item)
-		}
-	}
-	if len(reviewLines) == 0 {
-		reviewLines = []string{"> - 核对从 raw 输入推断出的内容是否准确。"}
-	}
-	return fmt.Sprintf(`
-
----
-
-> [!note] OpenWhisker Processing
-> 由 OpenWhisker 处理为 Knowledge draft；以下为处理元信息与输出。
-
-### Outputs
-
-%s
-
-### Processing Note
-
-Grouped by OpenWhisker Raw Organizer for %s. %s
-
-### Remaining Review
-
-> [!todo] Remaining Review
-%s
-
-### Trace
-
-- plan_job: `+"`%s`"+`
-- raw_job: `+"`%s`"+`
-- raw_path: `+"`%s`"+`
-- processed_path: `+"`%s`"+`
-- processed_at: `+"`%s`"+`
-- raw_kind: `+"`%s`"+`
-`,
-		strings.Join(outputLines, "\n"),
-		req.Day.Format("2006-01-02"), strings.TrimSpace(output.Summary),
-		strings.Join(reviewLines, "\n"),
-		req.Job.ID, req.RawJobs[index].ID, req.RawPaths[index], processedPath, req.Now.Format(time.RFC3339), output.RawKind,
-	)
-}
-
-func rawTodayJobIDs(jobs []model.WikiJob) []string {
-	ids := make([]string, 0, len(jobs))
-	for _, job := range jobs {
-		ids = append(ids, job.ID)
-	}
-	return ids
 }
 
 func limitString(value string, limit int) string {

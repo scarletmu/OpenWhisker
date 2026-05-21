@@ -84,7 +84,7 @@ go run ./cmd/openwhisker matrix daemon
 
 `poll-once` 用于手动验证单次 `/sync`；`daemon` 用于长期运行，会把 Matrix `next_batch` token 写入本地 state file，默认是 `data/matrix-since.token`。两者都继续只调用 Core Adapter API，不直接调用 LLM 或写 vault。
 
-当前命令入口包括 `/raw <text>`、普通文本 raw capture、`/organize last`、`/organize today`、`/diff`、`/approve`、`/reject`、`/status` 和 `/jobs`。
+当前命令入口包括 `/raw <text>`、普通文本 raw capture、`/organize last`、`/diff`、`/approve`、`/reject`、`/status` 和 `/jobs`。
 
 后续 Phase 4B.5 计划在 Matrix Adapter 和 Core Adapter API 之间增加 IM Intent Router，用自然语言入口替代一部分日常 slash 命令摩擦。计划文档见：
 
@@ -92,7 +92,7 @@ go run ./cmd/openwhisker matrix daemon
 docs/phases/phase-4-im-intent-router.md
 ```
 
-第一版设计为规则优先 + 小模型补充：slash 命令继续 passthrough，非 slash Matrix 输入进入 intent 识别，并只归一化为 raw capture、organize last/today、diff、approve、reject 或 unclear。Intent Router 不直接写 vault、不生成 `VaultPlan`、不调用 `VaultExecutor`，自然语言 diff / approve / reject 也只在唯一 pending plan 时自动绑定。低置信或不明确输入默认返回澄清，不写入、不执行。
+第一版设计为规则优先 + 小模型补充：slash 命令继续 passthrough，非 slash Matrix 输入进入 intent 识别，并只归一化为 raw capture、organize last、diff、approve、reject 或 unclear。Intent Router 不直接写 vault、不生成 `VaultPlan`、不调用 `VaultExecutor`，自然语言 diff / approve / reject 也只在唯一 pending plan 时自动绑定。低置信或不明确输入默认返回澄清，不写入、不执行。
 
 常用环境变量：
 
@@ -440,7 +440,6 @@ openwhisker-{outbox_message_id}
 | `/raw <text>` | 强制保存为 raw input |
 | `/ask <question>` | Wiki-first 只读问答，默认不写 vault |
 | `/organize last` | 整理最近一条 raw，生成 `VaultPlan` |
-| `/organize today` | 整理今天 raw，生成分组计划 |
 | `/diff <job_id>` | 查看某个 plan 的 diff 摘要 |
 | `/approve <job_id>` | 批准执行等待中的 plan |
 | `/reject <job_id>` | 拒绝等待中的 plan |

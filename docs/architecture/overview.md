@@ -23,7 +23,7 @@ raw text input
 
 approval apply 现在是 sync-aware 的：默认 test vault 仍关闭同步；当用户显式传入真实 vault 路径且使用默认 `--sync=auto` 时，core 会在 `direct_fs_executor.Apply` 前后通过 Headless `ob` 执行 one-shot sync。pre-sync 后仍由 `DirectFS.Apply` 重新执行 lock、path guard 和 `before_hash` guard；post-sync 失败只作为 warning 返回，不把已成功的 vault write 误标为失败。
 
-当前已实现 Matrix Adapter MVP、长期 Matrix daemon、Core Adapter API、受控 raw context builder、可显式启用的 OpenAI-compatible Raw Organizer 最小路径、`organize today` grouped plan、第一版 agent output policy gate、`VaultProfile -> VaultRawOrganizerSkill` 生成边界、`vault profile preview` 本地 skill bundle 预览、外部 vault-local `vault-profile-analyzer` Skill 模板，以及 Raw/Processed processing note 写入；默认 `organize last` 仍使用 deterministic planner，避免无意触发外部模型调用。仍未实现加载用户确认后的 Profile / Skill、插件集成、Knowledge Expander 和高风险知识库重构自动执行。下一阶段计划见 `docs/phases/phase-4-wiki-agent-workflow.md`。
+当前已实现 Matrix Adapter MVP、长期 Matrix daemon、Core Adapter API、受控 raw context builder、可显式启用的 OpenAI-compatible Raw Organizer 最小路径、第一版 agent output policy gate、`VaultProfile -> VaultRawOrganizerSkill` 生成边界、`vault profile preview` 本地 skill bundle 预览、外部 vault-local `vault-profile-analyzer` Skill 模板，以及 Raw/Processed processing note 写入；默认 `organize last` 仍使用 deterministic planner，避免无意触发外部模型调用。仍未实现加载用户确认后的 Profile / Skill、插件集成、Knowledge Expander 和高风险知识库重构自动执行。下一阶段计划见 `docs/phases/phase-4-wiki-agent-workflow.md`。
 
 ## 系统定位
 

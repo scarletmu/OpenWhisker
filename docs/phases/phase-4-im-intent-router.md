@@ -75,7 +75,6 @@ Intent Router 解决的是 Phase 4 真实 Matrix approval workflow 的入口体�
 - bucket / pending clarification 按 `source_key` 隔离并持久化。
 - bucket 每次 append 都写入 `Raw/Inbox`，并使用轻量 hash guard。
 - organized bucket 不再 append；补充内容需要新建 bucket。
-- 自然语言“处理今天”只处理当前 `source_key` 今天产生的 raw；显式 `/organize today` 保持当前 global 语义。
 
 ## Stage 1：rules-only + 状态骨架
 
@@ -110,8 +109,8 @@ Stage 2 接入小模型增强模糊意图识别和 bucket 关系判断。
 - 小模型只看当前消息、active bucket 摘要、最近交互类型摘要、pending plan 是否存在。
 - 小模型不看 vault notes、Raw 全文、Knowledge 内容、AGENTS.md、Profile、Skill、完整 diff 或 Matrix 历史全文。
 - 输出受控 JSON schema。
-- 使用 `confidence_label` 作为主要接受信号，`confidence` 只作调试和调参辅助。
-- `medium` 走定向澄清，`low` / invalid JSON fail closed。
+- 使用 `confidence_label` 作为进入 hard guard 的主要信号，`confidence` 只作调试和调参辅助。
+- 歧义 raw capture（`bucket_relation=unclear`）走定向澄清，`low` / invalid JSON fail closed。
 - 支持从澄清回复中提取 `additional_payload_text`。
 - intent audit 写本地 jsonl，不进 SQLite。
 
@@ -122,7 +121,6 @@ Slash 命令保持 fallback / debug 能力：
 ```text
 /raw <text>
 /organize last
-/organize today
 /diff <plan_id|job_id>
 /approve <plan_id|job_id>
 /reject <plan_id|job_id>
@@ -159,8 +157,6 @@ Plan plan_xxx applied.
 - “补充：...” 在 active bucket 存在且未过期时 append。
 - “结束记录”关闭 active bucket。
 - “整理刚才”优先整理 active bucket；没有 active bucket 时 fallback 到现有 last 语义。
-- 自然语言“处理今天”只处理当前 `source_key` 今天 raw。
-- 显式 `/organize today` 保持现有 global 语义。
 - “预览一下”“写进去”“先不写”只绑定当前 `source_key` 下唯一 pending plan。
 - 没有 pending plan 或多个 pending plan 时不执行。
 - organized bucket 不再 append。
@@ -188,7 +184,6 @@ Phase 4B.5 先按两阶段推进：先完成 rules-only + bucket state + source_
   - “补充：...”/“继续：...”/“还有：...”追加 active bucket。
   - “结束记录”/“这组结束”/“先到这里”关闭 active bucket。
   - “整理刚才”/“处理这组”优先整理 active bucket，无 active bucket 时 fallback 到当前 `source_key` 最近 raw。
-  - “处理今天”只整理当前 `source_key` 今天的 raw。
   - “预览一下”/“写进去”/“先不写”绑定当前 `source_key` 下唯一 `awaiting_approval` plan。
 - Core 新增受控 `AppendRawBucket` 和 `OrganizeCaptureBucket` 路径，均校验 `source_key`。
 - bucket append / organize 使用 `raw_hash_after_last_append` 做轻量 hash guard；mismatch 时 bucket 进入 `hash_mismatch`，不自动创建新 bucket。
@@ -201,9 +196,9 @@ Phase 4B.5 先按两阶段推进：先完成 rules-only + bucket state + source_
 本阶段已知限制：
 
 - Stage 2 intent 小模型已接入第一版 OpenAI-compatible classifier：`hybrid` 在配置 `OPENWHISKER_INTENT_API_KEY` 时会在 rules-only 未命中后调用小模型；未配置时仍自动降级 rules-only。
-- `medium` 定向澄清已接入 pending clarification 状态机（2026-05-18）：classifier 返回 `medium` + `intent=raw_capture` 时，OW 合成 `bucket_relation` 候选写入 `pending_clarifications` 并发出带数字编号的中文 IM 提示（有 active bucket 时 3 候选，无 active bucket 时 2 候选）；澄清回复通过规则匹配（数字 / 候选短语 / 取消词）解析，新消息非澄清回复则自动 cancel 旧 clarification。TTL 固定 5 分钟，由下次 `HandleText` 入口惰性 expire。
+- 定向澄清已接入 pending clarification 状态机（2026-05-18 落地，触发条件 2026-05-21 重定）：classifier 返回 `intent=raw_capture` + `bucket_relation=unclear` 且当前 source 存在 active bucket 时，OW 合成 3 个候选（补充上一组 / 新建一组 / 取消）写入 `pending_clarifications` 并发出带数字编号的中文 IM 提示；无 active bucket 时无歧义，不澄清，按 unclear 处理。触发条件原为 `confidence_label=medium`，但小模型实测几乎恒报 `high`、该分支从不命中，故改用 `bucket_relation` 结构信号、与 confidence 解耦。澄清回复通过规则匹配（数字 / 候选短语 / 取消词）解析，新消息非澄清回复则自动 cancel 旧 clarification。TTL 固定 5 分钟，由下次 `HandleText` 入口惰性 expire。
 - 澄清回复中 `additional_payload_text` 抽取尚未实现；当前回复只选择候选动作，将保存的 `original_message` 重新分发到对应 handler。
-- Stage 2 classifier + pending clarification 已补充单元测试并通过 `go test ./...`；medium 路径尚未真实 Matrix 验证。
+- Stage 2 classifier + pending clarification 已补充单元测试并通过 `go test ./...`；`bucket_relation=unclear` 触发的定向澄清路径尚未真实 Matrix 验证。
 - DeepSeek `json_object` 偶发空 `content` 已加入 `OpenAIIntentClassifier` 单次重试兜底（同请求体、无退避）；两次都空仍降级为 unclear。
 
 ### 2026-05-15 Stage 2 小模型接入骨架

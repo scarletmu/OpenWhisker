@@ -60,7 +60,7 @@ Return ONLY a single JSON object. No prose, no markdown fences, no comments, no 
 The JSON object MUST contain exactly these fields, with values restricted to the listed enums where applicable:
 
 - intent: one of ["raw_capture", "organize_request", "diff_request", "approve_request", "reject_request", "unclear"]
-- target: one of ["last", "today", "active", "active_bucket", "new_bucket", "none"]
+- target: one of ["last", "active", "active_bucket", "new_bucket", "none"]
 - capture_action: one of ["create", "append", "close", "none"]
 - bucket_relation: one of ["same_topic", "new_topic", "unrelated", "unclear"]
 - payload_text: string
@@ -88,7 +88,7 @@ func validateIntentClassifierOutput(output core.IntentClassifierResult) error {
 	if !oneOf(output.Intent, "raw_capture", "organize_request", "diff_request", "approve_request", "reject_request", "unclear") {
 		return fmt.Errorf("invalid intent %q", output.Intent)
 	}
-	if !oneOf(output.Target, "last", "today", "active", "active_bucket", "new_bucket", "none") {
+	if !oneOf(output.Target, "last", "active", "active_bucket", "new_bucket", "none") {
 		return fmt.Errorf("invalid target %q", output.Target)
 	}
 	if !oneOf(output.CaptureAction, "create", "append", "close", "none") {

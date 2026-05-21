@@ -149,21 +149,8 @@ func (s AdapterService) ingestRaw(ctx context.Context, req AdapterRequest, text 
 }
 
 func (s AdapterService) handleOrganize(ctx context.Context, fields []string) (AdapterResponse, error) {
-	if len(fields) != 1 || (fields[0] != "last" && fields[0] != "today") {
-		return AdapterResponse{}, fmt.Errorf("usage: /organize last|today")
-	}
-	if fields[0] == "today" {
-		result, err := s.planService().OrganizeToday(ctx, s.now())
-		if err != nil {
-			return AdapterResponse{}, err
-		}
-		return AdapterResponse{
-			Status:     result.Status,
-			JobID:      result.JobID,
-			PlanID:     result.PlanID,
-			Body:       fmt.Sprintf("Plan %s awaits approval for %d raw captures: %s", result.PlanID, len(result.RawJobIDs), resultStatusSummary(result.Status, result.TargetPaths)),
-			OutboxKind: model.OutboxKindApproval,
-		}, nil
+	if len(fields) != 1 || fields[0] != "last" {
+		return AdapterResponse{}, fmt.Errorf("usage: /organize last")
 	}
 	result, err := s.planService().OrganizeLast(ctx)
 	if err != nil {

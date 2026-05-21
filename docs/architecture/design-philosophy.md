@@ -1031,9 +1031,6 @@ Metadata：
 /organize last
   整理最近一条 raw。
 
-/organize today
-  整理今天的 raw，生成计划。
-
 /diff <job_id>
   查看某个 VaultPlan 的 diff。
 
@@ -1482,7 +1479,7 @@ IM 输入普通文本后可以自动写 Raw。
 验收：
 
 ```text
-/organize today 可以为多条 raw 生成分组计划。
+raw capture 与 capture bucket 在输入期完成 topic 分组，organize last 为最近一条 raw 或一个 capture bucket 生成 VaultPlan。
 高风险 split / merge 只生成 proposal note。
 ```
 

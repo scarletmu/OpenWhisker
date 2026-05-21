@@ -128,48 +128,6 @@ func TestAdapterServiceHandlesMatrixRawDedupeAndApproval(t *testing.T) {
 	}
 }
 
-func TestAdapterServiceHandlesOrganizeToday(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "openwhisker.db")
-	vaultRoot := filepath.Join(dir, "vault")
-	if err := os.MkdirAll(vaultRoot, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	store, err := storage.Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	service := NewAdapterServiceWithOptions(store, vaultRoot, AdapterServiceOptions{
-		IntentRouterMode: "off",
-	})
-	for _, text := range []string{"today raw one", "today raw two"} {
-		if _, err := service.HandleText(context.Background(), AdapterRequest{
-			Adapter: model.AdapterMatrix,
-			EventID: "$raw-" + strings.ReplaceAll(text, " ", "-"),
-			Sender:  "@user:example.test",
-			Text:    text,
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	organized, err := service.HandleText(context.Background(), AdapterRequest{
-		Adapter: model.AdapterMatrix,
-		EventID: "$organize-today",
-		Sender:  "@user:example.test",
-		Text:    "/organize today",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if organized.Status != model.PlanStatusAwaitingApproval || organized.PlanID == "" {
-		t.Fatalf("organize today response = %+v, want awaiting approval", organized)
-	}
-	if !strings.Contains(organized.Body, "2 raw captures") {
-		t.Fatalf("organize today body = %q, want raw count", organized.Body)
-	}
-}
-
 func TestRenderAdapterDiffPrependsHighRiskWarning(t *testing.T) {
 	src := "Knowledge/topic/old-name.md"
 	dst := "Knowledge/topic/new-name.md"

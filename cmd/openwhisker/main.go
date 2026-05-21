@@ -46,8 +46,6 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runIngestRaw(args[2:], stdin, stdout, stderr)
 	case args[0] == "organize" && args[1] == "last":
 		return runOrganizeLast(args[2:], stdout, stderr)
-	case args[0] == "organize" && args[1] == "today":
-		return runOrganizeToday(args[2:], stdout, stderr)
 	case args[0] == "organize" && args[1] == "preview-context":
 		return runOrganizePreviewContext(args[2:], stdout, stderr)
 	case args[0] == "expand":
@@ -156,51 +154,6 @@ func runOrganizeLast(args []string, stdout, stderr io.Writer) error {
 		ContextMode: *contextMode,
 		Conventions: conventions,
 	}).OrganizeLast(context.Background())
-	if err != nil {
-		return err
-	}
-	return printJSON(stdout, result)
-}
-
-func runOrganizeToday(args []string, stdout, stderr io.Writer) error {
-	fs := flag.NewFlagSet("organize today", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	dbPath := fs.String("db", "data/openwhisker.db", "SQLite database path")
-	vaultRoot := fs.String("vault", "testdata/vault", "target test vault root")
-	dateValue := fs.String("date", "", "local date to organize in YYYY-MM-DD; default is today")
-	organizerName := fs.String("organizer", organizerDefault(), "raw organizer: deterministic or openai-compatible")
-	contextMode := fs.String("context-mode", contextModeDefault(), "raw organizer context mode: minimal or vault-rules")
-	vaultProfile := fs.String("vault-profile", vaultProfileDefault(), "vault profile: generic or knowledge-vault")
-	llmModel := fs.String("llm-model", llmModelDefault(), "OpenAI-compatible model for --organizer=openai-compatible")
-	openAIModel := fs.String("openai-model", "", "deprecated alias for --llm-model")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 0 {
-		return fmt.Errorf("usage: openwhisker organize today [--db data/openwhisker.db] [--vault testdata/vault] [--date YYYY-MM-DD] [--organizer deterministic|openai-compatible]")
-	}
-	day, err := parseLocalDate(*dateValue)
-	if err != nil {
-		return err
-	}
-	store, err := storage.Open(*dbPath)
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-	organizer, err := rawOrganizerForName(*organizerName, coalesce(*openAIModel, *llmModel))
-	if err != nil {
-		return err
-	}
-	conventions, err := vaultConventionsForProfile(*vaultProfile)
-	if err != nil {
-		return err
-	}
-	result, err := core.NewPlanServiceWithOptions(store, *vaultRoot, core.PlanServiceOptions{
-		Organizer:   organizer,
-		ContextMode: *contextMode,
-		Conventions: conventions,
-	}).OrganizeToday(context.Background(), day)
 	if err != nil {
 		return err
 	}
@@ -924,7 +877,6 @@ func printUsage(stderr io.Writer) {
 	fmt.Fprintln(stderr, `usage:
   openwhisker ingest raw [--text TEXT] [--db data/openwhisker.db] [--vault testdata/vault] [--vault-profile generic|knowledge-vault]
   openwhisker organize last [--db data/openwhisker.db] [--vault testdata/vault] [--organizer deterministic|openai-compatible] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault] [--llm-model MODEL]
-  openwhisker organize today [--db data/openwhisker.db] [--vault testdata/vault] [--date YYYY-MM-DD] [--organizer deterministic|openai-compatible] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault] [--llm-model MODEL]
   openwhisker organize preview-context [--db data/openwhisker.db] [--vault testdata/vault] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault]
   openwhisker expand [--db data/openwhisker.db] [--vault testdata/vault] [--organizer deterministic|openai-compatible] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault] [--llm-model MODEL] <knowledge_path>
   openwhisker plan diff [--db data/openwhisker.db] [--vault testdata/vault] <plan_id|job_id>
@@ -950,19 +902,6 @@ func intentRouterDefault() string {
 		return value
 	}
 	return "hybrid"
-}
-
-func parseLocalDate(value string) (time.Time, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		now := time.Now()
-		return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local), nil
-	}
-	day, err := time.ParseInLocation("2006-01-02", value, time.Local)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("parse --date: %w", err)
-	}
-	return day, nil
 }
 
 func effectivePlanSyncMode(mode, vaultRoot string) (string, error) {

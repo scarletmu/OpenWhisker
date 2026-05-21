@@ -240,7 +240,12 @@ func (s AdapterService) classifyIntent(ctx context.Context, req AdapterRequest) 
 		audit.Accepted = true
 		return intentClassification{result: mapped, audit: audit}
 	}
-	if classified.ConfidenceLabel == "medium" {
+	// A raw capture whose relation to the active bucket the classifier could
+	// not decide ("unclear") is the one ambiguity worth a focused question.
+	// This is a structural signal, independent of the self-reported
+	// confidence_label — which DeepSeek almost always emits as "high", so a
+	// confidence-gated clarification branch never fired in practice.
+	if classified.BucketRelation == "unclear" {
 		if proposal, ok := s.synthesizeClarification(req, classified); ok {
 			result := intentRuleResult{
 				intent:        intentClarificationRequest,
@@ -359,19 +364,21 @@ func (s AdapterService) synthesizeClarification(req AdapterRequest, classified I
 	if classified.Intent != "raw_capture" {
 		return clarificationProposal{}, false
 	}
+	// The clarification question is "append to the active bucket, or start a
+	// new one?". Without an active bucket there is nothing to append to and so
+	// no ambiguity to resolve — fall through to unclear instead of asking.
 	bucket, hasActive, err := s.activeBucket(req.SourceKey)
 	if err != nil {
 		return clarificationProposal{}, false
 	}
-	activeBucket := hasActive && bucket.Status == model.CaptureBucketStatusActive
-	candidates := []model.CandidateAction{}
-	if activeBucket {
-		candidates = append(candidates, model.CandidateAction{Action: model.ClarificationActionRawAppend, Label: "补充到上一组"})
+	if !hasActive || bucket.Status != model.CaptureBucketStatusActive {
+		return clarificationProposal{}, false
 	}
-	candidates = append(candidates,
-		model.CandidateAction{Action: model.ClarificationActionRawCreate, Label: "新建一组"},
-		model.CandidateAction{Action: model.ClarificationActionCancel, Label: "取消"},
-	)
+	candidates := []model.CandidateAction{
+		{Action: model.ClarificationActionRawAppend, Label: "补充到上一组"},
+		{Action: model.ClarificationActionRawCreate, Label: "新建一组"},
+		{Action: model.ClarificationActionCancel, Label: "取消"},
+	}
 	return clarificationProposal{
 		questionType: model.ClarificationQuestionBucketRelation,
 		candidates:   candidates,
@@ -428,9 +435,6 @@ func (s AdapterService) modelIntentToRuleResult(req AdapterRequest, classified I
 			}
 		}
 	case "organize_request":
-		if classified.Target == "today" {
-			return intentRuleResult{intent: "organize", displayAction: "处理今天", target: "today"}
-		}
 		return intentRuleResult{intent: "organize", displayAction: "整理刚才", target: "active"}
 	case "diff_request":
 		return intentRuleResult{intent: "diff", displayAction: "预览当前计划"}
@@ -567,9 +571,7 @@ func (s AdapterService) handleIntentOrganize(ctx context.Context, req AdapterReq
 	var organized OrganizeRawResult
 	var err error
 	planService := s.intentPlanService()
-	if result.target == "today" {
-		organized, err = planService.OrganizeTodayForSource(ctx, req.SourceKey, s.now())
-	} else if bucket, ok, activeErr := s.activeBucket(req.SourceKey); activeErr != nil {
+	if bucket, ok, activeErr := s.activeBucket(req.SourceKey); activeErr != nil {
 		return AdapterResponse{}, activeErr
 	} else if ok {
 		organized, err = planService.OrganizeCaptureBucket(ctx, req.SourceKey, bucket.ID)
@@ -706,9 +708,6 @@ func classifyIntentRules(text string) intentRuleResult {
 		"整理一下", "处理一下", "组织一下",
 	) {
 		return intentRuleResult{intent: "organize", displayAction: "整理当前记录组", target: "active"}
-	}
-	if exactAny(trimmed, "处理今天", "整理今天", "整理今天的", "处理今天的") {
-		return intentRuleResult{intent: "organize", displayAction: "整理今天当前 source 的 Raw", target: "today"}
 	}
 	if exactAny(strings.ToLower(trimmed),
 		"预览一下", "预览", "看看diff", "diff",

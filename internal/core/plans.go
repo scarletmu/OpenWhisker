@@ -53,10 +53,6 @@ type RawOrganizer interface {
 	OrganizeRaw(context.Context, RawOrganizerRequest) (model.VaultPlan, error)
 }
 
-type RawTodayOrganizer interface {
-	OrganizeRawToday(context.Context, RawTodayOrganizerRequest) (model.VaultPlan, error)
-}
-
 type KnowledgeExpander interface {
 	ExpandKnowledge(context.Context, KnowledgeExpanderRequest) (model.VaultPlan, error)
 }
@@ -84,17 +80,6 @@ type RawOrganizerRequest struct {
 	VaultRoot    string
 	Conventions  policy.Conventions
 	VaultContext RawOrganizerContext
-	Now          time.Time
-}
-
-type RawTodayOrganizerRequest struct {
-	Job          model.WikiJob
-	RawJobs      []model.WikiJob
-	RawPaths     []string
-	VaultRoot    string
-	Conventions  policy.Conventions
-	VaultContext []RawOrganizerContext
-	Day          time.Time
 	Now          time.Time
 }
 
@@ -272,86 +257,6 @@ func (s PlanService) PreviewLastRawContext(ctx context.Context) (RawOrganizerCon
 	return preview, err
 }
 
-func (s PlanService) OrganizeToday(ctx context.Context, day time.Time) (OrganizeRawResult, error) {
-	day = normalizeDay(day)
-	start, end := dayBounds(day)
-	dayLabel := day.Format("2006-01-02")
-	rawJobs, err := s.store.ListDoneIngestRawJobsCreatedBetween(start, end, 100)
-	if err != nil {
-		return OrganizeRawResult{}, err
-	}
-	rawJobs, rawPaths, err := s.filterExistingInboxRawJobs(rawJobs)
-	if err != nil {
-		return OrganizeRawResult{}, err
-	}
-	if len(rawJobs) == 0 {
-		return OrganizeRawResult{}, fmt.Errorf("no unprocessed raw captures found for %s", dayLabel)
-	}
-	now := s.now()
-	rawJobIDs := jobIDs(rawJobs)
-	inputJSON, err := json.Marshal(map[string]any{
-		"date":        dayLabel,
-		"raw_job_ids": rawJobIDs,
-		"raw_paths":   rawPaths,
-		"planner":     "raw_today_grouped",
-	})
-	if err != nil {
-		return OrganizeRawResult{}, err
-	}
-	job := model.WikiJob{
-		ID:        model.NewID("job"),
-		Type:      model.JobTypeOrganizeRawToday,
-		Status:    model.JobStatusPending,
-		Source:    "cli",
-		InputJSON: string(inputJSON),
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	if err := s.store.CreateJob(job); err != nil {
-		return OrganizeRawResult{}, err
-	}
-	var contexts []RawOrganizerContext
-	for _, rawPath := range rawPaths {
-		vaultContext, err := buildRawOrganizerContext(ctx, s.vaultRoot, rawPath, s.contextMode, s.conventions)
-		if err != nil {
-			_ = s.failPlanJob(job.ID, err)
-			return OrganizeRawResult{}, err
-		}
-		contexts = append(contexts, vaultContext)
-	}
-	organizer, ok := s.organizer.(RawTodayOrganizer)
-	if !ok {
-		organizer = deterministicRawOrganizer{}
-	}
-	plan, err := organizer.OrganizeRawToday(ctx, RawTodayOrganizerRequest{
-		Job:          job,
-		RawJobs:      rawJobs,
-		RawPaths:     rawPaths,
-		VaultRoot:    s.vaultRoot,
-		Conventions:  s.conventions,
-		VaultContext: contexts,
-		Day:          day,
-		Now:          now,
-	})
-	if err != nil {
-		_ = s.failPlanJob(job.ID, err)
-		return OrganizeRawResult{}, err
-	}
-	prepared, err := s.prepareApprovalPlan(ctx, job.ID, plan)
-	if err != nil {
-		return OrganizeRawResult{}, err
-	}
-	return OrganizeRawResult{
-		JobID:       job.ID,
-		PlanID:      prepared.ID,
-		Status:      prepared.Status,
-		RawJobIDs:   rawJobIDs,
-		TargetPaths: prepared.TargetPaths,
-		Diff:        prepared.Diff,
-		Messages:    []string{"grouped plan prepared and awaiting approval"},
-	}, nil
-}
-
 func (s PlanService) OrganizeSourceLast(ctx context.Context, sourceKey string) (OrganizeRawResult, error) {
 	sourceKey = strings.TrimSpace(sourceKey)
 	if sourceKey == "" {
@@ -428,92 +333,6 @@ func (s PlanService) OrganizeCaptureBucket(ctx context.Context, sourceKey, bucke
 		return OrganizeRawResult{}, err
 	}
 	return result, nil
-}
-
-func (s PlanService) OrganizeTodayForSource(ctx context.Context, sourceKey string, day time.Time) (OrganizeRawResult, error) {
-	sourceKey = strings.TrimSpace(sourceKey)
-	if sourceKey == "" {
-		return OrganizeRawResult{}, errors.New("source_key is required")
-	}
-	day = normalizeDay(day)
-	start, end := dayBounds(day)
-	dayLabel := day.Format("2006-01-02")
-	rawJobs, err := s.store.ListDoneIngestRawJobsCreatedBetweenBySourceKey(sourceKey, start, end, 100)
-	if err != nil {
-		return OrganizeRawResult{}, err
-	}
-	rawJobs, rawPaths, err := s.filterExistingInboxRawJobs(rawJobs)
-	if err != nil {
-		return OrganizeRawResult{}, err
-	}
-	if len(rawJobs) == 0 {
-		return OrganizeRawResult{}, fmt.Errorf("no source-scoped raw captures found for %s", dayLabel)
-	}
-	now := s.now()
-	rawJobIDs := jobIDs(rawJobs)
-	inputJSON, err := json.Marshal(map[string]any{
-		"date":        dayLabel,
-		"raw_job_ids": rawJobIDs,
-		"raw_paths":   rawPaths,
-		"planner":     "raw_today_grouped",
-		"source_key":  sourceKey,
-	})
-	if err != nil {
-		return OrganizeRawResult{}, err
-	}
-	job := model.WikiJob{
-		ID:        model.NewID("job"),
-		Type:      model.JobTypeOrganizeRawToday,
-		Status:    model.JobStatusPending,
-		Source:    sourceKey,
-		SourceKey: sourceKey,
-		InputJSON: string(inputJSON),
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	if err := s.store.CreateJob(job); err != nil {
-		return OrganizeRawResult{}, err
-	}
-	var contexts []RawOrganizerContext
-	for _, rawPath := range rawPaths {
-		vaultContext, err := buildRawOrganizerContext(ctx, s.vaultRoot, rawPath, s.contextMode, s.conventions)
-		if err != nil {
-			_ = s.failPlanJob(job.ID, err)
-			return OrganizeRawResult{}, err
-		}
-		contexts = append(contexts, vaultContext)
-	}
-	organizer, ok := s.organizer.(RawTodayOrganizer)
-	if !ok {
-		organizer = deterministicRawOrganizer{}
-	}
-	plan, err := organizer.OrganizeRawToday(ctx, RawTodayOrganizerRequest{
-		Job:          job,
-		RawJobs:      rawJobs,
-		RawPaths:     rawPaths,
-		VaultRoot:    s.vaultRoot,
-		Conventions:  s.conventions,
-		VaultContext: contexts,
-		Day:          day,
-		Now:          now,
-	})
-	if err != nil {
-		_ = s.failPlanJob(job.ID, err)
-		return OrganizeRawResult{}, err
-	}
-	prepared, err := s.prepareApprovalPlan(ctx, job.ID, plan)
-	if err != nil {
-		return OrganizeRawResult{}, err
-	}
-	return OrganizeRawResult{
-		JobID:       job.ID,
-		PlanID:      prepared.ID,
-		Status:      prepared.Status,
-		RawJobIDs:   rawJobIDs,
-		TargetPaths: prepared.TargetPaths,
-		Diff:        prepared.Diff,
-		Messages:    []string{"source-scoped grouped plan prepared and awaiting approval"},
-	}, nil
 }
 
 func (s PlanService) organizeOneRaw(ctx context.Context, rawJob model.WikiJob, rawPath, sourceKey string, input any) (OrganizeRawResult, error) {
@@ -972,13 +791,6 @@ func (deterministicRawOrganizer) OrganizeRaw(ctx context.Context, req RawOrganiz
 	return buildOrganizePlan(req.Job, req.RawJob, req.RawPath, req.Conventions, req.Now)
 }
 
-func (deterministicRawOrganizer) OrganizeRawToday(ctx context.Context, req RawTodayOrganizerRequest) (model.VaultPlan, error) {
-	if err := ctx.Err(); err != nil {
-		return model.VaultPlan{}, err
-	}
-	return buildOrganizeTodayPlan(req.Job, req.RawJobs, req.RawPaths, req.Conventions, req.Day, req.Now, "Deterministic Raw Organizer grouped today's raw captures into one review-needed Knowledge draft.", renderTodayKnowledgeDraft(req, "Today's Raw Capture Review", "Deterministic grouped draft for today's raw captures. Review each source before promoting this into durable Knowledge."))
-}
-
 func buildOrganizePlan(job, rawJob model.WikiJob, rawPath string, conventions policy.Conventions, now time.Time) (model.VaultPlan, error) {
 	conventions = conventions.Normalize()
 	base := strings.TrimSuffix(filepath.Base(rawPath), filepath.Ext(rawPath))
@@ -1024,66 +836,6 @@ func buildOrganizePlan(job, rawJob model.WikiJob, rawPath string, conventions po
 		Summary:          "Create one Knowledge draft and move the raw capture to Raw/Processed.",
 		SourceRefs:       []string{rawJob.ID, rawPath},
 		TargetPaths:      []string{knowledgePath, rawPath, processedPath},
-		Operations:       operations,
-		Status:           model.PlanStatusProposed,
-		CreatedAt:        now,
-	}, nil
-}
-
-func buildOrganizeTodayPlan(job model.WikiJob, rawJobs []model.WikiJob, rawPaths []string, conventions policy.Conventions, day, now time.Time, processingNote, content string) (model.VaultPlan, error) {
-	if len(rawJobs) == 0 || len(rawJobs) != len(rawPaths) {
-		return model.VaultPlan{}, errors.New("raw today plan requires matching raw jobs and paths")
-	}
-	conventions = conventions.Normalize()
-	date := day.Format("2006-01-02")
-	knowledgePath := joinVaultPath(conventions.KnowledgeDraftDir, fmt.Sprintf("%s-raw-review-%s.md", date, job.ID))
-	var processedPaths []string
-	for _, rawPath := range rawPaths {
-		base := strings.TrimSuffix(filepath.Base(rawPath), filepath.Ext(rawPath))
-		processedPaths = append(processedPaths, joinVaultPath(conventions.RawProcessedDir, base+".md"))
-	}
-	createPayload, err := json.Marshal(model.CreateNotePayload{Content: content})
-	if err != nil {
-		return model.VaultPlan{}, err
-	}
-	operations := []model.VaultOperation{{
-		ID:          model.NewID("op"),
-		Type:        model.OperationCreateNote,
-		TargetPath:  knowledgePath,
-		PayloadJSON: string(createPayload),
-		Reason:      "Create a grouped Knowledge draft for today's raw captures with source traceability.",
-		RiskLevel:   model.RiskMedium,
-	}}
-	for i, rawPath := range rawPaths {
-		movePayload, err := json.Marshal(model.MoveNotePayload{
-			DestinationPath: processedPaths[i],
-			ProcessingNote:  renderProcessedRawNote(job, rawJobs[i], rawPath, processedPaths[i], []string{knowledgePath}, now, processingNote),
-		})
-		if err != nil {
-			return model.VaultPlan{}, err
-		}
-		operations = append(operations, model.VaultOperation{
-			ID:          model.NewID("op"),
-			Type:        model.OperationMoveNote,
-			TargetPath:  rawPath,
-			PayloadJSON: string(movePayload),
-			Reason:      "Mark a raw capture as processed after the grouped Knowledge draft is approved.",
-			RiskLevel:   model.RiskMedium,
-		})
-	}
-	targetPaths := append([]string{knowledgePath}, rawPaths...)
-	targetPaths = append(targetPaths, processedPaths...)
-	sourceRefs := append([]string{}, jobIDs(rawJobs)...)
-	sourceRefs = append(sourceRefs, rawPaths...)
-	return model.VaultPlan{
-		ID:               model.NewID("plan"),
-		JobID:            job.ID,
-		Purpose:          "organize today's raw captures into a grouped Knowledge draft",
-		RiskLevel:        model.RiskMedium,
-		RequiresApproval: true,
-		Summary:          fmt.Sprintf("Create one grouped Knowledge draft for %d raw captures from %s.", len(rawJobs), date),
-		SourceRefs:       sourceRefs,
-		TargetPaths:      targetPaths,
 		Operations:       operations,
 		Status:           model.PlanStatusProposed,
 		CreatedAt:        now,
@@ -1211,9 +963,11 @@ func (s PlanService) previewLatestRawContext(ctx context.Context) (RawOrganizerC
 
 // parseExpanderSourceTracePaths extracts raw / processed note paths recorded
 // inside the target Knowledge note's YAML frontmatter under the openwhisker
-// nested block. It recognizes scalar fields raw_path / processed_path and list
-// fields raw_paths / processed_paths, matching knowledge-draft-schema.md. The
-// returned slice preserves declaration order and is deduplicated.
+// nested block. It recognizes the scalar fields raw_path / processed_path
+// written by the Raw Organizer (see knowledge-draft-schema.md), and also
+// tolerates list fields raw_paths / processed_paths so a human-authored
+// Knowledge note aggregating several raw sources still resolves its source
+// trace. The returned slice preserves declaration order and is deduplicated.
 func parseExpanderSourceTracePaths(content string) []string {
 	content = strings.TrimLeft(content, "\ufeff")
 	if !strings.HasPrefix(content, "---\n") {
@@ -1418,50 +1172,6 @@ func buildRawOrganizerContext(ctx context.Context, vaultRoot, rawPath, contextMo
 	return context, nil
 }
 
-func (s PlanService) filterExistingInboxRawJobs(rawJobs []model.WikiJob) ([]model.WikiJob, []string, error) {
-	var outJobs []model.WikiJob
-	var outPaths []string
-	for _, rawJob := range rawJobs {
-		rawPath := rawTargetPath(rawJob)
-		if rawPath == "" || !hasVaultDirPrefix(rawPath, s.conventions.RawInboxDir) {
-			continue
-		}
-		fullPath, err := executor.ResolveVaultPath(s.vaultRoot, rawPath)
-		if err != nil {
-			return nil, nil, err
-		}
-		if _, err := os.Stat(fullPath); errors.Is(err, os.ErrNotExist) {
-			continue
-		} else if err != nil {
-			return nil, nil, err
-		}
-		outJobs = append(outJobs, rawJob)
-		outPaths = append(outPaths, rawPath)
-	}
-	return outJobs, outPaths, nil
-}
-
-func normalizeDay(day time.Time) time.Time {
-	if day.IsZero() {
-		day = time.Now()
-	}
-	location := day.Location()
-	return time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, location)
-}
-
-func dayBounds(day time.Time) (time.Time, time.Time) {
-	start := normalizeDay(day)
-	return start.UTC(), start.AddDate(0, 0, 1).UTC()
-}
-
-func jobIDs(jobs []model.WikiJob) []string {
-	ids := make([]string, 0, len(jobs))
-	for _, job := range jobs {
-		ids = append(ids, job.ID)
-	}
-	return ids
-}
-
 func renderKnowledgeDraft(job, rawJob model.WikiJob, rawPath, processedPath string, conventions policy.Conventions, createdAt time.Time) string {
 	return fmt.Sprintf(`---
 title: "Knowledge Draft from %s"
@@ -1506,73 +1216,6 @@ This deterministic Phase 2 draft preserves traceability and proves the approval-
 		job.ID, job.Type, rawJob.ID, rawPath, processedPath, createdAt.Format(time.RFC3339),
 		rawJob.ID,
 		trimVaultExt(processedPath),
-	)
-}
-
-func renderTodayKnowledgeDraft(req RawTodayOrganizerRequest, title, body string) string {
-	var rawJobLines, rawPathLines, processedPathLines, relatedLines, sourceLines []string
-	for i, rawJob := range req.RawJobs {
-		rawPath := req.RawPaths[i]
-		processedPath := joinVaultPath(req.Conventions.RawProcessedDir, strings.TrimSuffix(filepath.Base(rawPath), filepath.Ext(rawPath))+".md")
-		rawJobLines = append(rawJobLines, "    - "+rawJob.ID)
-		rawPathLines = append(rawPathLines, "    - "+rawPath)
-		processedPathLines = append(processedPathLines, "    - "+processedPath)
-		relatedLines = append(relatedLines, fmt.Sprintf("  - \"[[%s]]\"", trimVaultExt(processedPath)))
-		sourceLines = append(sourceLines, fmt.Sprintf("- [[%s]]", trimVaultExt(processedPath)))
-	}
-	firstProcessed := joinVaultPath(req.Conventions.RawProcessedDir, "unknown.md")
-	if len(req.RawPaths) > 0 {
-		firstProcessed = joinVaultPath(req.Conventions.RawProcessedDir, strings.TrimSuffix(filepath.Base(req.RawPaths[0]), filepath.Ext(req.RawPaths[0]))+".md")
-	}
-	return fmt.Sprintf(`---
-title: "%s"
-tags:
-%s
-related:
-%s
-openwhisker:
-  job_id: %s
-  job_type: %s
-  raw_job_id: batch
-  raw_path: %s
-  processed_path: %s
-  raw_job_ids:
-%s
-  raw_paths:
-%s
-  processed_paths:
-%s
-  created_at: %s
----
-
-# %s
-
-> [!todo] OpenWhisker Raw Organizer 草稿
-> 由 OpenWhisker 从 raw 输入整理。请人工审阅 → 补全 → 转写为正式 Knowledge note 后归档此 draft。
-
-## 摘要
-
-%s
-
-## 来源
-
-%s
-
-## 待核查
-
-> [!todo] 待核查
-> - 核对每条 raw 输入是否应该进入同一个 Knowledge draft。
-> - 核对是否需要拆分成多个主题笔记。
-`,
-		strings.TrimSpace(title),
-		renderYAMLList(mergeKnowledgeDraftTags(req.Conventions.RequiredDraftTags)),
-		strings.Join(relatedLines, "\n"),
-		req.Job.ID, req.Job.Type, req.Conventions.RawInboxDir, firstProcessed,
-		strings.Join(rawJobLines, "\n"), strings.Join(rawPathLines, "\n"), strings.Join(processedPathLines, "\n"),
-		req.Now.Format(time.RFC3339),
-		strings.TrimSpace(title),
-		strings.TrimSpace(body),
-		strings.Join(sourceLines, "\n"),
 	)
 }
 
@@ -1626,12 +1269,6 @@ func joinVaultPath(dir, name string) string {
 		return dir
 	}
 	return dir + "/" + name
-}
-
-func hasVaultDirPrefix(path, dir string) bool {
-	path = strings.Trim(strings.TrimSpace(filepath.ToSlash(path)), "/")
-	dir = strings.Trim(strings.TrimSpace(filepath.ToSlash(dir)), "/")
-	return path == dir || strings.HasPrefix(path, dir+"/")
 }
 
 func renderYAMLList(values []string) string {

@@ -40,7 +40,7 @@ max_output_tokens = 4096（与 Raw Organizer 默认对齐）
 第一版 Knowledge Expander 上下文构造与 Raw Organizer 默认 `minimal` 模式对齐，只读取：
 
 - 目标 Knowledge note 全文（必填，由 CLI / Matrix 显式指定路径）。
-- 由 source trace 选出的关联 raw / processed note（可选，第一版只读取目标 note 的 YAML frontmatter 中 `openwhisker.raw_path` / `openwhisker.processed_path` 标量与 `openwhisker.raw_paths` / `openwhisker.processed_paths` 列表，对应 [knowledge-draft-schema](knowledge-draft-schema.md) 写入的字段；缺失的 path 静默跳过，不读取 `related:` wikilink 中可能指向其他 Knowledge note 的项以保留 privacy boundary）。
+- 由 source trace 选出的关联 raw / processed note（可选，第一版读取目标 note 的 YAML frontmatter 中 `openwhisker.raw_path` / `openwhisker.processed_path` 标量——由 Raw Organizer 按 [knowledge-draft-schema](knowledge-draft-schema.md) 写入；并兼容人工维护的多来源 Knowledge note 里可能出现的 `openwhisker.raw_paths` / `openwhisker.processed_paths` 列表；缺失的 path 静默跳过，不读取 `related:` wikilink 中可能指向其他 Knowledge note 的项以保留 privacy boundary）。
 - 当前 `VaultProfile` 编译出的 `VaultKnowledgeExpanderSkill`（task-specific guidance；profile 缺失时使用 generic skill 文本）。
 - 当前 `VaultProfile` 摘要。
 
@@ -207,7 +207,7 @@ go run ./cmd/openwhisker expand <path-or-topic> \
 - 输出 plan id 与 awaiting_approval prompt，与 `organize last` 一致。
 - 后续 `plan diff` / `plan approve` / `plan reject` 路径完全复用现有命令。
 
-Matrix 自然语言入口（"扩展一下 <topic>"）由 4C.4 接入。本契约不约束 IM 入口的解析过程，只约束 expander LLM call。
+Knowledge Expander 保持 CLI-only，不接入 Matrix 自然语言入口：其产出（append plan 或 proposal note）只是普通文档，会自然回流到既有 capture / review 链路，不需要为非关键模块单独做 IM 交互 UX。
 
 ## Privacy boundary
 

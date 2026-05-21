@@ -4,7 +4,7 @@
 
 ## 适用范围
 
-本 schema 覆盖 medium-risk Raw Organizer 通过 `organize last` / `organize today` 落盘的两类内容：
+本 schema 覆盖 medium-risk Raw Organizer 通过 `organize last` 落盘的两类内容：
 
 1. **Knowledge draft**：写入 `policy.Conventions.KnowledgeDraftDir`（默认 `Knowledge/Drafts/`）。需要用户审阅、补充、签出到正式 Knowledge note。
 2. **Raw/Processed 追加段**：在原 raw 文件 move 到 `policy.Conventions.RawProcessedDir`（默认 `Raw/Processed/`）后，由 OpenWhisker 在文件末尾追加的 `## OpenWhisker Processing` 段。
@@ -35,25 +35,14 @@ tags:
   # 加上 profile.RequiredDraftTags 的其余项
 related:
   - "[[<raw_processed_path_without_md>]]"
-  # 单 raw：只有 1 条；today 批：每条 raw 一条
 openwhisker:
   job_id: "<plan job id>"
-  job_type: "<job type，例如 organize-raw / organize-raw-today>"
-  raw_job_id: "<raw 捕获 job id；today 批为 batch>"
+  job_type: "<job type，例如 organize-raw>"
+  raw_job_id: "<raw 捕获 job id>"
   raw_path: "<raw 捕获时路径，字符串>"
   processed_path: "<approved 后路径，字符串>"
   raw_kind: "<concept-seed | web-clip | todo-list | llm-chat | mixed>"
   created_at: "<ISO8601 UTC>"
-  # today 批额外字段：
-  raw_job_ids:
-    - "<rawA>"
-    - "<rawB>"
-  raw_paths:
-    - "<rawA_path>"
-    - "<rawB_path>"
-  processed_paths:
-    - "<rawA_processed>"
-    - "<rawB_processed>"
 ---
 ```
 
@@ -90,8 +79,7 @@ callout 类型固定为 `todo`，标题固定为 `OpenWhisker Raw Organizer 草�
 
 ## 来源
 
-<!-- 单 raw：- [[<processed_path>]]
-     today 批：每条 raw 一条 wikilink。
+<!-- - [[<processed_path>]]
      不得回退为纯字符串路径。 -->
 
 ## 待核查
@@ -108,7 +96,6 @@ callout 类型固定为 `todo`，标题固定为 `OpenWhisker Raw Organizer 草�
 
 - `## 来源` 章节里所有 vault 内路径必须是 wikilink，**不得**出现 `Raw path before approval: <裸字符串>` 之类的纯文本。
 - `## 待核查` 必须用 `> [!todo] 待核查` callout 包裹列表；adapter 在面向人类 diff 里抓 `待核查` substring，包到 callout 里仍命中。
-- today 批增加 `## 来源` 多条 wikilink，但不再额外写 `## Sources` 英文章节（保持单一来源）。
 
 ## Raw/Processed 追加段 Schema
 
@@ -143,7 +130,7 @@ OpenWhisker 在 approval 完成时把 raw move 到 Raw/Processed/ 后，在文�
 - raw_path: `<raw_path_string>`
 - processed_path: `<processed_path_string>`
 - processed_at: `<ISO8601>`
-- raw_kind: `<raw_kind>`（today 批省略）
+- raw_kind: `<raw_kind>`
 ```
 
 约束：

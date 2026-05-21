@@ -119,7 +119,6 @@ intent:
 
 target:
 - last
-- today
 - active
 - active_bucket
 - new_bucket
@@ -156,18 +155,17 @@ Router 接受模型结果时必须同时看：
 - `confidence` 数字。
 - deterministic hard guard。
 
-第一版主要使用 `confidence_label`：
+第一版主要使用 `confidence_label` 决定能否进入 hard guard：
 
 ```text
 high:
 - 可以进入 hard guard；guard 通过后执行。
 
-medium:
-- 不执行，生成定向澄清问题。
-
-low:
-- unclear，不执行。
+medium / low:
+- 不进入 hard guard，按 unclear 处理。
 ```
+
+定向澄清不再由 `confidence_label` 触发，改由 `bucket_relation` 的结构信号决定（见下文 Clarification），与 `confidence_label` 解耦。
 
 自然语言 `approve_request` 更严格：
 
@@ -244,7 +242,7 @@ plan_rejected                  - reject handler 拒绝了 plan
 rejected_no_active_bucket      - raw_append / raw_close handler 因无 active bucket 拒绝
 rejected_no_pending_plan       - diff / approve / reject 因 source 无 pending plan 拒绝
 rejected_ambiguous_pending_plan- diff / approve / reject 因 source 有多个 pending plan 拒绝
-clarification_requested        - medium classifier 输出触发,router 已写入 pending_clarifications 并发出 IM 数字编号提示
+clarification_requested        - classifier 判 bucket_relation=unclear 且存在 active bucket 时触发,router 写入 pending_clarifications 并发出 IM 数字编号提示
 clarification_cancelled        - 用户回复匹配到 cancel 候选,旧 clarification 被标记为 cancelled
 not_executed                   - intent 未被采纳(unclear / 分类器低置信度 / 缺 active bucket guard 等),无 handler 运行
 failed                         - handler 返回 error
@@ -256,13 +254,15 @@ failed                         - handler 返回 error
 
 ## Clarification
 
-`medium` 结果应生成定向澄清，而不是通用 unclear。
+定向澄清的触发是结构信号，不是 `confidence_label`。classifier 自评的 `confidence_label` 在实测中几乎恒为 `high`，confidence 门控的澄清分支因此从不命中。
 
-示例：
+当 `intent=raw_capture`、`bucket_relation=unclear`、且当前 source 存在 active bucket 时，router 生成定向澄清——分类器确信这是一条 raw capture，但无法判断它属于 active bucket 还是另起一组，这正是值得追问的歧义：
 
 ```text
 这条是要补充到当前记录组，还是作为一条新的记录？
 ```
+
+无 active bucket 时不存在“补充 vs 新建”的歧义，不澄清，按 unclear 处理。
 
 `low` 或 invalid result 使用通用 unclear：
 
@@ -270,7 +270,6 @@ failed                         - handler 返回 error
 我不确定你是想记录、整理、预览还是审批。你可以说：
 - 记录这段：...
 - 整理刚才那条
-- 处理今天的 raw
 - 预览一下
 - 写进去
 - 先不写

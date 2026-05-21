@@ -18,7 +18,7 @@ func TestOpenAIRawOrganizerBuildsMediumRiskPlan(t *testing.T) {
 		"title": "Phase4 记忆模型",
 		"raw_kind": "concept-seed",
 		"summary": "整理 Phase4 agent 记忆模型。",
-		"draft_body": "## 核心观点\n\nagent 的长期记忆来自 vault，不来自模型内部状态。",
+		"draft_body": "### 核心观点\n\nagent 的长期记忆来自 vault，不来自模型内部状态。",
 		"review_items": ["确认是否需要补充 Matrix 入口说明。"]
 	}`}
 	req := core.RawOrganizerRequest{
