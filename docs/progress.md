@@ -64,3 +64,4 @@ testdata 已通的能力默认视为验证充分；真实 vault apply 只是 nic
 
 1. 根据真实使用反馈扩展 rules-only 短句词表与 clarification 回复词表（基于真实未命中样本，避免盲扩）。
 2. Phase 4C 主干已收束，没有预排的 4C.3 / 4C.4；后续推进改为真实使用驱动。新增能力（多模态 bucket 输入、clarification 回复 `additional_payload_text` 抽取等）按"关键已知遗留"里的实际需求单独立项。
+3. **未来方向（想要、未排期）**：Phase 5 的 Maintenance / Scheduler 能力——尤其 Scheduler（daily / weekly workflow、定时 raw review、broken link / stale needs-review 检查）——是明确想保留的 feature，性质不同于因职责重复被取消的 4C.3 / 4C.4：它不是被砍掉，只是暂不排期。待真实使用暴露需求或单独立项时再启动，完整设计见 [`docs/architecture/design-philosophy.md`](architecture/design-philosophy.md) 的 Phase 5 一节。

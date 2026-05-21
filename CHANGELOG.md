@@ -1,5 +1,51 @@
 # Changelog
 
+## 2026-05-21 - Phase 4 收束（v1）
+
+自 2026-05-13 的 Phase 4 首版之后，Wiki Agent Workflow 经 4B / 4B.5 / 4C.1 / 4C.2 推进至收束，4C.3 / 4C.4 主动取消。OpenWhisker v1 设计弧线至此收尾。完整回顾见 `docs/architecture/openwhisker-v1-review.md`。
+
+Phase 4B（真实 LLM-backed Raw Organizer）：
+
+- `organize last` 的 reasoning 层接入真实 OpenAI-compatible provider；默认仍为 deterministic，真实 provider 需 `--organizer=openai-compatible` 显式启用。
+- Raw Organizer 结构化输出从 OpenAI strict `json_schema` 迁移到 `json_object` + 客户端 `validateRawOrganizerOutput` 硬校验 + 单次空 content 重试，以兼容 DeepSeek 等只支持 `json_object` 的端点。
+- 完成真实 vault + DeepSeek 的 approve/apply 闭环验证，以及真实 Matrix + DeepSeek 在 `testdata/vault` 上的 organize → diff → approve 全链路验证。
+
+Phase 4B.5（IM Intent Router）：
+
+- 在 Matrix Adapter 与 Core Adapter API 之间新增 IM Intent Router 中间件，把"整理刚才 / 写进去 / 先不写"等自然语言归一为受控命令；slash 命令继续 passthrough 作为 debug / fallback。
+- 新增 rules / hybrid / off 三种路由模式、capture bucket、source-scoped binding、pending clarification 状态机和 intent audit jsonl。
+- intent classifier 同样迁移到 `json_object`；澄清触发条件从 classifier 自评的 `confidence_label=medium` 改为结构信号 `bucket_relation=unclear` + active bucket 在场。
+
+Phase 4C.1（high-risk proposal-only policy）：
+
+- plan lifecycle 新增 `proposal_written` 终态：high-risk plan（split / merge / rename / 大规模 retag / link rewrite）在 approve 时不进 apply 路径，改写一篇 proposal note。
+- proposal note 默认写入 `Raw/Agent-Proposals/`，frontmatter 与必填章节由 `docs/architecture/proposal-note-schema.md` 定义。
+- `vault_operation_logs` 区分 `applied` / `proposed`，保留 hash chain 完整性。
+
+Phase 4C.2（Knowledge Expander）：
+
+- 新增 `KnowledgeExpander` LLM agent 和 `expand <path>` CLI，对已有 thin Knowledge note 生成末尾 append plan。
+- 输出只有 `append`（medium-risk）和 `propose_restructure`（high-risk，含新建子 note 需求）两种 kind，有意不支持 `create_child_note`。
+- Knowledge Expander 保持 CLI-only。
+
+范围收窄：
+
+- 取消 4C.3（`organize today` 多 topic 分组），并删除整条 `organize today` 链路（CLI / core / agent / intent router / model / storage / 测试 / 文档）：capture bucket 已在输入期完成 topic 分组，整理期再聚类会与捕获期决策冲突。整理链路收敛为 bucket 驱动的 `organize last` 与 `expand`。
+- 取消 4C.4（Knowledge Expander 的 Matrix 自然语言入口）：Expander 为非关键模块，其产出本身是普通文档，会自然回流既有 capture / review 链路。
+
+文档：
+
+- 新增 `docs/architecture/openwhisker-v1-review.md`，回顾 FlashBang 起点到 Phase 4C 收束的完整设计弧线。
+- 收敛文档结构，knowledge-draft / proposal-note 渲染对齐 obsidian-markdown skill。
+
+验证结果：
+
+```sh
+go test ./...
+```
+
+已通过（2026-05-21 全包绿）。
+
 ## 2026-05-13 - Phase 4
 
 Phase 4 Wiki Agent Workflow 进入真实 LLM + Matrix IM approval workflow 的第一版可验证状态。

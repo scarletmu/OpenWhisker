@@ -7,10 +7,11 @@
 1. [架构概览](architecture/overview.md)：当前实现边界和系统组件。
 2. [当前进度与交接说明](progress.md)：跨机器切换开发时的当前状态、验证状态、已知遗留和下一步优先级。
 3. [项目决策](project-decisions.md)：跨阶段仍然有效的架构决策。
-4. [设计哲学](architecture/design-philosophy.md)：完整 VaultPlan / VaultExecutor 方向。
-5. Phase 文档：[1 最小切片](phases/phase-1-minimal-slice.md) · [2 审批与 Diff](phases/phase-2-approval-diff.md) · [3 Sync-Aware Approval Execution](phases/phase-3-headless-sync-executor.md) · [4 Wiki Agent Workflow](phases/phase-4-wiki-agent-workflow.md) · [4B.5 IM Intent Router](phases/phase-4-im-intent-router.md)。
-6. Schema / Contract：[Proposal Note](architecture/proposal-note-schema.md) · [Knowledge Draft](architecture/knowledge-draft-schema.md) · [Knowledge Expander 模型](architecture/knowledge-expander-model-contract.md) · [Intent Router 模型](architecture/intent-router-model-contract.md) · [IM Intent Router](architecture/im-intent-router.md) · [Capture Bucket](architecture/capture-bucket.md)。
-7. 适配与外部对接：[Matrix Private IM](adapters/matrix-private-im.md) · [Vault Profile Analyzer Skill](skills/vault-profile-analyzer/SKILL.md)。
+4. [v1 设计回顾](architecture/openwhisker-v1-review.md)：Phase 1–4 完整设计弧线的收官回顾，动机、取舍与教训。
+5. [设计哲学](architecture/design-philosophy.md)：完整 VaultPlan / VaultExecutor 方向。
+6. Phase 文档：[1 最小切片](phases/phase-1-minimal-slice.md) · [2 审批与 Diff](phases/phase-2-approval-diff.md) · [3 Sync-Aware Approval Execution](phases/phase-3-headless-sync-executor.md) · [4 Wiki Agent Workflow](phases/phase-4-wiki-agent-workflow.md) · [4B.5 IM Intent Router](phases/phase-4-im-intent-router.md)。
+7. Schema / Contract：[Proposal Note](architecture/proposal-note-schema.md) · [Knowledge Draft](architecture/knowledge-draft-schema.md) · [Knowledge Expander 模型](architecture/knowledge-expander-model-contract.md) · [Intent Router 模型](architecture/intent-router-model-contract.md) · [IM Intent Router](architecture/im-intent-router.md) · [Capture Bucket](architecture/capture-bucket.md)。
+8. 适配与外部对接：[Matrix Private IM](adapters/matrix-private-im.md) · [Vault Profile Analyzer Skill](skills/vault-profile-analyzer/SKILL.md)。
 
 延后议题：[CubeSandbox 运行沙箱评估](architecture/cubesandbox-runtime-sandbox-evaluation.md) 仅在 sandbox 课题恢复时阅读，不在主线路径上。
 
@@ -23,6 +24,7 @@ docs/
   project-decisions.md
   architecture/
     overview.md
+    openwhisker-v1-review.md
     design-philosophy.md
     im-intent-router.md
     capture-bucket.md
