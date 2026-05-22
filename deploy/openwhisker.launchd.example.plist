@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  OpenWhisker matrix daemon - macOS launchd LaunchAgent template.
+
+  This is a COMMITTED TEMPLATE. Copy it to deploy/local/ (git-ignored),
+  fill in the real <...> paths there, then install it as a per-user
+  LaunchAgent. Never put real machine paths in this file.
+
+    cp deploy/openwhisker.launchd.example.plist deploy/local/
+    # edit the copy, replacing every <...> placeholder, then:
+    cp deploy/local/openwhisker.launchd.example.plist \
+       ~/Library/LaunchAgents/com.openwhisker.matrix-daemon.plist
+    launchctl bootstrap gui/$(id -u) \
+       ~/Library/LaunchAgents/com.openwhisker.matrix-daemon.plist
+    launchctl kickstart -k gui/$(id -u)/com.openwhisker.matrix-daemon
+
+  A LaunchAgent (per-user) is used rather than a LaunchDaemon: the vault
+  lives under the user's home and desktop Obsidian runs in the user
+  session, so the daemon runs as the same user.
+
+  The daemon loads OPENWHISKER_* config from a .env.local file found by
+  walking up from WorkingDirectory - keep .env.local in <openwhisker-home>.
+  See docs/deployment/README.md for the full deployment guide.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.openwhisker.matrix-daemon</string>
+
+  <!-- --db / --since-file / --session-file are relative to WorkingDirectory. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string><openwhisker-home>/bin/openwhisker</string>
+    <string>matrix</string>
+    <string>daemon</string>
+    <string>--db</string>
+    <string>data/openwhisker.db</string>
+    <string>--vault</string>
+    <string><target-vault-path></string>
+    <string>--since-file</string>
+    <string>data/matrix-since.token</string>
+    <string>--session-file</string>
+    <string>data/matrix-session.json</string>
+  </array>
+
+  <!-- .env.local and data/ are resolved relative to this directory. -->
+  <key>WorkingDirectory</key>
+  <string><openwhisker-home></string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Restart the daemon if it exits; equivalent to compose restart: unless-stopped. -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- Throttle restart loops on persistent failure (seconds). -->
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string><openwhisker-home>/data/daemon.log</string>
+  <key>StandardErrorPath</key>
+  <string><openwhisker-home>/data/daemon.log</string>
+</dict>
+</plist>

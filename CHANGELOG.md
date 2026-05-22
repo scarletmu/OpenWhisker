@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-05-22 - v1 部署基建
+
+为 v1 部署补齐构建基建与原生服务部署形态，并明确 git 仓库边界。
+
+v1 标准部署形态定为本地硬件（桌面 Mac / Linux NUC）上的原生常驻服务；Docker 收窄为可复现构建与镜像验证工具，容器形态作为可选运行方式保留。
+
+- 新增 `Makefile`（`build` / `test` / `vet` / `fmt` / `clean` / `docker-build` / `docker-run`）、多阶段 `Dockerfile` 和 `.dockerignore`。`Dockerfile` 保留 CGO + glibc 运行基（`debian:bookworm-slim`），以兼容 `mattn/go-sqlite3`。
+- 新增原生服务模板：`deploy/openwhisker.launchd.example.plist`（macOS launchd）与 `deploy/openwhisker.systemd.example.service`（Linux systemd），全部用占位符。daemon 从 `WorkingDirectory` 起向上查找并加载 `.env.local`，service 文件不内联密钥。
+- 新增 `deploy/openwhisker.compose.example.yaml`：可选容器形态，只定义 `matrix daemon` 单服务的部署模板，全部用占位符。
+- 新增 `docs/deployment/README.md` 部署引导：以原生服务为主路径，覆盖构建、配置、launchd / systemd 运行、同步形态与设备拓扑约束、v1 范围边界，容器形态列为可选。
+- `.gitignore` 加注释分节，新增构建产物与 `deploy/local/` 忽略。含真实主机名 / 密钥 / 拓扑的关键运作文档落仓库内 git-ignored 的 `deploy/local/`，不进仓库。
+- `.env.local.example` 补齐 `OPENWHISKER_LLM_ORG_ID` / `OPENWHISKER_LLM_PROJECT_ID` / `OPENWHISKER_INTENT_ORG_ID` / `OPENWHISKER_INTENT_PROJECT_ID` / `OPENWHISKER_CAPTURE_BUCKET_TTL`，与代码实际读取的环境变量对齐。
+- 更新 README 与文档索引，加入部署入口。
+
+未包含（v1 范围外）：常驻服务内嵌 Obsidian Headless Sync（`ob`）、真实 vault 生产签收、Kubernetes / Terraform 编排、监控告警与备份自动化。
+
 ## 2026-05-21 - Phase 4 收束（v1）
 
 自 2026-05-13 的 Phase 4 首版之后，Wiki Agent Workflow 经 4B / 4B.5 / 4C.1 / 4C.2 推进至收束，4C.3 / 4C.4 主动取消。OpenWhisker v1 设计弧线至此收尾。完整回顾见 `docs/architecture/openwhisker-v1-review.md`。

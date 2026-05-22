@@ -1,9 +1,25 @@
-data/
+# --- Secrets & local config ---
 .env.local
-scripts/local/
-.DS_Store
-testdata/vault/**/*.md
-testdata/vault/**/*.db
+
+# --- Runtime state ---
+data/
 *.db
 *.db-shm
 *.db-wal
+
+# --- Local-only dev / deploy (never committed) ---
+scripts/local/
+deploy/local/
+
+# --- Build artifacts ---
+/openwhisker
+/bin/
+/dist/
+*.test
+
+# --- Test vault scratch ---
+testdata/vault/**/*.md
+testdata/vault/**/*.db
+
+# --- System ---
+.DS_Store

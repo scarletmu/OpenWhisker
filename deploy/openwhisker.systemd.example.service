@@ -1,0 +1,47 @@
+# OpenWhisker matrix daemon - Linux systemd service template.
+#
+# This is a COMMITTED TEMPLATE. Copy it to deploy/local/ (git-ignored),
+# fill in the real <...> values there, then install it. Never put real
+# machine paths in this file.
+#
+#   cp deploy/openwhisker.systemd.example.service deploy/local/
+#   # edit the copy, replacing every <...> placeholder, then install as a
+#   # per-user service (recommended when the vault lives under $HOME):
+#   cp deploy/local/openwhisker.systemd.example.service \
+#      ~/.config/systemd/user/openwhisker.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now openwhisker.service
+#   # On an unattended NUC, enable linger so the user service runs without
+#   # an active login session:
+#   loginctl enable-linger "$USER"
+#
+# System-wide variant: install to /etc/systemd/system/openwhisker.service,
+# add `User=<service-user>` under [Service], change [Install] WantedBy to
+# `multi-user.target`, and manage it with `systemctl` (no --user).
+#
+# The daemon loads OPENWHISKER_* config from a .env.local file found by
+# walking up from WorkingDirectory - keep .env.local in <openwhisker-home>.
+# See docs/deployment/README.md for the full deployment guide.
+
+[Unit]
+Description=OpenWhisker Matrix daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=<openwhisker-home>
+# --db / --since-file / --session-file are relative to WorkingDirectory.
+ExecStart=<openwhisker-home>/bin/openwhisker matrix daemon \
+  --db data/openwhisker.db \
+  --vault <target-vault-path> \
+  --since-file data/matrix-since.token \
+  --session-file data/matrix-session.json
+# The daemon saves the Matrix next_batch token on SIGTERM before exiting.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

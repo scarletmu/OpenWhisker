@@ -1,0 +1,14 @@
+# Keep secrets, runtime state and local-only files out of the build context.
+.git/
+.gitignore
+data/
+.env.local
+deploy/local/
+testdata/
+scripts/local/
+bin/
+dist/
+*.db
+*.db-shm
+*.db-wal
+.DS_Store

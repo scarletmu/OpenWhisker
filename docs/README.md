@@ -12,6 +12,7 @@
 6. Phase 文档：[1 最小切片](phases/phase-1-minimal-slice.md) · [2 审批与 Diff](phases/phase-2-approval-diff.md) · [3 Sync-Aware Approval Execution](phases/phase-3-headless-sync-executor.md) · [4 Wiki Agent Workflow](phases/phase-4-wiki-agent-workflow.md) · [4B.5 IM Intent Router](phases/phase-4-im-intent-router.md)。
 7. Schema / Contract：[Proposal Note](architecture/proposal-note-schema.md) · [Knowledge Draft](architecture/knowledge-draft-schema.md) · [Knowledge Expander 模型](architecture/knowledge-expander-model-contract.md) · [Intent Router 模型](architecture/intent-router-model-contract.md) · [IM Intent Router](architecture/im-intent-router.md) · [Capture Bucket](architecture/capture-bucket.md)。
 8. 适配与外部对接：[Matrix Private IM](adapters/matrix-private-im.md) · [Vault Profile Analyzer Skill](skills/vault-profile-analyzer/SKILL.md)。
+9. 部署：[部署指南](deployment/README.md)，OpenWhisker daemon 的构建、配置与原生服务运行。
 
 延后议题：[CubeSandbox 运行沙箱评估](architecture/cubesandbox-runtime-sandbox-evaluation.md) 仅在 sandbox 课题恢复时阅读，不在主线路径上。
 
@@ -42,6 +43,8 @@ docs/
     phase-4-matrix-test-feedback.md
   adapters/
     matrix-private-im.md
+  deployment/
+    README.md
   skills/
     vault-profile-analyzer/
       SKILL.md
@@ -57,4 +60,5 @@ docs/
 - `phases/` 放阶段文档，每个 Phase 保持同一格式：状态、目标、workflow、范围、决策、policy、验收、Review 问题。
 - `project-decisions.md` 只保留跨阶段仍然有效的决策，不再为早期默认值维护分散 ADR。
 - `adapters/` 放具体入口或外部系统适配文档。
+- `deployment/` 放部署引导；含真实主机名 / 密钥 / 拓扑的关键运作文档不进 git，落仓库内 `deploy/local/`。
 - 已被阶段文档或项目决策吸收的旧文档应收敛，不保留重复入口。
