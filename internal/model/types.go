@@ -7,6 +7,7 @@ const (
 	JobTypeAppendRaw       = "append_raw"
 	JobTypeOrganizeRaw     = "organize_raw"
 	JobTypeExpandKnowledge = "expand_knowledge"
+	JobTypeSchedulerRun    = "scheduler_run"
 
 	JobStatusPending          = "pending"
 	JobStatusAwaitingApproval = "awaiting_approval"
@@ -58,6 +59,14 @@ const (
 
 	OutboxStatusPending   = "pending"
 	OutboxStatusDelivered = "delivered"
+
+	OutboxActorKnowledge = "knowledge"
+	OutboxActorScheduler = "scheduler"
+
+	SchedulerRunStatusRunning = "running"
+	SchedulerRunStatusDone    = "done"
+	SchedulerRunStatusFailed  = "failed"
+	SchedulerRunStatusSkipped = "skipped"
 
 	AdapterMatrix = "matrix"
 
@@ -267,8 +276,35 @@ type VaultOperationLog struct {
 type OutboxMessage struct {
 	ID        string
 	JobID     string
+	Actor     string
 	Kind      string
 	Body      string
 	Status    string
 	CreatedAt time.Time
+}
+
+type SchedulerRuntime struct {
+	ID           string
+	ScheduleID   string
+	RegistryPath string
+	RegistryHash string
+	SkillDir     string
+	SkillPath    string
+	LastRunAt    *time.Time
+	NextRunAt    *time.Time
+	UpdatedAt    time.Time
+}
+
+type SchedulerRun struct {
+	ID              string
+	ScheduleID      string
+	RuntimeID       string
+	SkillDir        string
+	SkillPath       string
+	Status          string
+	StartedAt       time.Time
+	FinishedAt      *time.Time
+	ResultJSON      string
+	Error           string
+	OutboxMessageID string
 }

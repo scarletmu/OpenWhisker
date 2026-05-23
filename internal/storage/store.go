@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -311,10 +312,14 @@ INSERT INTO vault_operation_logs (
 }
 
 func (s *Store) AddOutboxMessage(msg model.OutboxMessage) error {
+	actor := strings.TrimSpace(msg.Actor)
+	if actor == "" {
+		actor = model.OutboxActorKnowledge
+	}
 	_, err := s.db.Exec(`
-INSERT INTO outbox_messages (id, job_id, kind, body, status, created_at)
-VALUES (?, ?, ?, ?, ?, ?)`,
-		msg.ID, msg.JobID, msg.Kind, msg.Body, msg.Status, formatTime(msg.CreatedAt))
+INSERT INTO outbox_messages (id, job_id, actor, kind, body, status, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		msg.ID, msg.JobID, actor, msg.Kind, msg.Body, msg.Status, formatTime(msg.CreatedAt))
 	return err
 }
 
@@ -323,7 +328,7 @@ func (s *Store) ListPendingOutbox(limit int) ([]model.OutboxMessage, error) {
 		limit = 20
 	}
 	rows, err := s.db.Query(`
-SELECT id, job_id, kind, body, status, created_at
+SELECT id, job_id, actor, kind, body, status, created_at
 FROM outbox_messages
 WHERE status = ?
 ORDER BY created_at ASC
@@ -336,8 +341,11 @@ LIMIT ?`, model.OutboxStatusPending, limit)
 	for rows.Next() {
 		var msg model.OutboxMessage
 		var createdAt string
-		if err := rows.Scan(&msg.ID, &msg.JobID, &msg.Kind, &msg.Body, &msg.Status, &createdAt); err != nil {
+		if err := rows.Scan(&msg.ID, &msg.JobID, &msg.Actor, &msg.Kind, &msg.Body, &msg.Status, &createdAt); err != nil {
 			return nil, err
+		}
+		if strings.TrimSpace(msg.Actor) == "" {
+			msg.Actor = model.OutboxActorKnowledge
 		}
 		msg.CreatedAt = parseTime(createdAt)
 		messages = append(messages, msg)
@@ -563,6 +571,220 @@ func (s *Store) scanCaptureBucket(row planScanner) (model.CaptureBucket, error) 
 	bucket.ExpiresAt = parseTime(expiresAt)
 	bucket.ClosedAt = parseNullableTime(closedAt)
 	return bucket, nil
+}
+
+func (s *Store) SaveSchedulerRuntime(runtime model.SchedulerRuntime) error {
+	_, err := s.db.Exec(`
+INSERT INTO scheduler_runtime (
+  id, schedule_id, registry_path, registry_hash, skill_dir, skill_path,
+  last_run_at, next_run_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(schedule_id) DO UPDATE SET
+  registry_path = excluded.registry_path,
+  registry_hash = excluded.registry_hash,
+  skill_dir = excluded.skill_dir,
+  skill_path = excluded.skill_path,
+  last_run_at = excluded.last_run_at,
+  next_run_at = excluded.next_run_at,
+  updated_at = excluded.updated_at`,
+		runtime.ID, runtime.ScheduleID, runtime.RegistryPath, runtime.RegistryHash,
+		runtime.SkillDir, runtime.SkillPath, nullableTime(runtime.LastRunAt),
+		nullableTime(runtime.NextRunAt), formatTime(runtime.UpdatedAt))
+	return err
+}
+
+func (s *Store) GetSchedulerRuntime(scheduleID string) (model.SchedulerRuntime, error) {
+	return s.scanSchedulerRuntime(s.db.QueryRow(`
+SELECT id, schedule_id, registry_path, registry_hash, skill_dir, skill_path,
+  last_run_at, next_run_at, updated_at
+FROM scheduler_runtime
+WHERE schedule_id = ?`, scheduleID))
+}
+
+func (s *Store) HasRunningSchedulerRun(scheduleID string) (bool, error) {
+	var count int
+	err := s.db.QueryRow(`
+SELECT COUNT(*)
+FROM scheduler_runs
+WHERE schedule_id = ? AND status = ?`, scheduleID, model.SchedulerRunStatusRunning).Scan(&count)
+	return count > 0, err
+}
+
+func (s *Store) CreateSchedulerRun(run model.SchedulerRun) error {
+	_, err := s.db.Exec(`
+INSERT INTO scheduler_runs (
+  id, schedule_id, runtime_id, skill_dir, skill_path, status, started_at,
+  finished_at, result_json, error, outbox_message_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		run.ID, run.ScheduleID, run.RuntimeID, run.SkillDir, run.SkillPath, run.Status,
+		formatTime(run.StartedAt), nullableTime(run.FinishedAt), run.ResultJSON,
+		run.Error, run.OutboxMessageID)
+	return err
+}
+
+func (s *Store) FinishSchedulerRun(id, status, resultJSON, errText, outboxMessageID string, finishedAt time.Time) error {
+	_, err := s.db.Exec(`
+UPDATE scheduler_runs
+SET status = ?, finished_at = ?, result_json = ?, error = ?, outbox_message_id = ?
+WHERE id = ?`, status, formatTime(finishedAt), resultJSON, errText, outboxMessageID, id)
+	return err
+}
+
+func (s *Store) ListSchedulerRuns(scheduleID string, limit int) ([]model.SchedulerRun, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.Query(`
+SELECT id, schedule_id, runtime_id, skill_dir, skill_path, status, started_at,
+  finished_at, result_json, error, outbox_message_id
+FROM scheduler_runs
+WHERE schedule_id = ?
+ORDER BY started_at DESC
+LIMIT ?`, scheduleID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var runs []model.SchedulerRun
+	for rows.Next() {
+		run, err := scanSchedulerRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return runs, nil
+}
+
+func (s *Store) ListRecentSchedulerRuns(limit int) ([]model.SchedulerRun, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.Query(`
+SELECT id, schedule_id, runtime_id, skill_dir, skill_path, status, started_at,
+  finished_at, result_json, error, outbox_message_id
+FROM scheduler_runs
+ORDER BY started_at DESC
+LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var runs []model.SchedulerRun
+	for rows.Next() {
+		run, err := scanSchedulerRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return runs, nil
+}
+
+func (s *Store) ListSchedulerRuntimes(limit int) ([]model.SchedulerRuntime, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.Query(`
+SELECT id, schedule_id, registry_path, registry_hash, skill_dir, skill_path,
+  last_run_at, next_run_at, updated_at
+FROM scheduler_runtime
+ORDER BY next_run_at ASC, updated_at DESC
+LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var runtimes []model.SchedulerRuntime
+	for rows.Next() {
+		runtime, err := s.scanSchedulerRuntime(rows)
+		if err != nil {
+			return nil, err
+		}
+		runtimes = append(runtimes, runtime)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return runtimes, nil
+}
+
+func (s *Store) GetSchedulerRun(id string) (model.SchedulerRun, error) {
+	return scanSchedulerRun(s.db.QueryRow(`
+SELECT id, schedule_id, runtime_id, skill_dir, skill_path, status, started_at,
+  finished_at, result_json, error, outbox_message_id
+FROM scheduler_runs
+WHERE id = ?`, id))
+}
+
+func (s *Store) SaveSchedulerEnabledOverride(scheduleID string, enabled bool, updatedAt time.Time) error {
+	_, err := s.db.Exec(`
+INSERT INTO scheduler_overrides (schedule_id, enabled_override, updated_at)
+VALUES (?, ?, ?)
+ON CONFLICT(schedule_id) DO UPDATE SET
+  enabled_override = excluded.enabled_override,
+  updated_at = excluded.updated_at`, scheduleID, boolInt(enabled), formatTime(updatedAt))
+	return err
+}
+
+func (s *Store) GetSchedulerEnabledOverrides() (map[string]bool, error) {
+	rows, err := s.db.Query(`
+SELECT schedule_id, enabled_override
+FROM scheduler_overrides`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	overrides := map[string]bool{}
+	for rows.Next() {
+		var scheduleID string
+		var enabled int
+		if err := rows.Scan(&scheduleID, &enabled); err != nil {
+			return nil, err
+		}
+		overrides[scheduleID] = enabled != 0
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return overrides, nil
+}
+
+func (s *Store) scanSchedulerRuntime(row planScanner) (model.SchedulerRuntime, error) {
+	var runtime model.SchedulerRuntime
+	var lastRunAt, nextRunAt sql.NullString
+	var updatedAt string
+	err := row.Scan(&runtime.ID, &runtime.ScheduleID, &runtime.RegistryPath,
+		&runtime.RegistryHash, &runtime.SkillDir, &runtime.SkillPath,
+		&lastRunAt, &nextRunAt, &updatedAt)
+	if err != nil {
+		return model.SchedulerRuntime{}, err
+	}
+	runtime.LastRunAt = parseNullableTime(lastRunAt)
+	runtime.NextRunAt = parseNullableTime(nextRunAt)
+	runtime.UpdatedAt = parseTime(updatedAt)
+	return runtime, nil
+}
+
+func scanSchedulerRun(row planScanner) (model.SchedulerRun, error) {
+	var run model.SchedulerRun
+	var startedAt string
+	var finishedAt sql.NullString
+	err := row.Scan(&run.ID, &run.ScheduleID, &run.RuntimeID, &run.SkillDir,
+		&run.SkillPath, &run.Status, &startedAt, &finishedAt, &run.ResultJSON,
+		&run.Error, &run.OutboxMessageID)
+	if err != nil {
+		return model.SchedulerRun{}, err
+	}
+	run.StartedAt = parseTime(startedAt)
+	run.FinishedAt = parseNullableTime(finishedAt)
+	return run, nil
 }
 
 func (s *Store) AcquireLocks(paths []string, planID string, acquiredAt time.Time) error {

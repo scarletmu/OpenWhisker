@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS vault_operation_logs (
 CREATE TABLE IF NOT EXISTS outbox_messages (
   id TEXT PRIMARY KEY,
   job_id TEXT NOT NULL,
+  actor TEXT NOT NULL DEFAULT 'knowledge',
   kind TEXT NOT NULL,
   body TEXT NOT NULL,
   status TEXT NOT NULL,
@@ -121,6 +122,44 @@ CREATE TABLE IF NOT EXISTS pending_clarifications (
 
 CREATE INDEX IF NOT EXISTS idx_pending_clarifications_source_status
 ON pending_clarifications(source_key, status, created_at);
+
+CREATE TABLE IF NOT EXISTS scheduler_runtime (
+  id TEXT PRIMARY KEY,
+  schedule_id TEXT NOT NULL UNIQUE,
+  registry_path TEXT NOT NULL,
+  registry_hash TEXT NOT NULL,
+  skill_dir TEXT NOT NULL,
+  skill_path TEXT NOT NULL,
+  last_run_at TEXT,
+  next_run_at TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_scheduler_runtime_next_run
+ON scheduler_runtime(next_run_at);
+
+CREATE TABLE IF NOT EXISTS scheduler_runs (
+  id TEXT PRIMARY KEY,
+  schedule_id TEXT NOT NULL,
+  runtime_id TEXT NOT NULL,
+  skill_dir TEXT NOT NULL,
+  skill_path TEXT NOT NULL,
+  status TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  result_json TEXT NOT NULL DEFAULT '',
+  error TEXT NOT NULL DEFAULT '',
+  outbox_message_id TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_scheduler_runs_schedule_status
+ON scheduler_runs(schedule_id, status, started_at);
+
+CREATE TABLE IF NOT EXISTS scheduler_overrides (
+  schedule_id TEXT PRIMARY KEY,
+  enabled_override INTEGER NOT NULL,
+  updated_at TEXT NOT NULL
+);
 `)
 	if err != nil {
 		return err
@@ -138,6 +177,7 @@ ON pending_clarifications(source_key, status, created_at);
 		{"vault_plans", "error", "TEXT NOT NULL DEFAULT ''"},
 		{"wiki_jobs", "source_key", "TEXT NOT NULL DEFAULT ''"},
 		{"vault_operation_logs", "outcome", "TEXT NOT NULL DEFAULT 'applied'"},
+		{"outbox_messages", "actor", "TEXT NOT NULL DEFAULT 'knowledge'"},
 	} {
 		if err := s.addColumnIfMissing(column.table, column.name, column.def); err != nil {
 			return err

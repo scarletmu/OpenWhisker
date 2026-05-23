@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/scarletmu/openwhisker/internal/model"
+	"github.com/scarletmu/openwhisker/internal/profile"
 	"github.com/scarletmu/openwhisker/internal/storage"
 )
 
@@ -115,12 +116,80 @@ func (s AdapterService) handleAdapterCommand(ctx context.Context, req AdapterReq
 		return s.handleStatus(args)
 	case "/jobs":
 		return s.handleJobs(10)
+	case "/scheduler":
+		return s.handleSchedulerCommand(ctx, req, args)
 	default:
 		if strings.HasPrefix(command, "/") {
 			return AdapterResponse{}, fmt.Errorf("unsupported adapter command %q", command)
 		}
 		return s.ingestRaw(ctx, req, req.Text)
 	}
+}
+
+func (s AdapterService) handleSchedulerCommand(ctx context.Context, req AdapterRequest, args string) (AdapterResponse, error) {
+	fields := strings.Fields(args)
+	if len(fields) == 0 || fields[0] == "status" {
+		status, err := NewSchedulerStatusService(s.store, s.vaultRoot, profile.NewConfiguredVaultProfile(s.planOpts.Conventions)).Status(5)
+		if err != nil {
+			return AdapterResponse{}, err
+		}
+		return AdapterResponse{
+			Status: "ok",
+			Body:   RenderSchedulerStatus(status),
+		}, nil
+	}
+	if fields[0] == "runs" {
+		limit := 5
+		if len(fields) >= 2 {
+			if _, err := fmt.Sscanf(fields[1], "%d", &limit); err != nil || limit <= 0 {
+				return AdapterResponse{}, fmt.Errorf("limit must be a positive integer")
+			}
+		}
+		runs, err := NewSchedulerStatusService(s.store, s.vaultRoot, profile.NewConfiguredVaultProfile(s.planOpts.Conventions)).Runs(limit)
+		if err != nil {
+			return AdapterResponse{}, err
+		}
+		return AdapterResponse{
+			Status: "ok",
+			Body:   RenderSchedulerRuns(runs),
+		}, nil
+	}
+	if fields[0] == "schedules" {
+		schedules, err := NewSchedulerStatusService(s.store, s.vaultRoot, profile.NewConfiguredVaultProfile(s.planOpts.Conventions)).Schedules()
+		if err != nil {
+			return AdapterResponse{}, err
+		}
+		return AdapterResponse{
+			Status: "ok",
+			Body:   RenderSchedulerSchedules(schedules),
+		}, nil
+	}
+	if len(fields) < 2 || fields[0] != "accept" {
+		return AdapterResponse{}, fmt.Errorf("usage: /scheduler status | /scheduler runs [limit] | /scheduler schedules | /scheduler accept <run_id> [item_number]")
+	}
+	item := 1
+	if len(fields) >= 3 {
+		if _, err := fmt.Sscanf(fields[2], "%d", &item); err != nil || item <= 0 {
+			return AdapterResponse{}, fmt.Errorf("item_number must be a positive integer")
+		}
+	}
+	result, err := NewSchedulerSuggestionService(s.store, s.vaultRoot, s.planOpts).AcceptRawCapture(ctx, AcceptSchedulerSuggestedRawCaptureRequest{
+		RunID:          fields[1],
+		Item:           item,
+		Source:         adapterSource(req),
+		SourceKey:      req.SourceKey,
+		SuppressOutbox: true,
+	})
+	if err != nil {
+		return AdapterResponse{}, err
+	}
+	return AdapterResponse{
+		Status:     model.JobStatusDone,
+		JobID:      result.JobID,
+		PlanID:     result.PlanID,
+		Body:       fmt.Sprintf("Scheduler suggestion accepted. Raw capture saved to %s", result.TargetPath),
+		OutboxKind: model.OutboxKindResult,
+	}, nil
 }
 
 func (s AdapterService) PullOutbox(limit int) ([]model.OutboxMessage, error) {

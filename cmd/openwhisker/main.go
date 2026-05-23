@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/scarletmu/openwhisker/internal/model"
 	"github.com/scarletmu/openwhisker/internal/policy"
 	"github.com/scarletmu/openwhisker/internal/profile"
+	schedulerpkg "github.com/scarletmu/openwhisker/internal/scheduler"
 	"github.com/scarletmu/openwhisker/internal/storage"
 )
 
@@ -37,6 +39,16 @@ func main() {
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		printUsage(stderr)
+		return flag.ErrHelp
+	}
+	if args[0] == "daemon" {
+		if len(args) >= 2 && args[1] == "status" {
+			return runDaemonStatus(args[2:], stdout, stderr)
+		}
+		return runDaemon(args[1:], stdout, stderr)
+	}
 	if len(args) < 2 {
 		printUsage(stderr)
 		return flag.ErrHelp
@@ -64,6 +76,20 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runVaultProfilePreview(args[3:], stdout, stderr)
 	case args[0] == "jobs" && args[1] == "show":
 		return runJobShow(args[2:], stdout, stderr)
+	case args[0] == "scheduler" && args[1] == "tick":
+		return runSchedulerTick(args[2:], stdout, stderr)
+	case args[0] == "scheduler" && args[1] == "status":
+		return runSchedulerStatus(args[2:], stdout, stderr)
+	case args[0] == "scheduler" && args[1] == "runs":
+		return runSchedulerRuns(args[2:], stdout, stderr)
+	case len(args) >= 3 && args[0] == "scheduler" && args[1] == "schedules" && args[2] == "list":
+		return runSchedulerSchedulesList(args[3:], stdout, stderr)
+	case len(args) >= 3 && args[0] == "scheduler" && args[1] == "schedules" && args[2] == "enable":
+		return runSchedulerSchedulesSetEnabled(args[3:], stdout, stderr, true)
+	case len(args) >= 3 && args[0] == "scheduler" && args[1] == "schedules" && args[2] == "disable":
+		return runSchedulerSchedulesSetEnabled(args[3:], stdout, stderr, false)
+	case args[0] == "scheduler" && args[1] == "accept":
+		return runSchedulerAccept(args[2:], stdout, stderr)
 	case args[0] == "matrix" && args[1] == "poll-once":
 		return runMatrixPollOnce(args[2:], stdout, stderr)
 	case args[0] == "matrix" && args[1] == "daemon":
@@ -455,6 +481,201 @@ func runJobShow(args []string, stdout, stderr io.Writer) error {
 	return printJSON(stdout, job)
 }
 
+func runSchedulerTick(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("scheduler tick", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dbPath := fs.String("db", "data/openwhisker.db", "SQLite database path")
+	vaultRoot := fs.String("vault", "testdata/vault", "target vault root")
+	vaultProfileName := fs.String("vault-profile", vaultProfileDefault(), "vault profile: generic or knowledge-vault")
+	engineName := fs.String("engine", schedulerEngineDefault(), "scheduler engine: static or openai-compatible")
+	llmModel := fs.String("llm-model", llmModelDefault(), "OpenAI-compatible model for --engine=openai-compatible")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: openwhisker scheduler tick [--db data/openwhisker.db] [--vault testdata/vault] [--vault-profile generic|knowledge-vault] [--engine static|openai-compatible]")
+	}
+	store, err := storage.Open(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	conventions, err := vaultConventionsForProfile(*vaultProfileName)
+	if err != nil {
+		return err
+	}
+	vaultProfile := profile.NewConfiguredVaultProfile(conventions)
+	engine, err := schedulerEngineForName(*engineName, *llmModel)
+	if err != nil {
+		return err
+	}
+	result, err := core.NewSchedulerServiceWithOptions(store, *vaultRoot, core.SchedulerServiceOptions{
+		VaultProfile: vaultProfile,
+		Runner: schedulerpkg.StaticSkillRunner{
+			VaultRoot:            *vaultRoot,
+			ExternalInfoAdapters: schedulerExternalInfoAdapters(),
+			Engine:               engine,
+		},
+	}).Tick(context.Background())
+	if err != nil {
+		return err
+	}
+	return printJSON(stdout, result)
+}
+
+func runSchedulerStatus(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("scheduler status", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dbPath := fs.String("db", "data/openwhisker.db", "SQLite database path")
+	vaultRoot := fs.String("vault", "testdata/vault", "target vault root")
+	vaultProfileName := fs.String("vault-profile", vaultProfileDefault(), "vault profile: generic or knowledge-vault")
+	limit := fs.Int("limit", 10, "maximum runtimes and recent runs to show")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: openwhisker scheduler status [--db data/openwhisker.db] [--vault testdata/vault] [--vault-profile generic|knowledge-vault] [--limit 10]")
+	}
+	store, err := storage.Open(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	conventions, err := vaultConventionsForProfile(*vaultProfileName)
+	if err != nil {
+		return err
+	}
+	vaultProfile := profile.NewConfiguredVaultProfile(conventions)
+	status, err := core.NewSchedulerStatusService(store, *vaultRoot, vaultProfile).Status(*limit)
+	if err != nil {
+		return err
+	}
+	return printJSON(stdout, status)
+}
+
+func runSchedulerRuns(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("scheduler runs", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dbPath := fs.String("db", "data/openwhisker.db", "SQLite database path")
+	limit := fs.Int("limit", 20, "maximum recent runs to show")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: openwhisker scheduler runs [--db data/openwhisker.db] [--limit 20]")
+	}
+	store, err := storage.Open(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	runs, err := core.NewSchedulerStatusService(store, "", profile.VaultProfile{}).Runs(*limit)
+	if err != nil {
+		return err
+	}
+	return printJSON(stdout, runs)
+}
+
+func runSchedulerSchedulesList(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("scheduler schedules list", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dbPath := fs.String("db", "data/openwhisker.db", "SQLite database path")
+	vaultRoot := fs.String("vault", "testdata/vault", "target vault root")
+	vaultProfileName := fs.String("vault-profile", vaultProfileDefault(), "vault profile: generic or knowledge-vault")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: openwhisker scheduler schedules list [--db data/openwhisker.db] [--vault testdata/vault] [--vault-profile generic|knowledge-vault]")
+	}
+	store, err := storage.Open(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	conventions, err := vaultConventionsForProfile(*vaultProfileName)
+	if err != nil {
+		return err
+	}
+	vaultProfile := profile.NewConfiguredVaultProfile(conventions)
+	schedules, err := core.NewSchedulerStatusService(store, *vaultRoot, vaultProfile).Schedules()
+	if err != nil {
+		return err
+	}
+	return printJSON(stdout, schedules)
+}
+
+func runSchedulerSchedulesSetEnabled(args []string, stdout, stderr io.Writer, enabled bool) error {
+	name := "scheduler schedules disable"
+	if enabled {
+		name = "scheduler schedules enable"
+	}
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dbPath := fs.String("db", "data/openwhisker.db", "SQLite database path")
+	vaultRoot := fs.String("vault", "testdata/vault", "target vault root")
+	vaultProfileName := fs.String("vault-profile", vaultProfileDefault(), "vault profile: generic or knowledge-vault")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: openwhisker scheduler schedules enable|disable [--db data/openwhisker.db] [--vault testdata/vault] [--vault-profile generic|knowledge-vault] <schedule_id>")
+	}
+	store, err := storage.Open(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	conventions, err := vaultConventionsForProfile(*vaultProfileName)
+	if err != nil {
+		return err
+	}
+	vaultProfile := profile.NewConfiguredVaultProfile(conventions)
+	result, err := core.NewSchedulerStatusService(store, *vaultRoot, vaultProfile).SetScheduleEnabled(fs.Arg(0), enabled)
+	if err != nil {
+		return err
+	}
+	return printJSON(stdout, result)
+}
+
+func runSchedulerAccept(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("scheduler accept", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dbPath := fs.String("db", "data/openwhisker.db", "SQLite database path")
+	vaultRoot := fs.String("vault", "testdata/vault", "target vault root")
+	vaultProfileName := fs.String("vault-profile", vaultProfileDefault(), "vault profile: generic or knowledge-vault")
+	item := fs.Int("item", 1, "1-based suggested_raw_captures item number")
+	source := fs.String("source", "scheduler", "input source label for accepted raw capture")
+	sourceKey := fs.String("source-key", "", "optional source key for accepted raw capture")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: openwhisker scheduler accept [--db data/openwhisker.db] [--vault testdata/vault] [--vault-profile generic|knowledge-vault] [--item 1] <scheduler_run_id>")
+	}
+	store, err := storage.Open(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	conventions, err := vaultConventionsForProfile(*vaultProfileName)
+	if err != nil {
+		return err
+	}
+	result, err := core.NewSchedulerSuggestionService(store, *vaultRoot, core.PlanServiceOptions{
+		Conventions: conventions,
+	}).AcceptRawCapture(context.Background(), core.AcceptSchedulerSuggestedRawCaptureRequest{
+		RunID:     fs.Arg(0),
+		Item:      *item,
+		Source:    *source,
+		SourceKey: *sourceKey,
+	})
+	if err != nil {
+		return err
+	}
+	return printJSON(stdout, result)
+}
+
 func runMatrixPollOnce(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("matrix poll-once", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -466,6 +687,10 @@ func runMatrixPollOnce(args []string, stdout, stderr io.Writer) error {
 	userID := fs.String("user-id", os.Getenv("OPENWHISKER_MATRIX_USER_ID"), "Matrix bot user id")
 	roomID := fs.String("room-id", os.Getenv("OPENWHISKER_MATRIX_ROOM_ID"), "Matrix room id")
 	sessionFile := fs.String("session-file", matrixSessionFileDefault(), "Matrix login session cache file")
+	schedulerAccessToken := fs.String("scheduler-access-token", os.Getenv("OPENWHISKER_MATRIX_SCHEDULER_ACCESS_TOKEN"), "Matrix Scheduler Bot access token")
+	schedulerPassword := fs.String("scheduler-password", os.Getenv("OPENWHISKER_MATRIX_SCHEDULER_PASSWORD"), "Matrix Scheduler Bot password used to login when no scheduler access token is configured")
+	schedulerUserID := fs.String("scheduler-user-id", os.Getenv("OPENWHISKER_MATRIX_SCHEDULER_USER_ID"), "Matrix Scheduler Bot user id")
+	schedulerSessionFile := fs.String("scheduler-session-file", matrixSchedulerSessionFileDefault(), "Matrix Scheduler Bot login session cache file")
 	since := fs.String("since", "", "Matrix sync token")
 	timeout := fs.Duration("timeout", 5*time.Second, "Matrix sync timeout")
 	organizerName := fs.String("organizer", organizerDefault(), "raw organizer: deterministic or openai-compatible")
@@ -478,7 +703,7 @@ func runMatrixPollOnce(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return fmt.Errorf("usage: openwhisker matrix poll-once [--db data/openwhisker.db] [--vault testdata/vault] [--homeserver URL] [--access-token TOKEN] [--password PASSWORD] [--user-id USER] [--room-id ROOM] [--session-file data/matrix-session.json] [--since TOKEN]")
+		return fmt.Errorf("usage: openwhisker matrix poll-once [--db data/openwhisker.db] [--vault testdata/vault] [--homeserver URL] [--access-token TOKEN] [--password PASSWORD] [--user-id USER] [--room-id ROOM] [--session-file data/matrix-session.json] [--scheduler-access-token TOKEN] [--scheduler-password PASSWORD] [--scheduler-user-id USER] [--scheduler-session-file data/matrix-scheduler-session.json] [--since TOKEN]")
 	}
 	store, err := storage.Open(*dbPath)
 	if err != nil {
@@ -516,11 +741,23 @@ func runMatrixPollOnce(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	deliveryClients, ignoredUserIDs, err := matrixDeliveryConfig(context.Background(), matrixClient, resolvedUserID, matrixAuthOptions{
+		Homeserver:  *homeserver,
+		AccessToken: *schedulerAccessToken,
+		UserID:      *schedulerUserID,
+		Password:    *schedulerPassword,
+		SessionFile: *schedulerSessionFile,
+	})
+	if err != nil {
+		return err
+	}
 	adapter := matrix.Adapter{
-		Core:   service,
-		Client: matrixClient,
-		UserID: resolvedUserID,
-		RoomID: *roomID,
+		Core:            service,
+		Client:          matrixClient,
+		UserID:          resolvedUserID,
+		RoomID:          *roomID,
+		DeliveryClients: deliveryClients,
+		IgnoredUserIDs:  ignoredUserIDs,
 	}
 	nextBatch, err := adapter.PollOnce(context.Background(), *since, *timeout)
 	if err != nil {
@@ -541,6 +778,10 @@ func runMatrixDaemon(args []string, stdout, stderr io.Writer) error {
 	roomID := fs.String("room-id", os.Getenv("OPENWHISKER_MATRIX_ROOM_ID"), "Matrix room id")
 	sinceFile := fs.String("since-file", "data/matrix-since.token", "Matrix sync token state file")
 	sessionFile := fs.String("session-file", matrixSessionFileDefault(), "Matrix login session cache file")
+	schedulerAccessToken := fs.String("scheduler-access-token", os.Getenv("OPENWHISKER_MATRIX_SCHEDULER_ACCESS_TOKEN"), "Matrix Scheduler Bot access token")
+	schedulerPassword := fs.String("scheduler-password", os.Getenv("OPENWHISKER_MATRIX_SCHEDULER_PASSWORD"), "Matrix Scheduler Bot password used to login when no scheduler access token is configured")
+	schedulerUserID := fs.String("scheduler-user-id", os.Getenv("OPENWHISKER_MATRIX_SCHEDULER_USER_ID"), "Matrix Scheduler Bot user id")
+	schedulerSessionFile := fs.String("scheduler-session-file", matrixSchedulerSessionFileDefault(), "Matrix Scheduler Bot login session cache file")
 	timeout := fs.Duration("timeout", 30*time.Second, "Matrix sync timeout")
 	idleDelay := fs.Duration("idle-delay", time.Second, "delay between successful sync loops")
 	errorDelay := fs.Duration("error-delay", 5*time.Second, "delay after Matrix sync errors")
@@ -555,7 +796,7 @@ func runMatrixDaemon(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return fmt.Errorf("usage: openwhisker matrix daemon [--db data/openwhisker.db] [--vault testdata/vault] [--homeserver URL] [--access-token TOKEN] [--password PASSWORD] [--user-id USER] [--room-id ROOM] [--since-file data/matrix-since.token] [--session-file data/matrix-session.json]")
+		return fmt.Errorf("usage: openwhisker matrix daemon [--db data/openwhisker.db] [--vault testdata/vault] [--homeserver URL] [--access-token TOKEN] [--password PASSWORD] [--user-id USER] [--room-id ROOM] [--since-file data/matrix-since.token] [--session-file data/matrix-session.json] [--scheduler-access-token TOKEN] [--scheduler-password PASSWORD] [--scheduler-user-id USER] [--scheduler-session-file data/matrix-scheduler-session.json]")
 	}
 	store, err := storage.Open(*dbPath)
 	if err != nil {
@@ -593,11 +834,23 @@ func runMatrixDaemon(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	deliveryClients, ignoredUserIDs, err := matrixDeliveryConfig(context.Background(), matrixClient, resolvedUserID, matrixAuthOptions{
+		Homeserver:  *homeserver,
+		AccessToken: *schedulerAccessToken,
+		UserID:      *schedulerUserID,
+		Password:    *schedulerPassword,
+		SessionFile: *schedulerSessionFile,
+	})
+	if err != nil {
+		return err
+	}
 	adapter := matrix.Adapter{
-		Core:   service,
-		Client: matrixClient,
-		UserID: resolvedUserID,
-		RoomID: *roomID,
+		Core:            service,
+		Client:          matrixClient,
+		UserID:          resolvedUserID,
+		RoomID:          *roomID,
+		DeliveryClients: deliveryClients,
+		IgnoredUserIDs:  ignoredUserIDs,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -613,6 +866,291 @@ func runMatrixDaemon(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	return printJSON(stdout, map[string]string{"next_batch": finalSince})
+}
+
+func runDaemon(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("daemon", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dbPath := fs.String("db", "data/openwhisker.db", "SQLite database path")
+	vaultRoot := fs.String("vault", "testdata/vault", "target vault root")
+	vaultProfileName := fs.String("vault-profile", vaultProfileDefault(), "vault profile: generic or knowledge-vault")
+	schedulerTickInterval := fs.Duration("scheduler-tick-interval", time.Minute, "scheduler tick interval; must be positive")
+	statusFile := fs.String("status-file", "data/daemon-status.json", "daemon health status JSON file")
+	schedulerEngineName := fs.String("scheduler-engine", schedulerEngineDefault(), "scheduler engine: static or openai-compatible")
+	llmModel := fs.String("llm-model", llmModelDefault(), "OpenAI-compatible model for daemon LLM-backed components")
+	matrixMode := fs.String("matrix", "auto", "Matrix adapter mode: auto, on, or off")
+	homeserver := fs.String("homeserver", os.Getenv("OPENWHISKER_MATRIX_HOMESERVER"), "Matrix homeserver URL")
+	accessToken := fs.String("access-token", os.Getenv("OPENWHISKER_MATRIX_ACCESS_TOKEN"), "Matrix access token")
+	password := fs.String("password", os.Getenv("OPENWHISKER_MATRIX_PASSWORD"), "Matrix bot password used to login when no access token is configured")
+	userID := fs.String("user-id", os.Getenv("OPENWHISKER_MATRIX_USER_ID"), "Matrix bot user id")
+	roomID := fs.String("room-id", os.Getenv("OPENWHISKER_MATRIX_ROOM_ID"), "Matrix room id")
+	sinceFile := fs.String("since-file", "data/matrix-since.token", "Matrix sync token state file")
+	sessionFile := fs.String("session-file", matrixSessionFileDefault(), "Matrix login session cache file")
+	schedulerAccessToken := fs.String("scheduler-access-token", os.Getenv("OPENWHISKER_MATRIX_SCHEDULER_ACCESS_TOKEN"), "Matrix Scheduler Bot access token")
+	schedulerPassword := fs.String("scheduler-password", os.Getenv("OPENWHISKER_MATRIX_SCHEDULER_PASSWORD"), "Matrix Scheduler Bot password used to login when no scheduler access token is configured")
+	schedulerUserID := fs.String("scheduler-user-id", os.Getenv("OPENWHISKER_MATRIX_SCHEDULER_USER_ID"), "Matrix Scheduler Bot user id")
+	schedulerSessionFile := fs.String("scheduler-session-file", matrixSchedulerSessionFileDefault(), "Matrix Scheduler Bot login session cache file")
+	timeout := fs.Duration("timeout", 30*time.Second, "Matrix sync timeout")
+	idleDelay := fs.Duration("idle-delay", time.Second, "delay between successful Matrix sync loops")
+	errorDelay := fs.Duration("error-delay", 5*time.Second, "delay after Matrix sync errors")
+	organizerName := fs.String("organizer", organizerDefault(), "raw organizer: deterministic or openai-compatible")
+	contextMode := fs.String("context-mode", contextModeDefault(), "raw organizer context mode: minimal or vault-rules")
+	intentRouter := fs.String("intent-router", intentRouterDefault(), "intent router mode: hybrid, rules, or off")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: openwhisker daemon [--db data/openwhisker.db] [--vault testdata/vault] [--vault-profile generic|knowledge-vault] [--scheduler-tick-interval 1m] [--scheduler-engine static|openai-compatible] [--matrix auto|on|off]")
+	}
+	if *schedulerTickInterval <= 0 {
+		return fmt.Errorf("--scheduler-tick-interval must be positive")
+	}
+	mode := strings.ToLower(strings.TrimSpace(*matrixMode))
+	if mode == "" {
+		mode = "auto"
+	}
+	if mode != "auto" && mode != "on" && mode != "off" {
+		return fmt.Errorf("--matrix must be auto, on, or off")
+	}
+	store, err := storage.Open(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	conventions, err := vaultConventionsForProfile(*vaultProfileName)
+	if err != nil {
+		return err
+	}
+	vaultProfile := profile.NewConfiguredVaultProfile(conventions)
+	schedulerEngine, err := schedulerEngineForName(*schedulerEngineName, *llmModel)
+	if err != nil {
+		return err
+	}
+	schedulerService := core.NewSchedulerServiceWithOptions(store, *vaultRoot, core.SchedulerServiceOptions{
+		VaultProfile: vaultProfile,
+		Runner: schedulerpkg.StaticSkillRunner{
+			VaultRoot:            *vaultRoot,
+			ExternalInfoAdapters: schedulerExternalInfoAdapters(),
+			Engine:               schedulerEngine,
+		},
+	})
+	matrixEnabled := daemonMatrixEnabled(mode, *homeserver, *roomID, *accessToken, *password, *userID)
+	if mode == "on" && !matrixEnabled {
+		return fmt.Errorf("Matrix configuration is incomplete")
+	}
+	var matrixAdapter *matrix.Adapter
+	if matrixEnabled {
+		organizer, err := rawOrganizerForName(*organizerName, *llmModel)
+		if err != nil {
+			return err
+		}
+		intentClassifier, err := intentClassifierForMode(*intentRouter)
+		if err != nil {
+			return err
+		}
+		adapterService := core.NewAdapterServiceWithOptions(store, *vaultRoot, core.AdapterServiceOptions{
+			IntentRouterMode: *intentRouter,
+			IntentClassifier: intentClassifier,
+			PlanOptions: core.PlanServiceOptions{
+				Organizer:   organizer,
+				ContextMode: *contextMode,
+				Conventions: conventions,
+			},
+		})
+		matrixClient, resolvedUserID, err := matrixClientForAuth(context.Background(), matrixAuthOptions{
+			Homeserver:  *homeserver,
+			AccessToken: *accessToken,
+			UserID:      *userID,
+			Password:    *password,
+			SessionFile: *sessionFile,
+		})
+		if err != nil {
+			return err
+		}
+		deliveryClients, ignoredUserIDs, err := matrixDeliveryConfig(context.Background(), matrixClient, resolvedUserID, matrixAuthOptions{
+			Homeserver:  *homeserver,
+			AccessToken: *schedulerAccessToken,
+			UserID:      *schedulerUserID,
+			Password:    *schedulerPassword,
+			SessionFile: *schedulerSessionFile,
+		})
+		if err != nil {
+			return err
+		}
+		matrixAdapter = &matrix.Adapter{
+			Core:            adapterService,
+			Client:          matrixClient,
+			UserID:          resolvedUserID,
+			RoomID:          *roomID,
+			DeliveryClients: deliveryClients,
+			IgnoredUserIDs:  ignoredUserIDs,
+		}
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	startedAt := time.Now().UTC()
+	writeDaemonStatus(*statusFile, daemonStatus{
+		PID:                   os.Getpid(),
+		StartedAt:             startedAt,
+		UpdatedAt:             startedAt,
+		SchedulerTickInterval: schedulerTickInterval.String(),
+		MatrixEnabled:         matrixAdapter != nil,
+		State:                 "starting",
+	})
+	errCh := make(chan error, 2)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runSchedulerDaemonLoop(ctx, schedulerService, matrixAdapter, *roomID, *schedulerTickInterval, *statusFile, startedAt, stderr)
+	}()
+	if matrixAdapter != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := runMatrixDaemonLoop(ctx, matrixAdapter, matrixDaemonOptions{
+				SinceFile:  *sinceFile,
+				Timeout:    *timeout,
+				IdleDelay:  *idleDelay,
+				ErrorDelay: *errorDelay,
+				Logger:     stderr,
+			}); err != nil {
+				errCh <- err
+			}
+		}()
+	}
+	logMatrixDaemon(stderr, "openwhisker daemon started scheduler_interval=%s matrix=%t", schedulerTickInterval.String(), matrixAdapter != nil)
+	select {
+	case err := <-errCh:
+		stop()
+		wg.Wait()
+		return err
+	case <-ctx.Done():
+		wg.Wait()
+		return nil
+	}
+}
+
+type daemonStatus struct {
+	PID                   int       `json:"pid"`
+	StartedAt             time.Time `json:"started_at"`
+	UpdatedAt             time.Time `json:"updated_at"`
+	SchedulerTickInterval string    `json:"scheduler_tick_interval"`
+	MatrixEnabled         bool      `json:"matrix_enabled"`
+	State                 string    `json:"state"`
+	LastTickAt            time.Time `json:"last_tick_at,omitempty"`
+	LastTickError         string    `json:"last_tick_error,omitempty"`
+	LastTickCompleted     int       `json:"last_tick_completed,omitempty"`
+	LastTickFailed        int       `json:"last_tick_failed,omitempty"`
+	LastTickSkipped       int       `json:"last_tick_skipped,omitempty"`
+}
+
+func runDaemonStatus(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("daemon status", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	statusFile := fs.String("status-file", "data/daemon-status.json", "daemon health status JSON file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: openwhisker daemon status [--status-file data/daemon-status.json]")
+	}
+	data, err := os.ReadFile(*statusFile)
+	if err != nil {
+		return err
+	}
+	var status daemonStatus
+	if err := json.Unmarshal(data, &status); err != nil {
+		return err
+	}
+	type daemonStatusResult struct {
+		daemonStatus
+		PIDRunning bool `json:"pid_running"`
+	}
+	return printJSON(stdout, daemonStatusResult{
+		daemonStatus: status,
+		PIDRunning:   daemonPIDRunning(status.PID),
+	})
+}
+
+func daemonPIDRunning(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	return syscall.Kill(pid, 0) == nil
+}
+
+func writeDaemonStatus(path string, status daemonStatus) {
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	data, err := json.MarshalIndent(status, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+func daemonMatrixEnabled(mode, homeserver, roomID, accessToken, password, userID string) bool {
+	if mode == "off" {
+		return false
+	}
+	if strings.TrimSpace(homeserver) == "" || strings.TrimSpace(roomID) == "" {
+		return false
+	}
+	if strings.TrimSpace(accessToken) != "" {
+		return true
+	}
+	return strings.TrimSpace(password) != "" && strings.TrimSpace(userID) != ""
+}
+
+func runSchedulerDaemonLoop(ctx context.Context, service core.SchedulerService, adapter *matrix.Adapter, roomID string, interval time.Duration, statusFile string, startedAt time.Time, logger io.Writer) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		result, err := runSchedulerDaemonTick(ctx, service, adapter, roomID, logger)
+		status := daemonStatus{
+			PID:                   os.Getpid(),
+			StartedAt:             startedAt,
+			UpdatedAt:             time.Now().UTC(),
+			SchedulerTickInterval: interval.String(),
+			MatrixEnabled:         adapter != nil,
+			State:                 "running",
+			LastTickAt:            time.Now().UTC(),
+			LastTickCompleted:     result.Completed,
+			LastTickFailed:        result.Failed,
+			LastTickSkipped:       result.Skipped,
+		}
+		if err != nil {
+			status.LastTickError = err.Error()
+		}
+		writeDaemonStatus(statusFile, status)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func runSchedulerDaemonTick(ctx context.Context, service core.SchedulerService, adapter *matrix.Adapter, roomID string, logger io.Writer) (core.SchedulerTickResult, error) {
+	result, err := service.Tick(ctx)
+	if err != nil {
+		logMatrixDaemon(logger, "scheduler tick error: %v", err)
+		return result, err
+	}
+	logMatrixDaemon(logger, "scheduler tick completed enabled=%t discovered=%d due=%d completed=%d failed=%d skipped=%d",
+		result.Enabled, result.Discovered, result.Due, result.Completed, result.Failed, result.Skipped)
+	if adapter != nil {
+		if err := adapter.DeliverOutbox(ctx, roomID); err != nil {
+			logMatrixDaemon(logger, "scheduler outbox delivery error: %v", err)
+			return result, err
+		}
+	}
+	return result, nil
 }
 
 type matrixPoller interface {
@@ -739,6 +1277,46 @@ func matrixClientForAuth(ctx context.Context, opts matrixAuthOptions) (matrix.Cl
 	return client, resolvedUserID, nil
 }
 
+func matrixDeliveryConfig(ctx context.Context, knowledgeClient matrix.Client, knowledgeUserID string, schedulerAuth matrixAuthOptions) (map[string]matrix.Client, []string, error) {
+	deliveryClients := map[string]matrix.Client{
+		model.OutboxActorKnowledge: knowledgeClient,
+	}
+	ignoredUserIDs := compactStrings(knowledgeUserID)
+	if !matrixAuthConfigured(schedulerAuth) {
+		return deliveryClients, ignoredUserIDs, nil
+	}
+	if strings.TrimSpace(schedulerAuth.UserID) == "" {
+		return nil, nil, fmt.Errorf("OPENWHISKER_MATRIX_SCHEDULER_USER_ID is required when scheduler Matrix bot credentials are configured")
+	}
+	schedulerClient, schedulerUserID, err := matrixClientForAuth(ctx, schedulerAuth)
+	if err != nil {
+		return nil, nil, fmt.Errorf("scheduler matrix auth: %w", err)
+	}
+	deliveryClients[model.OutboxActorScheduler] = schedulerClient
+	ignoredUserIDs = append(ignoredUserIDs, compactStrings(schedulerUserID)...)
+	return deliveryClients, ignoredUserIDs, nil
+}
+
+func matrixAuthConfigured(opts matrixAuthOptions) bool {
+	return strings.TrimSpace(opts.AccessToken) != "" ||
+		strings.TrimSpace(opts.Password) != "" ||
+		strings.TrimSpace(opts.UserID) != ""
+}
+
+func compactStrings(values ...string) []string {
+	var compacted []string
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		compacted = append(compacted, value)
+	}
+	return compacted
+}
+
 func matrixSessionMatches(session matrixSession, homeserver, userID string) bool {
 	if strings.TrimSpace(session.AccessToken) == "" {
 		return false
@@ -808,6 +1386,13 @@ func matrixSessionFileDefault() string {
 	return "data/matrix-session.json"
 }
 
+func matrixSchedulerSessionFileDefault() string {
+	if value := strings.TrimSpace(os.Getenv("OPENWHISKER_MATRIX_SCHEDULER_SESSION_FILE")); value != "" {
+		return value
+	}
+	return "data/matrix-scheduler-session.json"
+}
+
 func readMatrixSince(path string) (string, error) {
 	if strings.TrimSpace(path) == "" {
 		return "", nil
@@ -875,6 +1460,8 @@ func printJSON(stdout io.Writer, value any) error {
 
 func printUsage(stderr io.Writer) {
 	fmt.Fprintln(stderr, `usage:
+  openwhisker daemon [--db data/openwhisker.db] [--vault testdata/vault] [--vault-profile generic|knowledge-vault] [--scheduler-tick-interval 1m] [--scheduler-engine static|openai-compatible] [--matrix auto|on|off]
+  openwhisker daemon status [--status-file data/daemon-status.json]
   openwhisker ingest raw [--text TEXT] [--db data/openwhisker.db] [--vault testdata/vault] [--vault-profile generic|knowledge-vault]
   openwhisker organize last [--db data/openwhisker.db] [--vault testdata/vault] [--organizer deterministic|openai-compatible] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault] [--llm-model MODEL]
   openwhisker organize preview-context [--db data/openwhisker.db] [--vault testdata/vault] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault]
@@ -886,8 +1473,14 @@ func printUsage(stderr io.Writer) {
   openwhisker vault sync-status [--sync=off|on] [--ob-bin ob] [--db data/openwhisker.db] [--vault testdata/vault]
   openwhisker vault sync [--sync=off|on] [--ob-bin ob] [--db data/openwhisker.db] [--vault testdata/vault]
   openwhisker jobs show [--db data/openwhisker.db] <job_id>
-  openwhisker matrix poll-once [--db data/openwhisker.db] [--vault testdata/vault] [--homeserver URL] [--access-token TOKEN] [--password PASSWORD] [--user-id USER] [--room-id ROOM] [--session-file data/matrix-session.json] [--since TOKEN] [--intent-router hybrid|rules|off] [--organizer deterministic|openai-compatible] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault] [--llm-model MODEL]
-  openwhisker matrix daemon [--db data/openwhisker.db] [--vault testdata/vault] [--homeserver URL] [--access-token TOKEN] [--password PASSWORD] [--user-id USER] [--room-id ROOM] [--since-file data/matrix-since.token] [--session-file data/matrix-session.json] [--intent-router hybrid|rules|off] [--organizer deterministic|openai-compatible] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault] [--llm-model MODEL]`)
+  openwhisker scheduler tick [--db data/openwhisker.db] [--vault testdata/vault] [--vault-profile generic|knowledge-vault] [--engine static|openai-compatible] [--llm-model MODEL]
+  openwhisker scheduler status [--db data/openwhisker.db] [--vault testdata/vault] [--vault-profile generic|knowledge-vault] [--limit 10]
+  openwhisker scheduler runs [--db data/openwhisker.db] [--limit 20]
+  openwhisker scheduler schedules list [--db data/openwhisker.db] [--vault testdata/vault] [--vault-profile generic|knowledge-vault]
+  openwhisker scheduler schedules enable|disable [--db data/openwhisker.db] [--vault testdata/vault] [--vault-profile generic|knowledge-vault] <schedule_id>
+  openwhisker scheduler accept [--db data/openwhisker.db] [--vault testdata/vault] [--vault-profile generic|knowledge-vault] [--item 1] <scheduler_run_id>
+  openwhisker matrix poll-once [--db data/openwhisker.db] [--vault testdata/vault] [--homeserver URL] [--access-token TOKEN] [--password PASSWORD] [--user-id USER] [--room-id ROOM] [--session-file data/matrix-session.json] [--scheduler-access-token TOKEN] [--scheduler-password PASSWORD] [--scheduler-user-id USER] [--scheduler-session-file data/matrix-scheduler-session.json] [--since TOKEN] [--intent-router hybrid|rules|off] [--organizer deterministic|openai-compatible] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault] [--llm-model MODEL]
+  openwhisker matrix daemon [--db data/openwhisker.db] [--vault testdata/vault] [--homeserver URL] [--access-token TOKEN] [--password PASSWORD] [--user-id USER] [--room-id ROOM] [--since-file data/matrix-since.token] [--session-file data/matrix-session.json] [--scheduler-access-token TOKEN] [--scheduler-password PASSWORD] [--scheduler-user-id USER] [--scheduler-session-file data/matrix-scheduler-session.json] [--intent-router hybrid|rules|off] [--organizer deterministic|openai-compatible] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault] [--llm-model MODEL]`)
 }
 
 func defaultOBBin() string {
@@ -945,6 +1538,13 @@ func organizerDefault() string {
 		return value
 	}
 	return "deterministic"
+}
+
+func schedulerEngineDefault() string {
+	if value := strings.TrimSpace(os.Getenv("OPENWHISKER_SCHEDULER_ENGINE")); value != "" {
+		return value
+	}
+	return "static"
 }
 
 func contextModeDefault() string {
@@ -1042,6 +1642,35 @@ func knowledgeExpanderForName(name, llmModel string) (core.KnowledgeExpander, er
 		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported expander %q; want deterministic or openai-compatible", name)
+	}
+}
+
+func schedulerEngineForName(name, llmModel string) (schedulerpkg.SkillEngine, error) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "", "static":
+		return nil, nil
+	case "openai-compatible", "compatible", "openai":
+		apiKey := llmAPIKey()
+		if apiKey == "" {
+			return nil, fmt.Errorf("OPENWHISKER_LLM_API_KEY is required for --engine=openai-compatible")
+		}
+		return agent.OpenAISchedulerEngine{
+			Client: agent.OpenAIClient{
+				APIKey:       apiKey,
+				BaseURL:      llmBaseURL(),
+				Model:        llmModel,
+				Organization: coalesce(os.Getenv("OPENWHISKER_LLM_ORG_ID"), os.Getenv("OPENAI_ORG_ID")),
+				Project:      coalesce(os.Getenv("OPENWHISKER_LLM_PROJECT_ID"), os.Getenv("OPENAI_PROJECT_ID")),
+			},
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported scheduler engine %q; want static or openai-compatible", name)
+	}
+}
+
+func schedulerExternalInfoAdapters() map[string]schedulerpkg.ExternalInfoAdapter {
+	return map[string]schedulerpkg.ExternalInfoAdapter{
+		"rss": schedulerpkg.RSSExternalInfoAdapter{},
 	}
 }
 

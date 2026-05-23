@@ -1,0 +1,404 @@
+package scheduler
+
+import (
+	"context"
+	"encoding/json"
+	"encoding/xml"
+	"errors"
+	"fmt"
+	"html"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const (
+	rssDefaultItemLimit   = 10
+	rssMaxItemLimit       = 50
+	rssMaxFeeds           = 10
+	rssMaxResponseBytes   = 1024 * 1024
+	rssHTTPClientTimeout  = 10 * time.Second
+	rssMaxTitleRunes      = 300
+	rssMaxLinkRunes       = 1000
+	rssMaxSummaryRunes    = 4000
+	rssMaxTimestampRunes  = 128
+	rssMaxFeedTitleRunes  = 300
+	rssMaxFeedLinkRunes   = 1000
+	rssMaxFeedSummaryRuns = 1000
+)
+
+type RSSExternalInfoAdapter struct {
+	HTTPClient *http.Client
+}
+
+type rssAdapterConfig struct {
+	FeedURLs  []string
+	ItemLimit int
+}
+
+type rssPayload struct {
+	Feeds     []rssFeedSnapshot `json:"feeds"`
+	FeedCount int               `json:"feed_count"`
+	ItemCount int               `json:"item_count"`
+	Truncated bool              `json:"truncated,omitempty"`
+}
+
+type rssFeedSnapshot struct {
+	URL       string        `json:"url"`
+	Title     string        `json:"title,omitempty"`
+	Link      string        `json:"link,omitempty"`
+	Summary   string        `json:"summary,omitempty"`
+	Items     []rssItemInfo `json:"items"`
+	Truncated bool          `json:"truncated,omitempty"`
+}
+
+type rssItemInfo struct {
+	Title     string `json:"title,omitempty"`
+	Link      string `json:"link,omitempty"`
+	Summary   string `json:"summary,omitempty"`
+	Published string `json:"published,omitempty"`
+	ID        string `json:"id,omitempty"`
+}
+
+type rssDocument struct {
+	XMLName xml.Name `xml:"rss"`
+	Channel struct {
+		Title       string       `xml:"title"`
+		Link        string       `xml:"link"`
+		Description string       `xml:"description"`
+		Items       []rssXMLItem `xml:"item"`
+	} `xml:"channel"`
+}
+
+type rssXMLItem struct {
+	Title       string `xml:"title"`
+	Link        string `xml:"link"`
+	Description string `xml:"description"`
+	Content     string `xml:"encoded"`
+	PubDate     string `xml:"pubDate"`
+	GUID        string `xml:"guid"`
+}
+
+type atomDocument struct {
+	XMLName xml.Name       `xml:"feed"`
+	Title   string         `xml:"title"`
+	Links   []atomXMLLink  `xml:"link"`
+	Updated string         `xml:"updated"`
+	Entries []atomXMLEntry `xml:"entry"`
+}
+
+type atomXMLEntry struct {
+	Title     string        `xml:"title"`
+	Links     []atomXMLLink `xml:"link"`
+	Summary   string        `xml:"summary"`
+	Content   string        `xml:"content"`
+	Published string        `xml:"published"`
+	Updated   string        `xml:"updated"`
+	ID        string        `xml:"id"`
+}
+
+type atomXMLLink struct {
+	Href string `xml:"href,attr"`
+	Rel  string `xml:"rel,attr"`
+	Text string `xml:",chardata"`
+}
+
+func (a RSSExternalInfoAdapter) ReadInfo(ctx context.Context, req ExternalInfoRequest) (ExternalInfoItem, error) {
+	cfg, err := rssConfigFromSchedule(req.Schedule)
+	if err != nil {
+		return ExternalInfoItem{}, err
+	}
+	client := a.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: rssHTTPClientTimeout}
+	}
+	payload := rssPayload{}
+	for i, feedURL := range cfg.FeedURLs {
+		if i >= rssMaxFeeds {
+			payload.Truncated = true
+			break
+		}
+		feed, err := fetchRSSFeed(ctx, client, feedURL, cfg.ItemLimit)
+		if err != nil {
+			return ExternalInfoItem{}, fmt.Errorf("feed %d: %w", i+1, err)
+		}
+		payload.ItemCount += len(feed.Items)
+		payload.Feeds = append(payload.Feeds, feed)
+	}
+	payload.FeedCount = len(payload.Feeds)
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return ExternalInfoItem{}, err
+	}
+	return ExternalInfoItem{
+		Source:    req.Source,
+		Summary:   fmt.Sprintf("Fetched %d RSS/Atom feed(s), %d item(s).", payload.FeedCount, payload.ItemCount),
+		Payload:   encoded,
+		FetchedAt: req.Now.UTC(),
+	}, nil
+}
+
+func rssConfigFromSchedule(schedule ScheduledSkill) (rssAdapterConfig, error) {
+	var raw map[string]string
+	if len(schedule.SkillConfigJSON) > 0 {
+		if err := json.Unmarshal(schedule.SkillConfigJSON, &raw); err != nil {
+			return rssAdapterConfig{}, fmt.Errorf("skill_config must be an object: %w", err)
+		}
+	}
+	feedURLs := splitFeedURLs(firstNonBlank(raw["feed_urls"], raw["feed_url"]))
+	if len(feedURLs) == 0 {
+		return rssAdapterConfig{}, errors.New("skill_config.feed_urls is required for rss external info")
+	}
+	if len(feedURLs) > rssMaxFeeds {
+		feedURLs = feedURLs[:rssMaxFeeds]
+	}
+	itemLimit := rssDefaultItemLimit
+	if value := strings.TrimSpace(raw["feed_limit"]); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed <= 0 {
+			return rssAdapterConfig{}, errors.New("skill_config.feed_limit must be a positive integer")
+		}
+		itemLimit = parsed
+	}
+	if itemLimit > rssMaxItemLimit {
+		itemLimit = rssMaxItemLimit
+	}
+	for _, feedURL := range feedURLs {
+		if err := validateFeedURL(feedURL); err != nil {
+			return rssAdapterConfig{}, err
+		}
+	}
+	return rssAdapterConfig{FeedURLs: feedURLs, ItemLimit: itemLimit}, nil
+}
+
+func SanitizedSkillConfigJSON(schedule ScheduledSkill) json.RawMessage {
+	if len(schedule.SkillConfigJSON) == 0 || !json.Valid(schedule.SkillConfigJSON) {
+		return json.RawMessage(`{}`)
+	}
+	var values map[string]string
+	if err := json.Unmarshal(schedule.SkillConfigJSON, &values); err != nil {
+		return schedule.SkillConfigJSON
+	}
+	for key, value := range values {
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "feed_url", "feed_urls":
+			values[key] = strings.Join(sanitizedFeedURLList(value), ",")
+		default:
+			if isSensitiveConfigKey(key) {
+				values[key] = "<redacted>"
+			}
+		}
+	}
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return encoded
+}
+
+func fetchRSSFeed(ctx context.Context, client *http.Client, feedURL string, itemLimit int) (rssFeedSnapshot, error) {
+	parsed, err := url.Parse(feedURL)
+	if err != nil {
+		return rssFeedSnapshot{}, errors.New("invalid feed URL")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, nil)
+	if err != nil {
+		return rssFeedSnapshot{}, errors.New("invalid feed request")
+	}
+	req.Header.Set("Accept", "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.1")
+	req.Header.Set("User-Agent", "OpenWhisker scheduler rss adapter")
+	resp, err := client.Do(req)
+	if err != nil {
+		return rssFeedSnapshot{}, fmt.Errorf("request %s failed: %w", parsed.Host, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return rssFeedSnapshot{}, fmt.Errorf("request %s returned HTTP %d", parsed.Host, resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, rssMaxResponseBytes+1))
+	if err != nil {
+		return rssFeedSnapshot{}, fmt.Errorf("read %s response: %w", parsed.Host, err)
+	}
+	if len(body) > rssMaxResponseBytes {
+		return rssFeedSnapshot{}, fmt.Errorf("response from %s exceeds size limit", parsed.Host)
+	}
+	return parseFeedSnapshot(body, feedURL, itemLimit)
+}
+
+func parseFeedSnapshot(body []byte, feedURL string, itemLimit int) (rssFeedSnapshot, error) {
+	var probe struct {
+		XMLName xml.Name
+	}
+	if err := xml.Unmarshal(body, &probe); err != nil {
+		return rssFeedSnapshot{}, fmt.Errorf("parse feed XML: %w", err)
+	}
+	switch strings.ToLower(probe.XMLName.Local) {
+	case "rss":
+		var doc rssDocument
+		if err := xml.Unmarshal(body, &doc); err != nil {
+			return rssFeedSnapshot{}, fmt.Errorf("parse RSS feed: %w", err)
+		}
+		return rssSnapshotFromDocument(feedURL, doc, itemLimit), nil
+	case "feed":
+		var doc atomDocument
+		if err := xml.Unmarshal(body, &doc); err != nil {
+			return rssFeedSnapshot{}, fmt.Errorf("parse Atom feed: %w", err)
+		}
+		return atomSnapshotFromDocument(feedURL, doc, itemLimit), nil
+	default:
+		return rssFeedSnapshot{}, fmt.Errorf("unsupported feed XML root %q", probe.XMLName.Local)
+	}
+}
+
+func rssSnapshotFromDocument(feedURL string, doc rssDocument, itemLimit int) rssFeedSnapshot {
+	items := make([]rssItemInfo, 0, minInt(len(doc.Channel.Items), itemLimit))
+	for i, item := range doc.Channel.Items {
+		if i >= itemLimit {
+			break
+		}
+		summary := firstNonBlank(item.Description, item.Content)
+		items = append(items, rssItemInfo{
+			Title:     cleanRSSField(item.Title, rssMaxTitleRunes),
+			Link:      cleanRSSField(item.Link, rssMaxLinkRunes),
+			Summary:   cleanRSSField(summary, rssMaxSummaryRunes),
+			Published: cleanRSSField(item.PubDate, rssMaxTimestampRunes),
+			ID:        cleanRSSField(item.GUID, rssMaxLinkRunes),
+		})
+	}
+	return rssFeedSnapshot{
+		URL:       safeFeedURLLabel(feedURL),
+		Title:     cleanRSSField(doc.Channel.Title, rssMaxFeedTitleRunes),
+		Link:      cleanRSSField(doc.Channel.Link, rssMaxFeedLinkRunes),
+		Summary:   cleanRSSField(doc.Channel.Description, rssMaxFeedSummaryRuns),
+		Items:     items,
+		Truncated: len(doc.Channel.Items) > itemLimit,
+	}
+}
+
+func atomSnapshotFromDocument(feedURL string, doc atomDocument, itemLimit int) rssFeedSnapshot {
+	items := make([]rssItemInfo, 0, minInt(len(doc.Entries), itemLimit))
+	for i, entry := range doc.Entries {
+		if i >= itemLimit {
+			break
+		}
+		summary := firstNonBlank(entry.Summary, entry.Content)
+		published := firstNonBlank(entry.Published, entry.Updated)
+		items = append(items, rssItemInfo{
+			Title:     cleanRSSField(entry.Title, rssMaxTitleRunes),
+			Link:      cleanRSSField(atomLink(entry.Links), rssMaxLinkRunes),
+			Summary:   cleanRSSField(summary, rssMaxSummaryRunes),
+			Published: cleanRSSField(published, rssMaxTimestampRunes),
+			ID:        cleanRSSField(entry.ID, rssMaxLinkRunes),
+		})
+	}
+	return rssFeedSnapshot{
+		URL:       safeFeedURLLabel(feedURL),
+		Title:     cleanRSSField(doc.Title, rssMaxFeedTitleRunes),
+		Link:      cleanRSSField(atomLink(doc.Links), rssMaxFeedLinkRunes),
+		Items:     items,
+		Truncated: len(doc.Entries) > itemLimit,
+	}
+}
+
+func validateFeedURL(value string) error {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Host == "" {
+		return errors.New("feed URL must be absolute")
+	}
+	if parsed.User != nil {
+		return errors.New("feed URL userinfo is not allowed")
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "http", "https":
+		return nil
+	default:
+		return errors.New("feed URL scheme must be http or https")
+	}
+}
+
+func splitFeedURLs(value string) []string {
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r'
+	})
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func safeFeedURLLabel(value string) string {
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return ""
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
+func sanitizedFeedURLList(value string) []string {
+	rawURLs := splitFeedURLs(value)
+	out := make([]string, 0, len(rawURLs))
+	for _, rawURL := range rawURLs {
+		label := safeFeedURLLabel(rawURL)
+		if label != "" {
+			out = append(out, label)
+		}
+	}
+	return out
+}
+
+func isSensitiveConfigKey(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	for _, marker := range []string{"token", "secret", "password", "api_key", "apikey", "authorization", "auth"} {
+		if strings.Contains(key, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func atomLink(links []atomXMLLink) string {
+	for _, link := range links {
+		if strings.TrimSpace(link.Rel) == "" || strings.EqualFold(strings.TrimSpace(link.Rel), "alternate") {
+			return firstNonBlank(link.Href, link.Text)
+		}
+	}
+	if len(links) > 0 {
+		return firstNonBlank(links[0].Href, links[0].Text)
+	}
+	return ""
+}
+
+func cleanRSSField(value string, maxRunes int) string {
+	value = html.UnescapeString(strings.TrimSpace(value))
+	value = strings.Join(strings.Fields(value), " ")
+	runes := []rune(value)
+	if len(runes) > maxRunes {
+		value = string(runes[:maxRunes])
+	}
+	return value
+}
+
+func firstNonBlank(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}

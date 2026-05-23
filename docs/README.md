@@ -9,10 +9,11 @@
 3. [项目决策](project-decisions.md)：跨阶段仍然有效的架构决策。
 4. [v1 设计回顾](architecture/openwhisker-v1-review.md)：Phase 1–4 完整设计弧线的收官回顾，动机、取舍与教训。
 5. [设计哲学](architecture/design-philosophy.md)：完整 VaultPlan / VaultExecutor 方向。
-6. Phase 文档：[1 最小切片](phases/phase-1-minimal-slice.md) · [2 审批与 Diff](phases/phase-2-approval-diff.md) · [3 Sync-Aware Approval Execution](phases/phase-3-headless-sync-executor.md) · [4 Wiki Agent Workflow](phases/phase-4-wiki-agent-workflow.md) · [4B.5 IM Intent Router](phases/phase-4-im-intent-router.md)。
+6. Phase 文档：[1 最小切片](phases/phase-1-minimal-slice.md) · [2 审批与 Diff](phases/phase-2-approval-diff.md) · [3 Sync-Aware Approval Execution](phases/phase-3-headless-sync-executor.md) · [4 Wiki Agent Workflow](phases/phase-4-wiki-agent-workflow.md) · [4B.5 IM Intent Router](phases/phase-4-im-intent-router.md) · [5 Read-only Skill Scheduler](phases/phase-5-read-only-skill-scheduler.md)。
 7. Schema / Contract：[Proposal Note](architecture/proposal-note-schema.md) · [Knowledge Draft](architecture/knowledge-draft-schema.md) · [Knowledge Expander 模型](architecture/knowledge-expander-model-contract.md) · [Intent Router 模型](architecture/intent-router-model-contract.md) · [IM Intent Router](architecture/im-intent-router.md) · [Capture Bucket](architecture/capture-bucket.md)。
 8. 适配与外部对接：[Matrix Private IM](adapters/matrix-private-im.md) · [Vault Profile Analyzer Skill](skills/vault-profile-analyzer/SKILL.md)。
-9. 部署：[部署指南](deployment/README.md)，OpenWhisker daemon 的构建、配置与原生服务运行。
+9. 启动草案：[Android Matrix Console STARTUP](startup/android-matrix-console.md)，基于 Matrix 的小平板个人知识收件台方向；初版设计工具 prompt 见 [Android Matrix Console Design Prompt](startup/android-matrix-console-design-prompt.md)，模块调整 prompt 见 [Android Matrix Console UI Diff Prompt](startup/android-matrix-console-ui-diff-prompt.md)。
+10. 部署：[部署指南](deployment/README.md)，OpenWhisker daemon 的构建、配置与原生服务运行。
 
 延后议题：[CubeSandbox 运行沙箱评估](architecture/cubesandbox-runtime-sandbox-evaluation.md) 仅在 sandbox 课题恢复时阅读，不在主线路径上。
 
@@ -41,10 +42,17 @@ docs/
     phase-4-wiki-agent-workflow.md
     phase-4-im-intent-router.md
     phase-4-matrix-test-feedback.md
+    phase-5-read-only-skill-scheduler.md
   adapters/
     matrix-private-im.md
   deployment/
     README.md
+    launchd.md
+    openwhisker.daemon.plist.example
+  startup/
+    android-matrix-console.md
+    android-matrix-console-design-prompt.md
+    android-matrix-console-ui-diff-prompt.md
   skills/
     vault-profile-analyzer/
       SKILL.md
@@ -61,4 +69,5 @@ docs/
 - `project-decisions.md` 只保留跨阶段仍然有效的决策，不再为早期默认值维护分散 ADR。
 - `adapters/` 放具体入口或外部系统适配文档。
 - `deployment/` 放部署引导；含真实主机名 / 密钥 / 拓扑的关键运作文档不进 git，落仓库内 `deploy/local/`。
+- `startup/` 放尚未正式排期但可作为未来工作入口的启动草案。
 - 已被阶段文档或项目决策吸收的旧文档应收敛，不保留重复入口。

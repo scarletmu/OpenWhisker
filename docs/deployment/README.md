@@ -16,13 +16,13 @@ OpenWhisker v1 以一个常驻进程部署在本地常开设备上，由系统�
   launchd / systemd
         │ 常驻拉起、崩溃重启
         ▼
-  openwhisker matrix daemon  ←—— client-server API ——→  [Matrix homeserver]
-        │ direct_fs 写入
-        ├── data/    运行状态（SQLite / Matrix session / since-token）
+  openwhisker daemon  ←—— 可选 Matrix client-server API ——→  [Matrix homeserver]
+        │ scheduler tick / outbox delivery / 可选 Matrix poll
+        ├── data/    运行状态（SQLite / daemon status / Matrix session / since-token）
         └── vault/   目标 Obsidian vault
 ```
 
-进程就是 `openwhisker matrix daemon` —— 一个轮询 Matrix `/sync`、把消息走完 intent → plan → policy → executor 链路、再通过 outbox 回发的进程。它不暴露 HTTP 端口，也没有独立的 adapter 服务进程；Matrix adapter 是 daemon 二进制内的一个模块。
+主入口是 `openwhisker daemon`。它负责 scheduler tick loop、tick 后 outbox delivery，并在 Matrix 配置存在时同时运行 Matrix `/sync` poll loop。旧的 `openwhisker matrix daemon` 保留为 Matrix adapter 调试和兼容入口，但不再是长期运行的主入口。
 
 ### 为什么是原生服务而非容器
 
@@ -74,26 +74,27 @@ daemon 启动时会从工作目录起向上查找并加载 `.env.local`：文件
   bin/openwhisker   由 make build 编译产出（或软链到构建产物）
   .env.local        填好的配置，git-ignored
   data/             运行状态，daemon 自动创建
+  logs/             stdout / stderr 日志
 ```
 
 service 文件把 `WorkingDirectory` 指向这个目录，`--db` / `--since-file` / `--session-file` 用相对 `data/` 的路径即可。
 
 ### macOS —— launchd
 
-模板：[`deploy/openwhisker.launchd.example.plist`](../../deploy/openwhisker.launchd.example.plist)。
+详细说明：[`launchd.md`](launchd.md)。
+
+模板：[`openwhisker.daemon.plist.example`](openwhisker.daemon.plist.example)。
 
 ```sh
-# 1. 拷贝模板到 git-ignored 的 deploy/local/，按真实路径填写 <...> 占位符
-cp deploy/openwhisker.launchd.example.plist deploy/local/
+# 1. 拷贝模板到用户 LaunchAgents，并按真实路径填写 <...> 占位符
+mkdir -p ~/Library/LaunchAgents
+cp docs/deployment/openwhisker.daemon.plist.example \
+   ~/Library/LaunchAgents/local.openwhisker.daemon.plist
 
 # 2. 装为当前用户的 LaunchAgent
-cp deploy/local/openwhisker.launchd.example.plist \
-   ~/Library/LaunchAgents/com.openwhisker.matrix-daemon.plist
-
-# 3. 加载并启动
 launchctl bootstrap gui/$(id -u) \
-   ~/Library/LaunchAgents/com.openwhisker.matrix-daemon.plist
-launchctl kickstart -k gui/$(id -u)/com.openwhisker.matrix-daemon
+   ~/Library/LaunchAgents/local.openwhisker.daemon.plist
+launchctl enable gui/$(id -u)/local.openwhisker.daemon
 ```
 
 用 LaunchAgent（per-user）而非 LaunchDaemon，是因为 vault 在用户 home 下、桌面 Obsidian 也跑在用户会话里，daemon 以同一用户身份运行最省事。
@@ -120,13 +121,14 @@ loginctl enable-linger "$USER"
 
 ### 进程与状态
 
-- **优雅退出**：daemon 处理 `SIGINT` / `SIGTERM`，会先保存 `next_batch` token 再退出；launchd `KeepAlive` 与 systemd `Restart=on-failure` 负责崩溃后拉起。
-- **持久化目录**：`data/` 里是 SQLite 库、Matrix session 缓存、`/sync` since-token。服务重装但保留该目录即可无缝续跑。
+- **优雅退出**：daemon 处理 `SIGINT` / `SIGTERM`；Matrix poll loop 会保存 `next_batch` token 后退出。launchd `KeepAlive` 与 systemd `Restart=on-failure` 负责崩溃后拉起。
+- **持久化目录**：`data/` 里是 SQLite 库、daemon status 文件、Matrix session 缓存、`/sync` since-token。服务重装但保留该目录即可无缝续跑。
+- **状态检查**：`openwhisker daemon status --status-file data/daemon-status.json` 检查本地状态文件和 PID；`openwhisker scheduler status` / `scheduler runs` 查看 scheduler runtime 和 run log。
 - **vault 目录**：目标 vault 以读写方式访问（OpenWhisker 要在 `Raw/Inbox/` 下写 raw note）。
 
 ## 同步形态与真实 vault
 
-daemon 通过 `direct_fs` 直接写 vault 文件，**自身不负责跨设备同步** —— `matrix daemon` 没有 `--sync` 开关。跨设备同步取决于设备拓扑，下面两种二选一，不能在同一台设备上并存：
+daemon 通过 `direct_fs` 直接写 vault 文件，**自身不负责跨设备同步** —— `openwhisker daemon` 没有 `--sync` 开关。跨设备同步取决于设备拓扑，下面两种二选一，不能在同一台设备上并存：
 
 - **桌面同步形态**：设备上同时运行桌面 Obsidian，由 Obsidian Sync 负责把 daemon 写入的文件同步到其它设备。daemon 不做额外动作。切到真实 vault 只是把 `--vault` 指向真实 vault 路径，无新增代码。
 - **Headless 同步形态**：设备上没有桌面 Obsidian，跨设备同步需要 Obsidian Headless Sync（`ob` 二进制）。`ob` 不内嵌在 daemon 里 —— 它属于交互式 `plan approve` / `vault sync` CLI 路径，不在常驻服务里。
@@ -155,7 +157,7 @@ make docker-build
 docker compose -f deploy/local/compose.yaml up -d   # 或 make docker-run
 ```
 
-容器内运行的同样是 `openwhisker matrix daemon`，挂载 `data/` 持久卷与 vault 卷。与自托管 homeserver 同栈编排时，把这个服务并入 `matrix-private-im.md` 的 Synapse / Caddy / PostgreSQL 骨架。
+容器内建议运行同样的 `openwhisker daemon`，挂载 `data/` 持久卷与 vault 卷。与自托管 homeserver 同栈编排时，把这个服务并入 `matrix-private-im.md` 的 Synapse / Caddy / PostgreSQL 骨架。
 
 ## 关键运作文档
 
@@ -165,7 +167,7 @@ docker compose -f deploy/local/compose.yaml up -d   # 或 make docker-run
 deploy/local/
   runbook.md                          真实环境部署与运维步骤
   compose.yaml                        由 openwhisker.compose.example.yaml 填实
-  openwhisker.launchd.example.plist    由对应 example 填实（macOS）
+  openwhisker.daemon.plist             由 docs/deployment/openwhisker.daemon.plist.example 填实（macOS）
   openwhisker.systemd.example.service  由对应 example 填实（Linux）
 ```
 
@@ -174,6 +176,7 @@ deploy/local/
 ## 相关文档
 
 - [Matrix Private IM 适配](../adapters/matrix-private-im.md)：homeserver / Caddy / Synapse 服务端拓扑。
+- [macOS launchd 部署](launchd.md)：OpenWhisker daemon 的用户级 LaunchAgent 模板与状态检查。
 - [设计哲学](../architecture/design-philosophy.md)：执行器、同步形态与设备拓扑约束。
 - [当前进度](../progress.md)：验证状态与已知遗留。
 - [环境变量模板](../../.env.local.example)：完整配置项清单。

@@ -153,6 +153,80 @@ func TestAdapterPollOnceDeliversPendingOutboxWithoutEvents(t *testing.T) {
 	}
 }
 
+func TestAdapterDeliversSchedulerOutboxWithSchedulerClientAndIgnoresBotSenders(t *testing.T) {
+	var sentBody string
+	var sendAuth string
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.Method {
+		case http.MethodGet:
+			return jsonResponse(`{
+				"next_batch": "next",
+				"rooms": {
+					"join": {
+						"!room:example.test": {
+							"timeline": {
+								"events": [{
+									"type": "m.room.message",
+									"event_id": "$scheduler",
+									"sender": "@scheduler:example.test",
+									"content": {"msgtype": "m.text", "body": "scheduled briefing"}
+								}]
+							}
+						}
+					}
+				}
+			}`), nil
+		case http.MethodPut:
+			sendAuth = r.Header.Get("Authorization")
+			var content MessageContent
+			if err := json.NewDecoder(r.Body).Decode(&content); err != nil {
+				t.Fatal(err)
+			}
+			sentBody = content.Body
+			return jsonResponse(`{"event_id":"$reply"}`), nil
+		default:
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+		return nil, nil
+	})}
+	core := &fakeCore{
+		outbox: []model.OutboxMessage{{
+			ID:     "out_scheduler",
+			Actor:  model.OutboxActorScheduler,
+			Kind:   model.OutboxKindResult,
+			Body:   "scheduler delivery",
+			Status: model.OutboxStatusPending,
+		}},
+	}
+	adapter := Adapter{
+		Core:   core,
+		Client: Client{Homeserver: "https://matrix.example.test", AccessToken: "knowledge-token", HTTPClient: client},
+		DeliveryClients: map[string]Client{
+			model.OutboxActorKnowledge: {Homeserver: "https://matrix.example.test", AccessToken: "knowledge-token", HTTPClient: client},
+			model.OutboxActorScheduler: {Homeserver: "https://matrix.example.test", AccessToken: "scheduler-token", HTTPClient: client},
+		},
+		UserID:         "@knowledge:example.test",
+		IgnoredUserIDs: []string{"@knowledge:example.test", "@scheduler:example.test"},
+		RoomID:         "!room:example.test",
+	}
+
+	if _, err := adapter.PollOnce(context.Background(), "", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if core.handled.Text != "" {
+		t.Fatalf("handled request = %+v, want scheduler bot event ignored", core.handled)
+	}
+	if sendAuth != "Bearer scheduler-token" {
+		t.Fatalf("send authorization = %q, want scheduler token", sendAuth)
+	}
+	if !strings.Contains(sentBody, "scheduler delivery") {
+		t.Fatalf("sent body = %q, want scheduler outbox", sentBody)
+	}
+	if core.delivered != "out_scheduler" {
+		t.Fatalf("delivered = %q, want out_scheduler", core.delivered)
+	}
+}
+
 func TestAdapterPollOnceSendsImmediateStatusResponse(t *testing.T) {
 	var sentBody string
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/scarletmu/openwhisker/internal/adapters/matrix"
 	"github.com/scarletmu/openwhisker/internal/model"
 	"github.com/scarletmu/openwhisker/internal/storage"
 )
@@ -179,6 +180,28 @@ func TestRawOrganizerForNameBuildsOpenAIOrganizer(t *testing.T) {
 	}
 }
 
+func TestSchedulerEngineForNameRequiresOpenAIKey(t *testing.T) {
+	t.Setenv("OPENWHISKER_LLM_API_KEY", "")
+	t.Setenv("OPENWHISKER_OPENAI_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	_, err := schedulerEngineForName("openai-compatible", "")
+	if err == nil || !strings.Contains(err.Error(), "OPENWHISKER_LLM_API_KEY") {
+		t.Fatalf("schedulerEngineForName error = %v, want api key error", err)
+	}
+}
+
+func TestSchedulerEngineForNameBuildsOpenAIEngine(t *testing.T) {
+	t.Setenv("OPENWHISKER_LLM_API_KEY", "test-key")
+	t.Setenv("OPENWHISKER_LLM_BASE_URL", "https://compatible.example.test/v1")
+	engine, err := schedulerEngineForName("openai-compatible", "model-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if engine == nil {
+		t.Fatal("engine is nil")
+	}
+}
+
 func TestRunOrganizePreviewContext(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "openwhisker.db")
@@ -226,6 +249,139 @@ func TestRunVaultProfilePreviewBuildsSkillBundle(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("profile preview output = %s, want %q", body, want)
 		}
+	}
+}
+
+func TestRunSchedulerTickUsesVaultProfileSchedulerDeclaration(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "openwhisker.db")
+	vaultRoot := filepath.Join(dir, "vault")
+	skillDir := filepath.Join(vaultRoot, "Scheduler", "Skills", "daily")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	schedule := `---
+id: daily
+name: Daily
+enabled: true
+cron_expr: "* * * * *"
+timezone: UTC
+delivery:
+  - outbox
+skill_config:
+  detail: normal
+---
+
+# Daily
+`
+	if err := os.WriteFile(filepath.Join(skillDir, "SCHEDULE.md"), []byte(schedule), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# Daily\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	err := run([]string{
+		"scheduler", "tick",
+		"--db", dbPath,
+		"--vault", vaultRoot,
+		"--vault-profile", "knowledge-vault",
+	}, strings.NewReader(""), &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run() error = %v, stderr = %s", err, stderr.String())
+	}
+	body := stdout.String()
+	for _, want := range []string{`"enabled": true`, `"discovered": 1`, `"completed": 1`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("scheduler tick output = %s, want %q", body, want)
+		}
+	}
+}
+
+func TestRunSchedulerTickReadsRSSHubRouteWhenProfileAllowsRSS(t *testing.T) {
+	originalTransport := http.DefaultTransport
+	http.DefaultTransport = mainRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/rsshub/example" {
+			t.Fatalf("path = %q, want RSSHub-style route", r.URL.Path)
+		}
+		return mainXMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>RSSHub Example</title>
+    <link>https://example.test/</link>
+    <description>Example feed</description>
+    <item>
+      <title>RSSHub item</title>
+      <link>https://example.test/item</link>
+      <description>Item summary</description>
+    </item>
+  </channel>
+</rss>`), nil
+	})
+	defer func() {
+		http.DefaultTransport = originalTransport
+	}()
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "openwhisker.db")
+	vaultRoot := filepath.Join(dir, "vault")
+	skillDir := filepath.Join(vaultRoot, "Scheduler", "Skills", "rsshub")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	schedule := `---
+id: rsshub
+name: RSSHub
+enabled: true
+cron_expr: "* * * * *"
+timezone: UTC
+delivery:
+  - outbox
+external_info_sources:
+  - rss
+skill_config:
+  feed_urls: "https://rsshub.example.test/rsshub/example?placeholder=redacted"
+  feed_limit: "5"
+---
+
+# RSSHub
+`
+	if err := os.WriteFile(filepath.Join(skillDir, "SCHEDULE.md"), []byte(schedule), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# RSSHub\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	err := run([]string{
+		"scheduler", "tick",
+		"--db", dbPath,
+		"--vault", vaultRoot,
+		"--vault-profile", "knowledge-vault",
+	}, strings.NewReader(""), &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run() error = %v, stderr = %s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"completed": 1`) {
+		t.Fatalf("scheduler tick output = %s, want completed run", stdout.String())
+	}
+
+	store, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	runs, err := store.ListSchedulerRuns("rsshub", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || !strings.Contains(runs[0].ResultJSON, "RSSHub item") {
+		t.Fatalf("runs = %+v, want RSSHub feed item in scheduler result", runs)
+	}
+	if strings.Contains(runs[0].ResultJSON, "placeholder=redacted") {
+		t.Fatalf("result leaked feed query token: %s", runs[0].ResultJSON)
 	}
 }
 
@@ -338,6 +494,53 @@ func TestMatrixClientForAuthRequiresCredential(t *testing.T) {
 	}
 }
 
+func TestMatrixDeliveryConfigAddsSchedulerBotWhenConfigured(t *testing.T) {
+	deliveryClients, ignoredUserIDs, err := matrixDeliveryConfig(context.Background(),
+		matrix.Client{Homeserver: "https://matrix.example.test", AccessToken: "knowledge-token"},
+		"@knowledge:example.test",
+		matrixAuthOptions{
+			Homeserver:  "https://matrix.example.test",
+			AccessToken: "scheduler-token",
+			UserID:      "@scheduler:example.test",
+			SessionFile: filepath.Join(t.TempDir(), "scheduler-session.json"),
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deliveryClients[model.OutboxActorKnowledge].AccessToken != "knowledge-token" {
+		t.Fatalf("knowledge client = %+v, want knowledge token", deliveryClients[model.OutboxActorKnowledge])
+	}
+	if deliveryClients[model.OutboxActorScheduler].AccessToken != "scheduler-token" {
+		t.Fatalf("scheduler client = %+v, want scheduler token", deliveryClients[model.OutboxActorScheduler])
+	}
+	if !containsString(ignoredUserIDs, "@knowledge:example.test") || !containsString(ignoredUserIDs, "@scheduler:example.test") {
+		t.Fatalf("ignored user ids = %+v, want both bot ids", ignoredUserIDs)
+	}
+}
+
+func TestMatrixDeliveryConfigRequiresSchedulerUserID(t *testing.T) {
+	_, _, err := matrixDeliveryConfig(context.Background(),
+		matrix.Client{Homeserver: "https://matrix.example.test", AccessToken: "knowledge-token"},
+		"@knowledge:example.test",
+		matrixAuthOptions{
+			Homeserver:  "https://matrix.example.test",
+			AccessToken: "scheduler-token",
+			SessionFile: filepath.Join(t.TempDir(), "scheduler-session.json"),
+		})
+	if err == nil || !strings.Contains(err.Error(), "OPENWHISKER_MATRIX_SCHEDULER_USER_ID") {
+		t.Fatalf("error = %v, want scheduler user id error", err)
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestLoadLocalEnvFindsParentEnvAndDoesNotOverrideExisting(t *testing.T) {
 	dir := t.TempDir()
 	child := filepath.Join(dir, "child")
@@ -390,6 +593,15 @@ func (f mainRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) 
 }
 
 func mainJSONResponse(body string) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+func mainXMLResponse(body string) *http.Response {
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Status:     "200 OK",

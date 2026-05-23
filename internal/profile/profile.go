@@ -22,7 +22,17 @@ type VaultProfile struct {
 	Status      string             `json:"status"`
 	Source      string             `json:"source"`
 	Conventions policy.Conventions `json:"conventions"`
+	Scheduler   SchedulerProfile   `json:"scheduler,omitempty"`
 	Notes       []string           `json:"notes,omitempty"`
+}
+
+type SchedulerProfile struct {
+	Enabled             bool     `json:"enabled"`
+	RegistryPaths       []string `json:"registry_paths,omitempty"`
+	ScheduledSkillRoots []string `json:"scheduled_skill_roots,omitempty"`
+	DefaultDelivery     []string `json:"default_delivery,omitempty"`
+	ReadOnlyVaultRoots  []string `json:"read_only_vault_roots,omitempty"`
+	ExternalInfoSources []string `json:"external_info_sources,omitempty"`
 }
 
 type VaultSkill struct {
@@ -44,15 +54,31 @@ type Document struct {
 
 func NewConfiguredVaultProfile(conventions policy.Conventions) VaultProfile {
 	conventions = conventions.Normalize()
+	schedulerProfile := SchedulerProfile{}
+	if conventions.ProfileID == "knowledge-vault" {
+		schedulerProfile = DefaultSchedulerProfile()
+	}
 	return VaultProfile{
 		ID:          conventions.ProfileID,
 		Status:      ProfileStatusConfigured,
 		Source:      ProfileSourceManualConfig,
 		Conventions: conventions,
+		Scheduler:   schedulerProfile,
 		Notes: []string{
 			"This profile is currently built from explicit OpenWhisker configuration.",
 			"Future profile files should be produced by a vault-local skill and approved by the vault owner before OpenWhisker consumes them.",
 		},
+	}
+}
+
+func DefaultSchedulerProfile() SchedulerProfile {
+	return SchedulerProfile{
+		Enabled:             true,
+		RegistryPaths:       []string{"Scheduler/Skills/*/SCHEDULE.md"},
+		ScheduledSkillRoots: []string{"Scheduler/Skills/"},
+		DefaultDelivery:     []string{"outbox"},
+		ReadOnlyVaultRoots:  []string{"Raw/", "Knowledge/", "Interview/", "Life/", "Meta/"},
+		ExternalInfoSources: []string{"rss"},
 	}
 }
 
@@ -173,6 +199,12 @@ func RenderProfileMarkdown(vaultProfile VaultProfile) string {
 		"- Knowledge directory: " + conventions.KnowledgeDir,
 		"- Draft output directory: " + conventions.KnowledgeDraftDir,
 		"- Required draft tags: " + renderInlineList(conventions.RequiredDraftTags),
+		"- Scheduler enabled: " + renderBool(vaultProfile.Scheduler.Enabled),
+		"- Scheduler registry paths: " + renderInlineList(vaultProfile.Scheduler.RegistryPaths),
+		"- Scheduler skill roots: " + renderInlineList(vaultProfile.Scheduler.ScheduledSkillRoots),
+		"- Scheduler default delivery: " + renderInlineList(vaultProfile.Scheduler.DefaultDelivery),
+		"- Scheduler read-only vault roots: " + renderInlineList(vaultProfile.Scheduler.ReadOnlyVaultRoots),
+		"- Scheduler external info sources: " + renderInlineList(vaultProfile.Scheduler.ExternalInfoSources),
 		"",
 		"Runtime prompts should primarily use the task-specific Vault Skill compiled from this profile. OpenWhisker-required trace metadata still applies: openwhisker_job_id, source_raw_job_id, source_raw_path, source_processed_path, status=draft, needs_review=true.",
 	}, "\n")
@@ -183,4 +215,11 @@ func renderInlineList(values []string) string {
 		return "(none)"
 	}
 	return strings.Join(values, ", ")
+}
+
+func renderBool(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
 }

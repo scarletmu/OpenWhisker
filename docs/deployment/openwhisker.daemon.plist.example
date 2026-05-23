@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>local.openwhisker.daemon</string>
+
+  <key>WorkingDirectory</key>
+  <string>&lt;repo-root&gt;</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>&lt;repo-root&gt;/bin/openwhisker</string>
+    <string>daemon</string>
+    <string>--db</string>
+    <string>&lt;repo-root&gt;/data/openwhisker.db</string>
+    <string>--vault</string>
+    <string>&lt;vault-root&gt;</string>
+    <string>--vault-profile</string>
+    <string>knowledge-vault</string>
+    <string>--scheduler-tick-interval</string>
+    <string>1m</string>
+    <string>--status-file</string>
+    <string>&lt;repo-root&gt;/data/daemon-status.json</string>
+    <string>--matrix</string>
+    <string>off</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>&lt;repo-root&gt;/logs/openwhisker-daemon.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>&lt;repo-root&gt;/logs/openwhisker-daemon.err.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>OPENWHISKER_SCHEDULER_ENGINE</key>
+    <string>static</string>
+  </dict>
+</dict>
+</plist>

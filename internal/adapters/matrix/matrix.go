@@ -23,10 +23,12 @@ type Core interface {
 }
 
 type Adapter struct {
-	Core   Core
-	Client Client
-	UserID string
-	RoomID string
+	Core            Core
+	Client          Client
+	UserID          string
+	RoomID          string
+	DeliveryClients map[string]Client
+	IgnoredUserIDs  []string
 }
 
 type Client struct {
@@ -91,7 +93,7 @@ func (a Adapter) PollOnce(ctx context.Context, since string, timeout time.Durati
 			continue
 		}
 		for _, event := range room.Timeline.Events {
-			if !isTextMessage(event) || event.Sender == a.UserID {
+			if !isTextMessage(event) || a.shouldIgnoreSender(event.Sender) {
 				continue
 			}
 			response, err := a.Core.HandleText(ctx, core.AdapterRequest{
@@ -130,7 +132,8 @@ func (a Adapter) DeliverOutbox(ctx context.Context, roomID string) error {
 		return err
 	}
 	for _, msg := range messages {
-		if err := a.Client.SendText(ctx, roomID, formatOutboxMessage(msg)); err != nil {
+		client := a.clientForActor(msg.Actor)
+		if err := client.SendText(ctx, roomID, formatOutboxMessage(msg)); err != nil {
 			return err
 		}
 		if err := a.Core.MarkOutboxDelivered(msg.ID); err != nil {
@@ -138,6 +141,19 @@ func (a Adapter) DeliverOutbox(ctx context.Context, roomID string) error {
 		}
 	}
 	return nil
+}
+
+func (a Adapter) clientForActor(actor string) Client {
+	actor = strings.TrimSpace(actor)
+	if actor == "" {
+		actor = model.OutboxActorKnowledge
+	}
+	if a.DeliveryClients != nil {
+		if client, ok := a.DeliveryClients[actor]; ok {
+			return client
+		}
+	}
+	return a.Client
 }
 
 func (c Client) Sync(ctx context.Context, since string, timeout time.Duration) (SyncResponse, error) {
@@ -278,6 +294,22 @@ func (c Client) doJSON(req *http.Request, out any) error {
 
 func isTextMessage(event Event) bool {
 	return event.Type == "m.room.message" && event.Content.MsgType == "m.text" && strings.TrimSpace(event.Content.Body) != ""
+}
+
+func (a Adapter) shouldIgnoreSender(sender string) bool {
+	sender = strings.TrimSpace(sender)
+	if sender == "" {
+		return false
+	}
+	if sender == strings.TrimSpace(a.UserID) {
+		return true
+	}
+	for _, ignored := range a.IgnoredUserIDs {
+		if sender == strings.TrimSpace(ignored) {
+			return true
+		}
+	}
+	return false
 }
 
 func formatOutboxMessage(msg model.OutboxMessage) string {

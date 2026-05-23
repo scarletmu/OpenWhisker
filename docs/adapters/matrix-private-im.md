@@ -106,6 +106,11 @@ export OPENWHISKER_MATRIX_PASSWORD=...
 export OPENWHISKER_MATRIX_ACCESS_TOKEN=...
 export OPENWHISKER_MATRIX_SESSION_FILE=data/matrix-session.json
 
+# 可选：Scheduler Bot 独立发送身份
+export OPENWHISKER_MATRIX_SCHEDULER_USER_ID=<scheduler-bot-user>
+export OPENWHISKER_MATRIX_SCHEDULER_PASSWORD=...
+export OPENWHISKER_MATRIX_SCHEDULER_SESSION_FILE=data/matrix-scheduler-session.json
+
 export OPENWHISKER_LLM_API_KEY=...
 export OPENWHISKER_LLM_BASE_URL=https://your-compatible-endpoint.example/v1
 export OPENWHISKER_LLM_MODEL=your-model
@@ -154,6 +159,8 @@ go run ./cmd/openwhisker matrix daemon \
 ```
 
 当前 daemon 仍是单房间 MVP；多房间路由、room-scoped outbox 和真实 Matrix 环境压测留给后续切片。部署见 [`docs/deployment/README.md`](../deployment/README.md)。
+
+Phase 5 引入 Scheduler 后，Matrix 交互身份支持同一 room 内的双 bot 模型：Knowledge Bot 负责用户主动的 capture / organize / expand / diff / approve / reject；Scheduler Bot 负责定时简报、RSSHub / RSS 观察、提醒和 suggested capture 确认提示。两者可以共享同一个 OpenWhisker 后端和同一个 Matrix room，但在 outbox / delivery 层通过 actor identity 区分：`knowledge` actor 默认由 Knowledge Bot 发送，`scheduler` actor 在配置 Scheduler Bot 凭据后由 Scheduler Bot 发送。Matrix adapter 会忽略两个 bot 自己发出的消息，避免 Knowledge Bot 把 Scheduler Bot 的简报当成用户 raw input。Scheduler Bot 只是展示和交互身份，不获得 vault 写入权限。
 
 本地调试可以使用 ignored 的 `scripts/local/matrix-debug.sh`。它会自动读取 `.env.local`，并支持用 `OPENWHISKER_DEBUG_DB` 和 `OPENWHISKER_DEBUG_VAULT` 显式区分不同验证阶段：
 
