@@ -10,6 +10,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 
+	"github.com/scarletmu/openwhisker/internal/model"
 	"github.com/scarletmu/openwhisker/internal/storage"
 )
 
@@ -64,6 +65,13 @@ func TestIngestRawWritesNoteAndRecordsState(t *testing.T) {
 	assertCount(t, db, "vault_plans", 1)
 	assertCount(t, db, "vault_operation_logs", 1)
 	assertCount(t, db, "outbox_messages", 1)
+	var actor string
+	if err := db.QueryRow("SELECT actor FROM outbox_messages").Scan(&actor); err != nil {
+		t.Fatal(err)
+	}
+	if actor != model.OutboxActorKnowledge {
+		t.Fatalf("outbox actor = %q, want knowledge", actor)
+	}
 }
 
 func assertCount(t *testing.T, db *sql.DB, table string, want int) {

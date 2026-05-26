@@ -16,5 +16,6 @@ Module map:
 - `executor/`: controlled vault filesystem preparation and writes.
 - `storage/`: SQLite persistence for jobs, plans, outbox, locks, and operation logs.
 - `profile/`: vault profile records and task skill generation for skill-driven adapter context. Profile analysis should happen in vault-local skills, not inside OpenWhisker runtime.
+- `scheduler/`: read-only scheduled Skill registry parsing, cron matching, and minimal Skill runner boundaries.
 
 Keep LLM reasoning out of direct writes. New write paths should still flow through `VaultPlan -> policy -> approval when needed -> executor`.

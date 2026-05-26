@@ -90,6 +90,8 @@ OPENWHISKER_MATRIX_HOMESERVER=
 OPENWHISKER_MATRIX_USER_ID=
 OPENWHISKER_MATRIX_PASSWORD=
 OPENWHISKER_MATRIX_ROOM_ID=
+OPENWHISKER_MATRIX_SCHEDULER_USER_ID=
+OPENWHISKER_MATRIX_SCHEDULER_PASSWORD=
 ```
 
 跑起来：
@@ -110,6 +112,10 @@ go run ./cmd/openwhisker matrix daemon
 go test ./...
 ```
 
+## 部署
+
+把 OpenWhisker 作为长期服务跑起来（本地硬件上的原生 launchd / systemd 服务），见 [部署指南](docs/deployment/README.md)。
+
 ## 它为什么不会乱来
 
 - **LLM 只生成计划，不动文件**：LLM 输出的是结构化 `VaultPlan`，由本机受控的 executor 执行，并经过 policy check（必须有 source refs、target paths、合规的 frontmatter / tags 等）。
@@ -122,6 +128,7 @@ go test ./...
 
 - [Project Guide](AGENTS.md)：面向 LLM agent 的项目规则、参考源关系和工作边界。
 - [文档索引](docs/README.md)：当前文档结构和推荐阅读顺序。
+- [部署指南](docs/deployment/README.md)：构建、配置、以原生服务长期运行。
 - [当前进度与交接说明](docs/progress.md)：当前状态、验证状态和下一步优先级。
 - [项目决策](docs/project-decisions.md)：已收敛的长期架构决策和阶段默认值。
 - [设计哲学](docs/architecture/design-philosophy.md)：VaultPlan / VaultExecutor 架构理念。

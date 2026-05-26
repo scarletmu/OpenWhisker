@@ -881,7 +881,7 @@ func (s PlanService) approveHighRiskAsProposal(ctx context.Context, plan model.V
 		return PlanActionResult{}, err
 	}
 	plan.Status = model.PlanStatusApplying
-	applied, err := s.executor.ApplyAsProposal(ctx, plan, s.conventions.AgentProposalsDir)
+	applied, err := s.executor.ApplyAsProposal(ctx, plan, s.conventions)
 	if err != nil {
 		_ = s.store.MarkPlanFailed(plan.ID, model.PlanStatusFailed, err.Error())
 		_ = s.store.UpdateJobStatus(plan.JobID, model.JobStatusFailed, "", err.Error())

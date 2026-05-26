@@ -6,7 +6,7 @@
 
 ## 当前实现基线
 
-Phase 3 最小闭环已落地。仓库现在包含一条可运行的低风险 raw capture 链路、一条中风险 plan-before-approval 链路，以及受控 Headless Sync client：
+Phase 4 Wiki Agent Workflow 已收束（4A / 4B / 4B.5 / 4C.1 / 4C.2 全部落地，4C.3 / 4C.4 主动取消）。Phase 5 已启动 read-only Skill Scheduler 的最小切片。仓库现在包含一条可运行的低风险 raw capture 链路、一条可显式接入真实 LLM 的中风险 plan-before-approval 整理链路、一条 high-risk proposal-only 出口、一个 IM Intent Router 中间件、受控 Headless Sync client，以及一个 profile-driven scheduler tick：
 
 ```text
 raw text input
@@ -19,11 +19,11 @@ raw text input
   -> outbox result
 ```
 
-中风险整理链路会为最近一条 raw capture 生成 deterministic `organize_raw` 计划，先 prepare diff 和 `before_hash`，等待 CLI approval 后才写入 `Knowledge/Drafts/` 并移动 raw note 到 `Raw/Processed/`。
+中风险整理链路（`organize last` / `expand <path>`）生成 `VaultPlan`，先 prepare diff 和 `before_hash`，等待 approval 后才写入 `Knowledge/Drafts/` 并把 raw note 移到 `Raw/Processed/`。`organize last` 的 reasoning 层可显式切到真实 LLM-backed Raw Organizer（`--organizer=openai-compatible`），默认仍是 deterministic planner；`expand <path>` 由 Knowledge Expander 对已有 Knowledge note 生成末尾 append plan。high-risk plan（split / merge / rename / 大规模 retag / link rewrite）在 approve 时不进 apply 路径，改写一篇 proposal note 到 `Raw/Agent-Proposals/`，终态为 `proposal_written`。
 
 approval apply 现在是 sync-aware 的：默认 test vault 仍关闭同步；当用户显式传入真实 vault 路径且使用默认 `--sync=auto` 时，core 会在 `direct_fs_executor.Apply` 前后通过 Headless `ob` 执行 one-shot sync。pre-sync 后仍由 `DirectFS.Apply` 重新执行 lock、path guard 和 `before_hash` guard；post-sync 失败只作为 warning 返回，不把已成功的 vault write 误标为失败。
 
-当前已实现 Matrix Adapter MVP、长期 Matrix daemon、Core Adapter API、受控 raw context builder、可显式启用的 OpenAI-compatible Raw Organizer 最小路径、第一版 agent output policy gate、`VaultProfile -> VaultRawOrganizerSkill` 生成边界、`vault profile preview` 本地 skill bundle 预览、外部 vault-local `vault-profile-analyzer` Skill 模板，以及 Raw/Processed processing note 写入；默认 `organize last` 仍使用 deterministic planner，避免无意触发外部模型调用。仍未实现加载用户确认后的 Profile / Skill、插件集成、Knowledge Expander 和高风险知识库重构自动执行。下一阶段计划见 `docs/phases/phase-4-wiki-agent-workflow.md`。
+IM 入口已实现 Matrix Adapter MVP、长期 Matrix daemon、Core Adapter API，以及 IM Intent Router（rules / hybrid / off 三模式、capture bucket、source-scoped binding、pending clarification 状态机）。Agent 侧已实现受控 raw context builder、可显式启用的 OpenAI-compatible Raw Organizer、Knowledge Expander（append + propose_restructure，CLI-only）、第一版 agent output policy gate、`VaultProfile -> VaultRawOrganizerSkill` 生成边界、`vault profile preview` 本地 skill bundle 预览、外部 vault-local `vault-profile-analyzer` Skill 模板，以及 Raw/Processed processing note 写入；默认 `organize last` 仍使用 deterministic planner，避免无意触发外部模型调用。Scheduler 侧已实现 `VaultProfile.scheduler` 声明、skill-local `SCHEDULE.md` registry、cron/timezone、只读 capability / context 校验、SQLite runtime/run log、手动 `openwhisker scheduler tick`、outbox 结果、可替换 `SkillEngine` / info-only `ExternalInfoAdapter` 接口、可显式启用的 OpenAI-compatible Scheduler Engine，以及首个只读 `rss` 外部信息源 adapter，可接入 RSSHub route、普通 RSS feed 或 Atom feed。当前有意不实现的能力包括：加载用户确认后的 Profile / Skill、Obsidian 插件集成、高风险知识库重构的自动执行（按设计只生成 proposal）、RSSHub / Folo 账号 API 或外部写操作。各阶段验证状态、已知遗留和后续优先级以 [`progress.md`](../progress.md) 为准；完整设计弧线见 [`openwhisker-v1-review.md`](openwhisker-v1-review.md)。
 
 ## 系统定位
 
@@ -69,13 +69,13 @@ Core 可以调用 agent 和 executor，但不应该把具体 vault 的组织规�
 
 Phase 4 已先固定 Core Adapter API、Matrix Adapter MVP、Agent Host contract 和受控 vault context，并接入第一版真实 LLM-backed Raw Organizer。Agent 可以替换 deterministic planner 的 reasoning 层，但不能替代 Policy Checker、VaultExecutor 或 SyncClient。
 
-初始 agent role：
+已实现的 agent role：
 
-- Raw Organizer
-- Knowledge Expander
-- Wiki Reader
-- Maintenance Agent
-- Scheduler Agent
+- Raw Organizer（4B：真实 LLM-backed，可显式启用）
+- Knowledge Expander（4C.2：瘦身版，仅 append + propose_restructure，CLI-only）
+- Scheduler Skill Runner（Phase 5：最小 read-only host，按 schedule 加载同目录 `SKILL.md` 和显式 `vault_context`，通过 static 或 OpenAI-compatible `SkillEngine` 生成 run log / outbox 结果）
+
+Wiki Reader 和完整 Maintenance Agent 仍属于 `design-philosophy.md` 描述的后续方向。Scheduler Agent 已进入 Phase 5 最小实现，但默认真实外部信息源 adapter 仍待后续切片。
 
 ### VaultPlan
 
@@ -120,6 +120,8 @@ reasoning 和 writing 之间的审计边界。
 
 首期核心 IM 入口实践见 `docs/adapters/matrix-private-im.md`。Matrix adapter 属于交互层和 outbox 通知层，通过 bot client `/sync` 接收命令和 raw input，不直接写 vault，也不绕过 `VaultPlan -> Policy Check -> Approval -> VaultExecutor` 链路。
 
+Phase 5 后，outbox 已使用 actor identity：Knowledge Bot 负责用户主动触发的 capture / organize / expand / approval；Scheduler Bot 负责定时简报、RSSHub / RSS 观察、提醒和 suggested capture 确认提示。两个 bot 可以在同一个 Matrix room 内共存，Matrix delivery 按 `knowledge` / `scheduler` actor 选择发送身份；但 Scheduler Bot 仍然只是 read-only Scheduler 的展示和交互身份，不因此获得 vault 写入能力。
+
 ## 数据对象
 
 第一版 durable object model 已包含：
@@ -141,6 +143,17 @@ Phase 3 已补齐：
 - `SyncResult`
 - `SyncClient`
 - approval apply 的 `sync_before` / `sync_after` 结果
+
+Phase 4 已补齐：
+
+- `CaptureBucket`
+- IM intent audit 记录
+- high-risk plan 的 `proposal_written` 终态
+
+Phase 5 已补齐：
+
+- `SchedulerRuntime`
+- `SchedulerRun`
 
 不要为了某个具体 IM 平台或某个具体 Obsidian 目录结构优化数据模型。
 

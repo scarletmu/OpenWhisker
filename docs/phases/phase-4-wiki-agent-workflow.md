@@ -1,6 +1,6 @@
 # Phase 4 Wiki Agent Workflow
 
-状态：推进中。Phase 4A 已完成第一版代码切片；Phase 4B 已接入真实 LLM-backed Raw Organizer 的最小版本，并补上第一版 agent output policy gate 和长期 Matrix daemon。默认仍使用 deterministic planner，真实 provider 需要显式启用。
+状态：已收束。Phase 4A / 4B / 4B.5 / 4C.1 / 4C.2 全部落地，4C.3 / 4C.4 主动取消，Phase 4 至此收尾。默认仍使用 deterministic planner，真实 provider 需要显式启用。各子阶段验证状态以 [`docs/progress.md`](../progress.md) 为准；完整设计弧线见 [`docs/architecture/openwhisker-v1-review.md`](../architecture/openwhisker-v1-review.md)。
 
 这是 Phase 3 完成 sync-aware approval execution 之后，下一阶段值得推进的设计边界。
 
@@ -50,7 +50,7 @@ go run ./cmd/openwhisker vault profile preview --vault-profile knowledge-vault
 
 ## 下一步真实环境验证顺序
 
-Phase 4 代码闭环已经进入真实环境验证。当前已完成真实 Matrix + test vault deterministic 闭环、真实 vault + deterministic diff/reject、test vault + OpenAI-compatible provider smoke、真实 vault + OpenAI-compatible LLM diff/reject，以及 2026-05-19 完成的真实 vault + OpenAI-compatible LLM **approve/apply** 闭环（CLI 路径，DeepSeek，`--sync=off`）。Matrix 路径下的 LLM approve/apply 仍待后续真实环境验证。
+Phase 4 代码闭环已经进入真实环境验证。当前已完成真实 Matrix + test vault deterministic 闭环、真实 vault + deterministic diff/reject、test vault + OpenAI-compatible provider smoke、真实 vault + OpenAI-compatible LLM diff/reject，以及 2026-05-19 完成的真实 vault + OpenAI-compatible LLM **approve/apply** 闭环（CLI 路径，DeepSeek，`--sync=off`）。Matrix 路径下的 LLM approve/apply 已于 2026-05-20 在 `testdata/vault` 上跑通（Matrix daemon + DeepSeek）。
 
 真实环境验证顺序保持保守：
 
@@ -86,7 +86,7 @@ go run ./cmd/openwhisker organize preview-context \
 
 Phase 4 默认不把完整 vault 规则全文发送给外部 LLM。OpenWhisker 只固定执行安全契约：source trace、plan-before-write、risk、approval、path safety 和 deterministic executor。具体 vault 的 raw inbox、processed raw、草稿区、tag 清单等属于 `VaultProfile`，并通过任务 `VaultSkill` 进入 LLM 上下文，不能硬编码成所有 vault 的通用 schema。当前 `knowledge-vault` profile 只是 `/Users/wang/Documents/KnowLedge` 的本地范式；默认 `generic` profile 保持更少假设。其他 vault 可以通过 `OPENWHISKER_RAW_INBOX_DIR`、`OPENWHISKER_RAW_PROCESSED_DIR`、`OPENWHISKER_KNOWLEDGE_DIR`、`OPENWHISKER_KNOWLEDGE_DRAFT_DIR` 和 `OPENWHISKER_REQUIRED_DRAFT_TAGS` 覆盖本地约定。
 
-真实 vault + LLM 的规划链路已通。下一步可以二选一：先补真实 vault + LLM approve/apply 验证，或进入 Knowledge Expander、high-risk proposal policy、真实 Matrix 部署固化和多房间 / room-scoped outbox。
+真实 vault + LLM 的规划链路已通。Knowledge Expander 与 high-risk proposal policy 已分别在 4C.2 / 4C.1 落地；剩余的真实 vault apply 复核为可选 follow-up，明细见 [`docs/progress.md`](../progress.md) 的"验证队列"。
 
 ## Phase 4B.5：IM Intent Router
 
@@ -420,13 +420,12 @@ go run ./cmd/openwhisker knowledge expand <path-or-topic>
 - high-risk split / merge 只写 proposal note，不修改正式 Knowledge note。
 - Phase 3 sync-aware approval 行为继续保持：pre-sync failure 不写 vault，post-sync failure 只产生 warning。
 
-## Review 问题
+## Review 问题（Phase 4 收束时均已解决）
 
-- 真实 LLM provider 的第一版选择、模型、密钥来源和配置方式是否需要单独 ADR。
-- Core Adapter API 是先做进程内接口，还是同时暴露本机 HTTP API 供 Matrix Adapter 调用。
-- Matrix Adapter MVP 与 Synapse / Caddy / Docker Compose 部署是否放在同一 Phase 4A PR，还是拆成运行部署文档和 adapter 代码两步。
-- proposal note 的默认路径是 `Meta/Proposals/`，还是继续使用 `Knowledge/Drafts/` 作为 staging 区。
-- `Knowledge/Drafts/` 在 Phase 4 后是保留为草稿区，还是只服务 Phase 2 deterministic workflow。
-- `expand knowledge` 的第一版入口是 CLI topic/path，还是只作为内部 workflow。
-- frontmatter 和 controlled tags 的第一版硬闸门已放在 policy 层；后续可在 provider 侧补更早的友好错误，但不能替代 policy。
-- `/replan` 是否应在 Phase 4B 一起设计，还是等 agent workflow 稳定后再加入。
+- **真实 LLM provider 配置**：不单独立 ADR，统一用 `OPENWHISKER_LLM_*` 环境变量配置，OpenAI-compatible Chat Completions 为第一版接入口径。
+- **Core Adapter API 形态**：采用进程内接口，未暴露本机 HTTP API。
+- **proposal note 默认路径**：定为 `Raw/Agent-Proposals/`（见 [`architecture/proposal-note-schema.md`](../architecture/proposal-note-schema.md)），不使用 `Meta/Proposals/` 或 `Knowledge/Drafts/`。
+- **`Knowledge/Drafts/` 的归宿**：继续作为中风险整理的草稿区；high-risk agent 产出改走 `Raw/Agent-Proposals/`。
+- **`expand` 入口**：定为 CLI `expand <path>`，Knowledge Expander 保持 CLI-only。
+- **frontmatter / controlled tags 硬闸门**：固定在 policy 层；provider 侧友好错误可作为补充，不替代 policy。
+- **`/replan`**：Phase 4 未实现，按真实使用驱动的原则在需要时再单独立项。

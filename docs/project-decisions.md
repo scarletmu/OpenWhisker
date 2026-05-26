@@ -61,3 +61,10 @@ OpenWhisker 的关键外部对接节点不应主要靠硬编码业务规则驱�
 - Core、Policy 和 Executor 仍固定安全契约：plan-before-write、path safety、risk、approval、hash guard、traceability 和 deterministic execution。
 
 当前 Phase 4 的第一处实践是 `VaultProfile -> VaultRawOrganizerSkill -> VaultPlan`。后续 Matrix room、Web source、Git、Calendar 或 Task 系统也应沿用同一原则：adapter 固定接入和安全边界，Profile / Skill 描述本地协作方式。
+
+### 9. Matrix 当前部署采用单自动化房间
+
+当前部署目标只使用一个私有、非 E2EE 的 Matrix 自动化房间。该房间同时承载
+capture、command、diff / approve / reject、scheduler 输出和告警；
+`OPENWHISKER_MATRIX_ROOM_ID` 是目标配置边界。不要在当前部署文档、模板或
+Self-Deploy 对接说明中拆分 Inbox / Approval / Alert 等多房间拓扑。

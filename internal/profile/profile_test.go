@@ -48,3 +48,25 @@ func TestContextDocumentsExposeSkillBeforeProfile(t *testing.T) {
 		t.Fatalf("profile markdown = %s", docs[1].Content)
 	}
 }
+
+func TestKnowledgeVaultProfileEnablesSchedulerDeclaration(t *testing.T) {
+	vaultProfile := NewConfiguredVaultProfile(policy.KnowledgeVaultConventions())
+	if !vaultProfile.Scheduler.Enabled {
+		t.Fatal("scheduler is disabled, want enabled for knowledge-vault profile")
+	}
+	if got := strings.Join(vaultProfile.Scheduler.RegistryPaths, ","); got != "Scheduler/Skills/*/SCHEDULE.md" {
+		t.Fatalf("registry paths = %q", got)
+	}
+	markdown := RenderProfileMarkdown(vaultProfile)
+	for _, want := range []string{
+		"Scheduler enabled: true",
+		"Scheduler/Skills/*/SCHEDULE.md",
+		"Scheduler/Skills/",
+		"Scheduler read-only vault roots: Raw/, Knowledge/, Interview/, Life/, Meta/",
+		"Scheduler external info sources: rss",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("profile markdown = %s, want %q", markdown, want)
+		}
+	}
+}

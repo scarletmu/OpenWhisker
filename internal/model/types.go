@@ -7,6 +7,7 @@ const (
 	JobTypeAppendRaw       = "append_raw"
 	JobTypeOrganizeRaw     = "organize_raw"
 	JobTypeExpandKnowledge = "expand_knowledge"
+	JobTypeSchedulerRun    = "scheduler_run"
 
 	JobStatusPending          = "pending"
 	JobStatusAwaitingApproval = "awaiting_approval"
@@ -58,6 +59,27 @@ const (
 
 	OutboxStatusPending   = "pending"
 	OutboxStatusDelivered = "delivered"
+
+	OutboxActorKnowledge = "knowledge"
+	OutboxActorScheduler = "scheduler"
+
+	SchedulerRunStatusRunning   = "running"
+	SchedulerRunStatusDone      = "done"
+	SchedulerRunStatusPartial   = "partial"
+	SchedulerRunStatusFailed    = "failed"
+	SchedulerRunStatusSkipped   = "skipped"
+	SchedulerRunStatusCancelled = "cancelled"
+
+	AgentTriggerKindScheduler   = "scheduler"
+	AgentTriggerKindAdhocMatrix = "adhoc_matrix"
+	AgentTriggerKindAdhocCLI    = "adhoc_cli"
+
+	AgentTraceTerminationNatural             = "natural"
+	AgentTraceTerminationCallCountExceeded   = "call_count_exceeded"
+	AgentTraceTerminationBytesExceeded       = "bytes_exceeded"
+	AgentTraceTerminationWallClockExceeded   = "wall_clock_exceeded"
+	AgentTraceTerminationProtocolFailed      = "protocol_failed"
+	AgentTraceTerminationError               = "error"
 
 	AdapterMatrix = "matrix"
 
@@ -267,8 +289,37 @@ type VaultOperationLog struct {
 type OutboxMessage struct {
 	ID        string
 	JobID     string
+	Actor     string
 	Kind      string
 	Body      string
 	Status    string
 	CreatedAt time.Time
+}
+
+type SchedulerRuntime struct {
+	ID           string
+	ScheduleID   string
+	RegistryPath string
+	RegistryHash string
+	SkillDir     string
+	SkillPath    string
+	LastRunAt    *time.Time
+	NextRunAt    *time.Time
+	UpdatedAt    time.Time
+}
+
+type SchedulerRun struct {
+	ID              string
+	ScheduleID      string
+	RuntimeID       string
+	SkillDir        string
+	SkillPath       string
+	Status          string
+	StartedAt       time.Time
+	FinishedAt      *time.Time
+	ResultJSON      string
+	Error           string
+	OutboxMessageID string
+	TriggerKind     string
+	ToolTraceJSON   string
 }

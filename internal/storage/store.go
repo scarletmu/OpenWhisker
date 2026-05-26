@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -14,8 +15,15 @@ import (
 	"github.com/scarletmu/openwhisker/internal/model"
 )
 
+// DefaultLockTTL bounds how long a vault_locks row stays valid before
+// AcquireLocks may forcibly take it over. The window is intentionally larger
+// than any healthy Apply, so we only steal locks left behind by SIGKILL /
+// crash / panic without a successful ReleaseLocks.
+const DefaultLockTTL = 30 * time.Minute
+
 type Store struct {
-	db *sql.DB
+	db      *sql.DB
+	lockTTL time.Duration
 }
 
 func Open(path string) (*Store, error) {
@@ -30,12 +38,29 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	store := &Store{db: db}
+	store := &Store{db: db, lockTTL: DefaultLockTTL}
 	if err := store.migrate(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
+	// Sweep locks left behind by a previous crash. Rows that have an
+	// expires_at in the past are definitionally stale; rows with empty
+	// expires_at (pre-migration data) are also dropped on startup since the
+	// owning process is gone.
+	if _, err := db.Exec(`DELETE FROM vault_locks WHERE expires_at = '' OR expires_at <= ?`,
+		formatTime(time.Now().UTC())); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("clear stale vault locks: %w", err)
+	}
 	return store, nil
+}
+
+// SetLockTTL overrides the lock TTL. Tests use a short TTL to exercise the
+// stale-lock takeover path without sleeping for the production default.
+func (s *Store) SetLockTTL(d time.Duration) {
+	if d > 0 {
+		s.lockTTL = d
+	}
 }
 
 func (s *Store) Close() error {
@@ -311,10 +336,14 @@ INSERT INTO vault_operation_logs (
 }
 
 func (s *Store) AddOutboxMessage(msg model.OutboxMessage) error {
+	actor := strings.TrimSpace(msg.Actor)
+	if actor == "" {
+		actor = model.OutboxActorKnowledge
+	}
 	_, err := s.db.Exec(`
-INSERT INTO outbox_messages (id, job_id, kind, body, status, created_at)
-VALUES (?, ?, ?, ?, ?, ?)`,
-		msg.ID, msg.JobID, msg.Kind, msg.Body, msg.Status, formatTime(msg.CreatedAt))
+INSERT INTO outbox_messages (id, job_id, actor, kind, body, status, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		msg.ID, msg.JobID, actor, msg.Kind, msg.Body, msg.Status, formatTime(msg.CreatedAt))
 	return err
 }
 
@@ -323,7 +352,7 @@ func (s *Store) ListPendingOutbox(limit int) ([]model.OutboxMessage, error) {
 		limit = 20
 	}
 	rows, err := s.db.Query(`
-SELECT id, job_id, kind, body, status, created_at
+SELECT id, job_id, actor, kind, body, status, created_at
 FROM outbox_messages
 WHERE status = ?
 ORDER BY created_at ASC
@@ -336,8 +365,11 @@ LIMIT ?`, model.OutboxStatusPending, limit)
 	for rows.Next() {
 		var msg model.OutboxMessage
 		var createdAt string
-		if err := rows.Scan(&msg.ID, &msg.JobID, &msg.Kind, &msg.Body, &msg.Status, &createdAt); err != nil {
+		if err := rows.Scan(&msg.ID, &msg.JobID, &msg.Actor, &msg.Kind, &msg.Body, &msg.Status, &createdAt); err != nil {
 			return nil, err
+		}
+		if strings.TrimSpace(msg.Actor) == "" {
+			msg.Actor = model.OutboxActorKnowledge
 		}
 		msg.CreatedAt = parseTime(createdAt)
 		messages = append(messages, msg)
@@ -565,16 +597,280 @@ func (s *Store) scanCaptureBucket(row planScanner) (model.CaptureBucket, error) 
 	return bucket, nil
 }
 
+func (s *Store) SaveSchedulerRuntime(runtime model.SchedulerRuntime) error {
+	_, err := s.db.Exec(`
+INSERT INTO scheduler_runtime (
+  id, schedule_id, registry_path, registry_hash, skill_dir, skill_path,
+  last_run_at, next_run_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(schedule_id) DO UPDATE SET
+  registry_path = excluded.registry_path,
+  registry_hash = excluded.registry_hash,
+  skill_dir = excluded.skill_dir,
+  skill_path = excluded.skill_path,
+  last_run_at = excluded.last_run_at,
+  next_run_at = excluded.next_run_at,
+  updated_at = excluded.updated_at`,
+		runtime.ID, runtime.ScheduleID, runtime.RegistryPath, runtime.RegistryHash,
+		runtime.SkillDir, runtime.SkillPath, nullableTime(runtime.LastRunAt),
+		nullableTime(runtime.NextRunAt), formatTime(runtime.UpdatedAt))
+	return err
+}
+
+func (s *Store) GetSchedulerRuntime(scheduleID string) (model.SchedulerRuntime, error) {
+	return s.scanSchedulerRuntime(s.db.QueryRow(`
+SELECT id, schedule_id, registry_path, registry_hash, skill_dir, skill_path,
+  last_run_at, next_run_at, updated_at
+FROM scheduler_runtime
+WHERE schedule_id = ?`, scheduleID))
+}
+
+func (s *Store) HasRunningSchedulerRun(scheduleID string) (bool, error) {
+	var count int
+	err := s.db.QueryRow(`
+SELECT COUNT(*)
+FROM agent_runs
+WHERE schedule_id = ? AND status = ?`, scheduleID, model.SchedulerRunStatusRunning).Scan(&count)
+	return count > 0, err
+}
+
+func (s *Store) CreateSchedulerRun(run model.SchedulerRun) error {
+	triggerKind := run.TriggerKind
+	if triggerKind == "" {
+		triggerKind = model.AgentTriggerKindScheduler
+	}
+	_, err := s.db.Exec(`
+INSERT INTO agent_runs (
+  id, schedule_id, runtime_id, skill_dir, skill_path, status, started_at,
+  finished_at, result_json, error, outbox_message_id, trigger_kind, tool_trace_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		run.ID, run.ScheduleID, run.RuntimeID, run.SkillDir, run.SkillPath, run.Status,
+		formatTime(run.StartedAt), nullableTime(run.FinishedAt), run.ResultJSON,
+		run.Error, run.OutboxMessageID, triggerKind, run.ToolTraceJSON)
+	return err
+}
+
+func (s *Store) FinishSchedulerRun(id, status, resultJSON, errText, outboxMessageID string, finishedAt time.Time) error {
+	_, err := s.db.Exec(`
+UPDATE agent_runs
+SET status = ?, finished_at = ?, result_json = ?, error = ?, outbox_message_id = ?
+WHERE id = ?`, status, formatTime(finishedAt), resultJSON, errText, outboxMessageID, id)
+	return err
+}
+
+// FinishAgentRun is the Phase 6 superset of FinishSchedulerRun: it also writes
+// the tool_trace_json column. Used by AgentRunner for tool-calling runs.
+func (s *Store) FinishAgentRun(id, status, resultJSON, errText, outboxMessageID, toolTraceJSON string, finishedAt time.Time) error {
+	_, err := s.db.Exec(`
+UPDATE agent_runs
+SET status = ?, finished_at = ?, result_json = ?, error = ?, outbox_message_id = ?, tool_trace_json = ?
+WHERE id = ?`, status, formatTime(finishedAt), resultJSON, errText, outboxMessageID, toolTraceJSON, id)
+	return err
+}
+
+func (s *Store) ListSchedulerRuns(scheduleID string, limit int) ([]model.SchedulerRun, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.Query(`
+SELECT id, schedule_id, runtime_id, skill_dir, skill_path, status, started_at,
+  finished_at, result_json, error, outbox_message_id, trigger_kind, tool_trace_json
+FROM agent_runs
+WHERE schedule_id = ?
+ORDER BY started_at DESC
+LIMIT ?`, scheduleID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var runs []model.SchedulerRun
+	for rows.Next() {
+		run, err := scanSchedulerRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return runs, nil
+}
+
+func (s *Store) ListRecentSchedulerRuns(limit int) ([]model.SchedulerRun, error) {
+	return s.ListRecentAgentRuns("", limit)
+}
+
+// ListRecentAgentRuns returns recent agent_runs filtered by trigger kind.
+// triggerKind == "" means no filter (matches scheduler + adhoc rows).
+func (s *Store) ListRecentAgentRuns(triggerKind string, limit int) ([]model.SchedulerRun, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if triggerKind == "" {
+		rows, err = s.db.Query(`
+SELECT id, schedule_id, runtime_id, skill_dir, skill_path, status, started_at,
+  finished_at, result_json, error, outbox_message_id, trigger_kind, tool_trace_json
+FROM agent_runs
+ORDER BY started_at DESC
+LIMIT ?`, limit)
+	} else {
+		rows, err = s.db.Query(`
+SELECT id, schedule_id, runtime_id, skill_dir, skill_path, status, started_at,
+  finished_at, result_json, error, outbox_message_id, trigger_kind, tool_trace_json
+FROM agent_runs
+WHERE trigger_kind = ?
+ORDER BY started_at DESC
+LIMIT ?`, triggerKind, limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var runs []model.SchedulerRun
+	for rows.Next() {
+		run, err := scanSchedulerRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return runs, nil
+}
+
+func (s *Store) ListSchedulerRuntimes(limit int) ([]model.SchedulerRuntime, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.Query(`
+SELECT id, schedule_id, registry_path, registry_hash, skill_dir, skill_path,
+  last_run_at, next_run_at, updated_at
+FROM scheduler_runtime
+ORDER BY next_run_at ASC, updated_at DESC
+LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var runtimes []model.SchedulerRuntime
+	for rows.Next() {
+		runtime, err := s.scanSchedulerRuntime(rows)
+		if err != nil {
+			return nil, err
+		}
+		runtimes = append(runtimes, runtime)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return runtimes, nil
+}
+
+func (s *Store) GetSchedulerRun(id string) (model.SchedulerRun, error) {
+	return scanSchedulerRun(s.db.QueryRow(`
+SELECT id, schedule_id, runtime_id, skill_dir, skill_path, status, started_at,
+  finished_at, result_json, error, outbox_message_id, trigger_kind, tool_trace_json
+FROM agent_runs
+WHERE id = ?`, id))
+}
+
+func (s *Store) SaveSchedulerEnabledOverride(scheduleID string, enabled bool, updatedAt time.Time) error {
+	_, err := s.db.Exec(`
+INSERT INTO scheduler_overrides (schedule_id, enabled_override, updated_at)
+VALUES (?, ?, ?)
+ON CONFLICT(schedule_id) DO UPDATE SET
+  enabled_override = excluded.enabled_override,
+  updated_at = excluded.updated_at`, scheduleID, boolInt(enabled), formatTime(updatedAt))
+	return err
+}
+
+func (s *Store) GetSchedulerEnabledOverrides() (map[string]bool, error) {
+	rows, err := s.db.Query(`
+SELECT schedule_id, enabled_override
+FROM scheduler_overrides`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	overrides := map[string]bool{}
+	for rows.Next() {
+		var scheduleID string
+		var enabled int
+		if err := rows.Scan(&scheduleID, &enabled); err != nil {
+			return nil, err
+		}
+		overrides[scheduleID] = enabled != 0
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return overrides, nil
+}
+
+func (s *Store) scanSchedulerRuntime(row planScanner) (model.SchedulerRuntime, error) {
+	var runtime model.SchedulerRuntime
+	var lastRunAt, nextRunAt sql.NullString
+	var updatedAt string
+	err := row.Scan(&runtime.ID, &runtime.ScheduleID, &runtime.RegistryPath,
+		&runtime.RegistryHash, &runtime.SkillDir, &runtime.SkillPath,
+		&lastRunAt, &nextRunAt, &updatedAt)
+	if err != nil {
+		return model.SchedulerRuntime{}, err
+	}
+	runtime.LastRunAt = parseNullableTime(lastRunAt)
+	runtime.NextRunAt = parseNullableTime(nextRunAt)
+	runtime.UpdatedAt = parseTime(updatedAt)
+	return runtime, nil
+}
+
+func scanSchedulerRun(row planScanner) (model.SchedulerRun, error) {
+	var run model.SchedulerRun
+	var startedAt string
+	var finishedAt sql.NullString
+	err := row.Scan(&run.ID, &run.ScheduleID, &run.RuntimeID, &run.SkillDir,
+		&run.SkillPath, &run.Status, &startedAt, &finishedAt, &run.ResultJSON,
+		&run.Error, &run.OutboxMessageID, &run.TriggerKind, &run.ToolTraceJSON)
+	if err != nil {
+		return model.SchedulerRun{}, err
+	}
+	run.StartedAt = parseTime(startedAt)
+	run.FinishedAt = parseNullableTime(finishedAt)
+	if run.TriggerKind == "" {
+		run.TriggerKind = model.AgentTriggerKindScheduler
+	}
+	return run, nil
+}
+
 func (s *Store) AcquireLocks(paths []string, planID string, acquiredAt time.Time) error {
+	ttl := s.lockTTL
+	if ttl <= 0 {
+		ttl = DefaultLockTTL
+	}
+	expiresAt := acquiredAt.Add(ttl)
+	now := formatTime(acquiredAt)
+
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	// Reap rows whose expires_at is in the past or missing (stale crash
+	// remnants) before trying to insert. Same transaction so the takeover is
+	// atomic with the new acquisition.
+	if _, err := tx.Exec(`DELETE FROM vault_locks WHERE expires_at = '' OR expires_at <= ?`, now); err != nil {
+		return fmt.Errorf("reap stale vault locks: %w", err)
+	}
 	for _, path := range paths {
 		if _, err := tx.Exec(`
-INSERT INTO vault_locks (target_path, plan_id, acquired_at)
-VALUES (?, ?, ?)`, path, planID, formatTime(acquiredAt)); err != nil {
+INSERT INTO vault_locks (target_path, plan_id, acquired_at, expires_at)
+VALUES (?, ?, ?, ?)`, path, planID, now, formatTime(expiresAt)); err != nil {
 			return fmt.Errorf("acquire lock for %s: %w", path, err)
 		}
 	}
