@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  OpenWhisker matrix daemon - macOS launchd LaunchAgent template.
+  OpenWhisker daemon - macOS launchd LaunchAgent template.
 
   This is a COMMITTED TEMPLATE. Copy it to deploy/local/ (git-ignored),
   fill in the real <...> paths there, then install it as a per-user
@@ -10,10 +10,10 @@
     cp deploy/openwhisker.launchd.example.plist deploy/local/
     # edit the copy, replacing every <...> placeholder, then:
     cp deploy/local/openwhisker.launchd.example.plist \
-       ~/Library/LaunchAgents/com.openwhisker.matrix-daemon.plist
+       ~/Library/LaunchAgents/local.openwhisker.daemon.plist
     launchctl bootstrap gui/$(id -u) \
-       ~/Library/LaunchAgents/com.openwhisker.matrix-daemon.plist
-    launchctl kickstart -k gui/$(id -u)/com.openwhisker.matrix-daemon
+       ~/Library/LaunchAgents/local.openwhisker.daemon.plist
+    launchctl kickstart -k gui/$(id -u)/local.openwhisker.daemon
 
   A LaunchAgent (per-user) is used rather than a LaunchDaemon: the vault
   lives under the user's home and desktop Obsidian runs in the user
@@ -26,27 +26,30 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.openwhisker.matrix-daemon</string>
+  <string>local.openwhisker.daemon</string>
 
-  <!-- --db / --since-file / --session-file are relative to WorkingDirectory. -->
+  <!-- --db and --status-file are relative to WorkingDirectory. -->
   <key>ProgramArguments</key>
   <array>
-    <string><openwhisker-home>/bin/openwhisker</string>
-    <string>matrix</string>
+    <string>&lt;openwhisker-home&gt;/bin/openwhisker</string>
     <string>daemon</string>
     <string>--db</string>
     <string>data/openwhisker.db</string>
     <string>--vault</string>
-    <string><target-vault-path></string>
-    <string>--since-file</string>
-    <string>data/matrix-since.token</string>
-    <string>--session-file</string>
-    <string>data/matrix-session.json</string>
+    <string>&lt;target-vault-path&gt;</string>
+    <string>--vault-profile</string>
+    <string>knowledge-vault</string>
+    <string>--scheduler-tick-interval</string>
+    <string>1m</string>
+    <string>--status-file</string>
+    <string>data/daemon-status.json</string>
+    <string>--matrix</string>
+    <string>auto</string>
   </array>
 
   <!-- .env.local and data/ are resolved relative to this directory. -->
   <key>WorkingDirectory</key>
-  <string><openwhisker-home></string>
+  <string>&lt;openwhisker-home&gt;</string>
 
   <key>RunAtLoad</key>
   <true/>
@@ -60,8 +63,8 @@
   <integer>10</integer>
 
   <key>StandardOutPath</key>
-  <string><openwhisker-home>/data/daemon.log</string>
+  <string>&lt;openwhisker-home&gt;/logs/openwhisker-daemon.out.log</string>
   <key>StandardErrorPath</key>
-  <string><openwhisker-home>/data/daemon.log</string>
+  <string>&lt;openwhisker-home&gt;/logs/openwhisker-daemon.err.log</string>
 </dict>
 </plist>

@@ -65,6 +65,11 @@ daemon 启动时会从工作目录起向上查找并加载 `.env.local`：文件
 
 无需在 `.plist` / `.service` 文件里内联密钥 —— 把它们留在 `.env.local` 一处。
 
+Matrix 部署当前只配置一个私有、非 E2EE 自动化房间，并通过一个
+`OPENWHISKER_MATRIX_ROOM_ID` 接入。这个房间同时承载 capture、命令、审批、
+scheduler 输出和告警；不要在当前部署文档或模板中拆分 Inbox / Approval /
+Alert 等多房间拓扑。
+
 ## 以原生服务运行
 
 约定一个 **OpenWhisker home 目录**作为运行根，里面放：
@@ -100,6 +105,8 @@ launchctl enable gui/$(id -u)/local.openwhisker.daemon
 用 LaunchAgent（per-user）而非 LaunchDaemon，是因为 vault 在用户 home 下、桌面 Obsidian 也跑在用户会话里，daemon 以同一用户身份运行最省事。
 
 ### Linux —— systemd
+
+详细说明：[`systemd.md`](systemd.md)。
 
 模板：[`deploy/openwhisker.systemd.example.service`](../../deploy/openwhisker.systemd.example.service)。
 
@@ -177,6 +184,7 @@ deploy/local/
 
 - [Matrix Private IM 适配](../adapters/matrix-private-im.md)：homeserver / Caddy / Synapse 服务端拓扑。
 - [macOS launchd 部署](launchd.md)：OpenWhisker daemon 的用户级 LaunchAgent 模板与状态检查。
+- [Linux systemd 部署](systemd.md)：OpenWhisker daemon 的用户级 systemd service 模板与状态检查。
 - [设计哲学](../architecture/design-philosophy.md)：执行器、同步形态与设备拓扑约束。
 - [当前进度](../progress.md)：验证状态与已知遗留。
 - [环境变量模板](../../.env.local.example)：完整配置项清单。

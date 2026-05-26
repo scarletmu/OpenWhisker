@@ -28,17 +28,24 @@ func ProposalNotePath(planID, baseDir string) string {
 }
 
 // ApplyAsProposal renders a proposal note for a high-risk plan and writes it
-// under baseDir (vault-profile-supplied agent-proposals directory). The plan's
-// high-risk operations are recorded in the rendered note but are not executed
-// against the vault. The operation log row carries Outcome=proposed so
-// downstream auditors can distinguish proposal writes from regular applies.
-func (e DirectFS) ApplyAsProposal(ctx context.Context, plan model.VaultPlan, baseDir string) (model.AppliedOperation, error) {
+// under the vault profile's agent-proposals directory (derived from the
+// supplied conventions, not from a caller-chosen path). The plan's high-risk
+// operations are recorded in the rendered note but are not executed against
+// the vault. The operation log row carries Outcome=proposed so downstream
+// auditors can distinguish proposal writes from regular applies.
+//
+// Deriving the proposals dir from conventions rather than accepting a free
+// baseDir argument prevents a misconfigured caller from landing proposal
+// notes inside e.g. Knowledge/ or Meta/Reports/.
+func (e DirectFS) ApplyAsProposal(ctx context.Context, plan model.VaultPlan, conventions policy.Conventions) (model.AppliedOperation, error) {
 	if err := ctx.Err(); err != nil {
 		return model.AppliedOperation{}, err
 	}
 	if plan.RiskLevel != model.RiskHigh {
 		return model.AppliedOperation{}, fmt.Errorf("apply as proposal requires risk %q, got %q", model.RiskHigh, plan.RiskLevel)
 	}
+	conventions = conventions.Normalize()
+	baseDir := conventions.AgentProposalsDir
 	if strings.TrimSpace(baseDir) == "" {
 		return model.AppliedOperation{}, fmt.Errorf("apply as proposal requires non-empty proposals directory")
 	}
@@ -66,10 +73,7 @@ func (e DirectFS) ApplyAsProposal(ctx context.Context, plan model.VaultPlan, bas
 	if err != nil {
 		return model.AppliedOperation{}, err
 	}
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
-		return model.AppliedOperation{}, err
-	}
-	if err := os.WriteFile(fullPath, []byte(content), 0o644); err != nil {
+	if err := safeCreateAtomic(fullPath, []byte(content)); err != nil {
 		return model.AppliedOperation{}, err
 	}
 	afterHash := sha256Hex([]byte(content))

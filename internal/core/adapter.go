@@ -20,12 +20,22 @@ type AdapterService struct {
 	intentRouterMode string
 	intentClassifier IntentClassifier
 	now              func() time.Time
+
+	// Phase 6: optional ad-hoc agent dispatch via @<skill-id> mention. Both
+	// must be set for the @-mention path to engage; either nil → fall through
+	// to the existing intent classifier.
+	agentDispatcher AgentDispatcher
+	skillLookup     SkillLookup
 }
 
 type AdapterServiceOptions struct {
 	PlanOptions      PlanServiceOptions
 	IntentRouterMode string
 	IntentClassifier IntentClassifier
+
+	// Phase 6 optional ad-hoc dispatch (Matrix @-mention).
+	AgentDispatcher AgentDispatcher
+	SkillLookup     SkillLookup
 }
 
 type AdapterRequest struct {
@@ -57,6 +67,8 @@ func NewAdapterServiceWithOptions(store *storage.Store, vaultRoot string, opts A
 		intentRouterMode: normalizeIntentRouterMode(opts.IntentRouterMode),
 		intentClassifier: opts.IntentClassifier,
 		now:              func() time.Time { return time.Now().UTC() },
+		agentDispatcher:  opts.AgentDispatcher,
+		skillLookup:      opts.SkillLookup,
 	}
 }
 
@@ -88,10 +100,115 @@ func (s AdapterService) HandleText(ctx context.Context, req AdapterRequest) (Ada
 			}, nil
 		}
 	}
+	// Phase 6 @<skill-id> routing. Highest priority: when both dispatcher
+	// and lookup are configured AND the message opens with @<skill-id> +
+	// whitespace, dispatch through AgentRunner. Otherwise fall through to
+	// the existing intent classifier so Phase 5 behavior is unchanged.
+	if s.agentDispatcher != nil && s.skillLookup != nil {
+		if resp, handled, err := s.tryHandleAtMention(ctx, req); handled {
+			return resp, err
+		}
+	}
 	if s.intentRouterMode != "off" && !strings.HasPrefix(req.Text, "/") {
 		return s.handleIntentText(ctx, req)
 	}
 	return s.handleAdapterCommand(ctx, req)
+}
+
+// tryHandleAtMention returns handled=false when the message is not an
+// @<skill-id> ad-hoc query; the caller continues to the existing intent
+// branches. Client-completed Matrix mentions (which look like @user:server)
+// are *not* @-mentions in our protocol — they fall through.
+func (s AdapterService) tryHandleAtMention(ctx context.Context, req AdapterRequest) (AdapterResponse, bool, error) {
+	skillID, query, ok := parseAtSkillPrefix(req.Text)
+	if !ok {
+		return AdapterResponse{}, false, nil
+	}
+	skill, err := s.skillLookup.Find(skillID)
+	if err != nil {
+		return AdapterResponse{
+			Status: "vault_query_skill_not_found",
+			Body:   fmt.Sprintf("未找到 Skill: %s", skillID),
+		}, true, nil
+	}
+	if !skill.HasToolCalling() {
+		return AdapterResponse{
+			Status: "vault_query_skill_not_tool_calling",
+			Body:   fmt.Sprintf("Skill %s 未启用 tool-calling 引擎，无法用 @ 自然语言触发。", skillID),
+		}, true, nil
+	}
+	dispatched, err := s.agentDispatcher.DispatchAdHoc(ctx, AgentAdHocRequest{
+		Skill:       skill,
+		Query:       query,
+		TriggerKind: model.AgentTriggerKindAdhocMatrix,
+		Now:         s.now(),
+	})
+	if err != nil {
+		return AdapterResponse{
+			Status: "vault_query_failed",
+			Body:   fmt.Sprintf("Agent run 失败: %s\n[trace: %s]", err.Error(), dispatched.RunID),
+		}, true, nil
+	}
+	if dispatched.Status == model.SchedulerRunStatusFailed {
+		return AdapterResponse{
+			Status: "vault_query_failed",
+			Body:   fmt.Sprintf("Agent run 失败: %s\n[trace: %s]", dispatched.Error, dispatched.RunID),
+		}, true, nil
+	}
+	body := strings.TrimSpace(dispatched.Result.Summary)
+	if dispatched.Result.Title != "" {
+		body = dispatched.Result.Title + "\n\n" + body
+	}
+	if dispatched.Status == model.SchedulerRunStatusPartial {
+		body += "\n\n(状态: partial — budget 已耗尽)"
+	}
+	body += fmt.Sprintf("\n\n[trace: %s]", dispatched.RunID)
+	return AdapterResponse{
+		Status: "vault_query_handled",
+		Body:   body,
+	}, true, nil
+}
+
+// parseAtSkillPrefix matches messages of the form "@<skill-id> <query>" or
+// "@<skill-id>\n<query>". Returns ok=false when the prefix is not present or
+// the skill-id looks like a Matrix user mention (contains a colon).
+// skill-id chars: lowercase letters, digits, hyphen, underscore.
+func parseAtSkillPrefix(text string) (skillID, query string, ok bool) {
+	if !strings.HasPrefix(text, "@") {
+		return "", "", false
+	}
+	rest := text[1:]
+	// Split on first whitespace.
+	idx := strings.IndexAny(rest, " \t\n")
+	if idx < 0 {
+		// "@<skill-id>" alone with no following text is still a valid
+		// @-mention (treated as empty query).
+		skillID = rest
+	} else {
+		skillID = rest[:idx]
+		query = strings.TrimSpace(rest[idx+1:])
+	}
+	if skillID == "" {
+		return "", "", false
+	}
+	// Reject anything that looks like a Matrix user/room mention — those
+	// contain colons (e.g. @user:server.tld).
+	if strings.Contains(skillID, ":") {
+		return "", "", false
+	}
+	for _, r := range skillID {
+		if r >= 'a' && r <= 'z' {
+			continue
+		}
+		if r >= '0' && r <= '9' {
+			continue
+		}
+		if r == '-' || r == '_' {
+			continue
+		}
+		return "", "", false
+	}
+	return skillID, query, true
 }
 
 func (s AdapterService) handleAdapterCommand(ctx context.Context, req AdapterRequest) (AdapterResponse, error) {

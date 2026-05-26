@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -115,7 +116,10 @@ func (r StaticSkillRunner) Run(ctx context.Context, req SkillRunRequest) (SkillR
 	})
 }
 
-func (StaticSkillEngine) RunSkill(_ context.Context, req SkillExecutionRequest) (SkillRunResult, error) {
+func (StaticSkillEngine) RunSkill(ctx context.Context, req SkillExecutionRequest) (SkillRunResult, error) {
+	if err := ctx.Err(); err != nil {
+		return SkillRunResult{}, err
+	}
 	payload, err := json.Marshal(map[string]any{
 		"registry_path":         req.Schedule.RegistryPath,
 		"skill_path":            req.Schedule.SkillPath,
@@ -180,9 +184,20 @@ func (r StaticSkillRunner) readVaultContext(paths []string) ([]VaultContextItem,
 		if rel == "." || strings.HasPrefix(rel, "../") || rel == ".." {
 			return nil, fmt.Errorf("vault context path %q is outside vault root", path)
 		}
-		info, err := os.Stat(absPath)
+		// Lstat (not Stat) so a symlink-leaf under the vault is rejected
+		// before any file content is read. Without this, an attacker with
+		// write access to the vault could plant Meta/foo.md -> ~/.ssh/id_rsa
+		// and have the contents leaked into LLM prompts / Matrix outbox.
+		info, err := os.Lstat(absPath)
 		if err != nil {
 			return nil, fmt.Errorf("read vault context %q: %w", cleanPath, err)
+		}
+		mode := info.Mode()
+		if mode&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("vault context %q is a symlink; refusing to follow", cleanPath)
+		}
+		if !mode.IsRegular() && !info.IsDir() {
+			return nil, fmt.Errorf("vault context %q is not a regular file or directory", cleanPath)
 		}
 		if info.IsDir() {
 			item, err := readVaultContextDir(cleanPath, absPath)
@@ -202,11 +217,21 @@ func (r StaticSkillRunner) readVaultContext(paths []string) ([]VaultContextItem,
 }
 
 func readVaultContextFile(path, absPath string) (VaultContextItem, error) {
-	file, err := os.Open(absPath)
+	// O_NOFOLLOW so a leaf symlink (planted between the Lstat in readVaultContext
+	// and now) is rejected by the kernel. Also re-stat from the FD and refuse
+	// non-regular files, so a freshly-replaced fifo/device cannot leak data.
+	file, err := openNoFollow(absPath)
 	if err != nil {
 		return VaultContextItem{}, fmt.Errorf("read vault context %q: %w", path, err)
 	}
 	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return VaultContextItem{}, fmt.Errorf("read vault context %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return VaultContextItem{}, fmt.Errorf("read vault context %q: not a regular file", path)
+	}
 	limited := io.LimitReader(file, maxVaultContextFileBytes+1)
 	data, err := io.ReadAll(limited)
 	if err != nil {
@@ -232,6 +257,13 @@ func readVaultContextDir(path, absPath string) (VaultContextItem, error) {
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		name := entry.Name()
+		// Drop symlinks from the listing so callers do not see paths that
+		// would be refused by the file-reader hardening above. Mark them
+		// explicitly with a trailing @ so operators notice the omission.
+		if entry.Type()&os.ModeSymlink != 0 {
+			names = append(names, name+"@")
+			continue
+		}
 		if entry.IsDir() {
 			name += "/"
 		}
@@ -248,6 +280,13 @@ func readVaultContextDir(path, absPath string) (VaultContextItem, error) {
 		Entries:   names,
 		Truncated: truncated,
 	}, nil
+}
+
+// openNoFollow opens fullPath read-only, refusing to follow a symlink at the
+// leaf. The project targets unix; if a non-unix build is ever introduced, the
+// O_NOFOLLOW reference will be a compile-time signal to plumb a fallback.
+func openNoFollow(fullPath string) (*os.File, error) {
+	return os.OpenFile(fullPath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 }
 
 func firstMarkdownHeading(content string) string {

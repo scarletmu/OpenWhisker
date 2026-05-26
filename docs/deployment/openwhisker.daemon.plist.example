@@ -38,11 +38,5 @@
 
   <key>StandardErrorPath</key>
   <string>&lt;repo-root&gt;/logs/openwhisker-daemon.err.log</string>
-
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>OPENWHISKER_SCHEDULER_ENGINE</key>
-    <string>static</string>
-  </dict>
 </dict>
 </plist>

@@ -15,8 +15,15 @@ import (
 	"github.com/scarletmu/openwhisker/internal/model"
 )
 
+// DefaultLockTTL bounds how long a vault_locks row stays valid before
+// AcquireLocks may forcibly take it over. The window is intentionally larger
+// than any healthy Apply, so we only steal locks left behind by SIGKILL /
+// crash / panic without a successful ReleaseLocks.
+const DefaultLockTTL = 30 * time.Minute
+
 type Store struct {
-	db *sql.DB
+	db      *sql.DB
+	lockTTL time.Duration
 }
 
 func Open(path string) (*Store, error) {
@@ -31,12 +38,29 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	store := &Store{db: db}
+	store := &Store{db: db, lockTTL: DefaultLockTTL}
 	if err := store.migrate(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
+	// Sweep locks left behind by a previous crash. Rows that have an
+	// expires_at in the past are definitionally stale; rows with empty
+	// expires_at (pre-migration data) are also dropped on startup since the
+	// owning process is gone.
+	if _, err := db.Exec(`DELETE FROM vault_locks WHERE expires_at = '' OR expires_at <= ?`,
+		formatTime(time.Now().UTC())); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("clear stale vault locks: %w", err)
+	}
 	return store, nil
+}
+
+// SetLockTTL overrides the lock TTL. Tests use a short TTL to exercise the
+// stale-lock takeover path without sleeping for the production default.
+func (s *Store) SetLockTTL(d time.Duration) {
+	if d > 0 {
+		s.lockTTL = d
+	}
 }
 
 func (s *Store) Close() error {
@@ -605,28 +629,42 @@ func (s *Store) HasRunningSchedulerRun(scheduleID string) (bool, error) {
 	var count int
 	err := s.db.QueryRow(`
 SELECT COUNT(*)
-FROM scheduler_runs
+FROM agent_runs
 WHERE schedule_id = ? AND status = ?`, scheduleID, model.SchedulerRunStatusRunning).Scan(&count)
 	return count > 0, err
 }
 
 func (s *Store) CreateSchedulerRun(run model.SchedulerRun) error {
+	triggerKind := run.TriggerKind
+	if triggerKind == "" {
+		triggerKind = model.AgentTriggerKindScheduler
+	}
 	_, err := s.db.Exec(`
-INSERT INTO scheduler_runs (
+INSERT INTO agent_runs (
   id, schedule_id, runtime_id, skill_dir, skill_path, status, started_at,
-  finished_at, result_json, error, outbox_message_id
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  finished_at, result_json, error, outbox_message_id, trigger_kind, tool_trace_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.ID, run.ScheduleID, run.RuntimeID, run.SkillDir, run.SkillPath, run.Status,
 		formatTime(run.StartedAt), nullableTime(run.FinishedAt), run.ResultJSON,
-		run.Error, run.OutboxMessageID)
+		run.Error, run.OutboxMessageID, triggerKind, run.ToolTraceJSON)
 	return err
 }
 
 func (s *Store) FinishSchedulerRun(id, status, resultJSON, errText, outboxMessageID string, finishedAt time.Time) error {
 	_, err := s.db.Exec(`
-UPDATE scheduler_runs
+UPDATE agent_runs
 SET status = ?, finished_at = ?, result_json = ?, error = ?, outbox_message_id = ?
 WHERE id = ?`, status, formatTime(finishedAt), resultJSON, errText, outboxMessageID, id)
+	return err
+}
+
+// FinishAgentRun is the Phase 6 superset of FinishSchedulerRun: it also writes
+// the tool_trace_json column. Used by AgentRunner for tool-calling runs.
+func (s *Store) FinishAgentRun(id, status, resultJSON, errText, outboxMessageID, toolTraceJSON string, finishedAt time.Time) error {
+	_, err := s.db.Exec(`
+UPDATE agent_runs
+SET status = ?, finished_at = ?, result_json = ?, error = ?, outbox_message_id = ?, tool_trace_json = ?
+WHERE id = ?`, status, formatTime(finishedAt), resultJSON, errText, outboxMessageID, toolTraceJSON, id)
 	return err
 }
 
@@ -636,8 +674,8 @@ func (s *Store) ListSchedulerRuns(scheduleID string, limit int) ([]model.Schedul
 	}
 	rows, err := s.db.Query(`
 SELECT id, schedule_id, runtime_id, skill_dir, skill_path, status, started_at,
-  finished_at, result_json, error, outbox_message_id
-FROM scheduler_runs
+  finished_at, result_json, error, outbox_message_id, trigger_kind, tool_trace_json
+FROM agent_runs
 WHERE schedule_id = ?
 ORDER BY started_at DESC
 LIMIT ?`, scheduleID, limit)
@@ -660,15 +698,35 @@ LIMIT ?`, scheduleID, limit)
 }
 
 func (s *Store) ListRecentSchedulerRuns(limit int) ([]model.SchedulerRun, error) {
+	return s.ListRecentAgentRuns("", limit)
+}
+
+// ListRecentAgentRuns returns recent agent_runs filtered by trigger kind.
+// triggerKind == "" means no filter (matches scheduler + adhoc rows).
+func (s *Store) ListRecentAgentRuns(triggerKind string, limit int) ([]model.SchedulerRun, error) {
 	if limit <= 0 {
 		limit = 20
 	}
-	rows, err := s.db.Query(`
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if triggerKind == "" {
+		rows, err = s.db.Query(`
 SELECT id, schedule_id, runtime_id, skill_dir, skill_path, status, started_at,
-  finished_at, result_json, error, outbox_message_id
-FROM scheduler_runs
+  finished_at, result_json, error, outbox_message_id, trigger_kind, tool_trace_json
+FROM agent_runs
 ORDER BY started_at DESC
 LIMIT ?`, limit)
+	} else {
+		rows, err = s.db.Query(`
+SELECT id, schedule_id, runtime_id, skill_dir, skill_path, status, started_at,
+  finished_at, result_json, error, outbox_message_id, trigger_kind, tool_trace_json
+FROM agent_runs
+WHERE trigger_kind = ?
+ORDER BY started_at DESC
+LIMIT ?`, triggerKind, limit)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -718,8 +776,8 @@ LIMIT ?`, limit)
 func (s *Store) GetSchedulerRun(id string) (model.SchedulerRun, error) {
 	return scanSchedulerRun(s.db.QueryRow(`
 SELECT id, schedule_id, runtime_id, skill_dir, skill_path, status, started_at,
-  finished_at, result_json, error, outbox_message_id
-FROM scheduler_runs
+  finished_at, result_json, error, outbox_message_id, trigger_kind, tool_trace_json
+FROM agent_runs
 WHERE id = ?`, id))
 }
 
@@ -778,25 +836,41 @@ func scanSchedulerRun(row planScanner) (model.SchedulerRun, error) {
 	var finishedAt sql.NullString
 	err := row.Scan(&run.ID, &run.ScheduleID, &run.RuntimeID, &run.SkillDir,
 		&run.SkillPath, &run.Status, &startedAt, &finishedAt, &run.ResultJSON,
-		&run.Error, &run.OutboxMessageID)
+		&run.Error, &run.OutboxMessageID, &run.TriggerKind, &run.ToolTraceJSON)
 	if err != nil {
 		return model.SchedulerRun{}, err
 	}
 	run.StartedAt = parseTime(startedAt)
 	run.FinishedAt = parseNullableTime(finishedAt)
+	if run.TriggerKind == "" {
+		run.TriggerKind = model.AgentTriggerKindScheduler
+	}
 	return run, nil
 }
 
 func (s *Store) AcquireLocks(paths []string, planID string, acquiredAt time.Time) error {
+	ttl := s.lockTTL
+	if ttl <= 0 {
+		ttl = DefaultLockTTL
+	}
+	expiresAt := acquiredAt.Add(ttl)
+	now := formatTime(acquiredAt)
+
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	// Reap rows whose expires_at is in the past or missing (stale crash
+	// remnants) before trying to insert. Same transaction so the takeover is
+	// atomic with the new acquisition.
+	if _, err := tx.Exec(`DELETE FROM vault_locks WHERE expires_at = '' OR expires_at <= ?`, now); err != nil {
+		return fmt.Errorf("reap stale vault locks: %w", err)
+	}
 	for _, path := range paths {
 		if _, err := tx.Exec(`
-INSERT INTO vault_locks (target_path, plan_id, acquired_at)
-VALUES (?, ?, ?)`, path, planID, formatTime(acquiredAt)); err != nil {
+INSERT INTO vault_locks (target_path, plan_id, acquired_at, expires_at)
+VALUES (?, ?, ?, ?)`, path, planID, now, formatTime(expiresAt)); err != nil {
 			return fmt.Errorf("acquire lock for %s: %w", path, err)
 		}
 	}

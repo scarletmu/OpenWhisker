@@ -40,13 +40,42 @@ func ParseCron(expr string) (CronSchedule, error) {
 	if err != nil {
 		return CronSchedule{}, fmt.Errorf("day-of-week: %w", err)
 	}
-	return CronSchedule{
+	schedule := CronSchedule{
 		minute:     minute,
 		hour:       hour,
 		dayOfMonth: dayOfMonth,
 		month:      month,
 		dayOfWeek:  dayOfWeek,
-	}, nil
+	}
+	if err := validateCronSatisfiable(schedule); err != nil {
+		return CronSchedule{}, err
+	}
+	return schedule, nil
+}
+
+// validateCronSatisfiable rejects month/day-of-month combinations that can
+// never match the Gregorian calendar (e.g. "0 0 30 2 *" — Feb 30). Without
+// this, NextAfter would otherwise scan up to five years one minute at a time
+// (~2.6M iterations) on every Tick.
+func validateCronSatisfiable(c CronSchedule) error {
+	// Build the set of valid (month, day) pairs allowed by the calendar.
+	// Use a leap year so Feb 29 is permitted when month=2.
+	daysPerMonth := map[int]int{
+		1: 31, 2: 29, 3: 31, 4: 30, 5: 31, 6: 30,
+		7: 31, 8: 31, 9: 30, 10: 31, 11: 30, 12: 31,
+	}
+	for month := range c.month {
+		max, ok := daysPerMonth[month]
+		if !ok {
+			continue
+		}
+		for dom := range c.dayOfMonth {
+			if dom >= 1 && dom <= max {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("cron expression has no satisfiable (month, day-of-month) combination")
 }
 
 func (c CronSchedule) Matches(t time.Time) bool {
@@ -67,13 +96,30 @@ func (c CronSchedule) CurrentWindow(now time.Time, loc *time.Location) (time.Tim
 }
 
 func (c CronSchedule) NextAfter(after time.Time, loc *time.Location) (time.Time, error) {
-	next := after.In(loc).Truncate(time.Minute).Add(time.Minute)
-	deadline := next.AddDate(5, 0, 0)
-	for !next.After(deadline) {
-		if c.Matches(next) {
-			return next.UTC(), nil
+	start := after.In(loc).Truncate(time.Minute).Add(time.Minute)
+	// 5-year deadline preserves the previous public contract while
+	// validateCronSatisfiable prevents the worst-case 2.6M-iteration spin.
+	deadline := start.AddDate(5, 0, 0)
+	// Day-then-minute scan: advance by whole days until we find one whose
+	// (month, day-of-month, day-of-week) all match, then scan the matching
+	// minutes within that day. Worst case ~5y * 366d ~= 1832 day iterations
+	// + at most 24*60 minute iterations, vs ~2.6M for the old per-minute
+	// loop, even on schedules that fire only a few times a year.
+	day := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, loc)
+	for !day.After(deadline) {
+		if c.month[int(day.Month())] && c.dayOfMonth[day.Day()] && c.dayOfWeek[int(day.Weekday())] {
+			candidate := day
+			if day.Equal(time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, loc)) {
+				candidate = start
+			}
+			for candidate.Day() == day.Day() && !candidate.After(deadline) {
+				if c.minute[candidate.Minute()] && c.hour[candidate.Hour()] {
+					return candidate.UTC(), nil
+				}
+				candidate = candidate.Add(time.Minute)
+			}
 		}
-		next = next.Add(time.Minute)
+		day = day.AddDate(0, 0, 1)
 	}
 	return time.Time{}, fmt.Errorf("no cron occurrence found within 5 years")
 }

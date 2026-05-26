@@ -120,6 +120,38 @@ func TestRSSExternalInfoAdapterRejectsUnsafeFeedURL(t *testing.T) {
 	}
 }
 
+func TestRSSExternalInfoAdapterRejectsInternalHosts(t *testing.T) {
+	cases := []struct {
+		name   string
+		url    string
+		needle string
+	}{
+		{"loopback ipv4", "http://127.0.0.1/feed", "loopback"},
+		{"loopback ipv6", "http://[::1]/feed", "loopback"},
+		{"private rfc1918", "http://10.0.0.1/feed", "private"},
+		{"metadata link-local", "http://169.254.169.254/latest/meta-data/", "link-local"},
+		{"localhost name", "http://localhost/feed", "reserved name"},
+		{"internal suffix", "http://api.internal/feed", "reserved name"},
+		{"mDNS local", "http://router.local/feed", "reserved name"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := RSSExternalInfoAdapter{}.ReadInfo(context.Background(), ExternalInfoRequest{
+				Source: "rss",
+				Schedule: ScheduledSkill{
+					ID:              "internal",
+					ExternalSources: []string{"rss"},
+					SkillConfigJSON: json.RawMessage(`{"feed_urls":"` + tc.url + `"}`),
+				},
+				Now: time.Date(2026, 5, 23, 8, 0, 0, 0, time.UTC),
+			})
+			if err == nil || !strings.Contains(err.Error(), tc.needle) {
+				t.Fatalf("error = %v, want %q rejection", err, tc.needle)
+			}
+		})
+	}
+}
+
 type schedulerRoundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f schedulerRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {

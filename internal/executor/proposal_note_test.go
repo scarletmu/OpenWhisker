@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/scarletmu/openwhisker/internal/model"
+	"github.com/scarletmu/openwhisker/internal/policy"
 	"github.com/scarletmu/openwhisker/internal/storage"
 )
 
@@ -105,7 +106,7 @@ func TestApplyAsProposalWritesNoteAndProposedLog(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	applied, err := NewDirectFS(vaultRoot, store).ApplyAsProposal(context.Background(), plan, "Raw/Agent-Proposals")
+	applied, err := NewDirectFS(vaultRoot, store).ApplyAsProposal(context.Background(), plan, policy.DefaultConventions())
 	if err != nil {
 		t.Fatalf("ApplyAsProposal() error = %v", err)
 	}
@@ -159,7 +160,7 @@ func TestApplyAsProposalRejectsMediumRisk(t *testing.T) {
 	defer store.Close()
 	plan := highRiskRenamePlanFixture(t)
 	plan.RiskLevel = model.RiskMedium
-	_, err = NewDirectFS(vaultRoot, store).ApplyAsProposal(context.Background(), plan, "Raw/Agent-Proposals")
+	_, err = NewDirectFS(vaultRoot, store).ApplyAsProposal(context.Background(), plan, policy.DefaultConventions())
 	if err == nil || !strings.Contains(err.Error(), "high") {
 		t.Fatalf("ApplyAsProposal() error = %v, want risk mismatch", err)
 	}

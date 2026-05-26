@@ -8,11 +8,14 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/scarletmu/openwhisker/internal/sanitize"
 )
 
 const (
@@ -113,7 +116,7 @@ func (a RSSExternalInfoAdapter) ReadInfo(ctx context.Context, req ExternalInfoRe
 	}
 	client := a.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: rssHTTPClientTimeout}
+		client = newSafeRSSClient()
 	}
 	payload := rssPayload{}
 	for i, feedURL := range cfg.FeedURLs {
@@ -174,29 +177,11 @@ func rssConfigFromSchedule(schedule ScheduledSkill) (rssAdapterConfig, error) {
 	return rssAdapterConfig{FeedURLs: feedURLs, ItemLimit: itemLimit}, nil
 }
 
+// SanitizedSkillConfigJSON is a thin wrapper around sanitize.SkillConfigJSON
+// that takes a ScheduledSkill (the only caller pattern in this codebase).
+// All redaction logic lives in internal/sanitize.
 func SanitizedSkillConfigJSON(schedule ScheduledSkill) json.RawMessage {
-	if len(schedule.SkillConfigJSON) == 0 || !json.Valid(schedule.SkillConfigJSON) {
-		return json.RawMessage(`{}`)
-	}
-	var values map[string]string
-	if err := json.Unmarshal(schedule.SkillConfigJSON, &values); err != nil {
-		return schedule.SkillConfigJSON
-	}
-	for key, value := range values {
-		switch strings.ToLower(strings.TrimSpace(key)) {
-		case "feed_url", "feed_urls":
-			values[key] = strings.Join(sanitizedFeedURLList(value), ",")
-		default:
-			if isSensitiveConfigKey(key) {
-				values[key] = "<redacted>"
-			}
-		}
-	}
-	encoded, err := json.Marshal(values)
-	if err != nil {
-		return json.RawMessage(`{}`)
-	}
-	return encoded
+	return sanitize.SkillConfigJSON(schedule.SkillConfigJSON)
 }
 
 func fetchRSSFeed(ctx context.Context, client *http.Client, feedURL string, itemLimit int) (rssFeedSnapshot, error) {
@@ -313,12 +298,104 @@ func validateFeedURL(value string) error {
 	}
 	switch strings.ToLower(parsed.Scheme) {
 	case "http", "https":
-		return nil
 	default:
 		return errors.New("feed URL scheme must be http or https")
 	}
+	hostname := parsed.Hostname()
+	if hostname == "" {
+		return errors.New("feed URL host is required")
+	}
+	// Reject explicit IP literals that target internal/loopback/metadata
+	// services without paying for a DNS lookup. DNS-name targets still get
+	// re-checked at fetch time (see fetchRSSFeed) to defeat DNS rebinding
+	// and to refuse names that resolve only to private space.
+	if ip := net.ParseIP(hostname); ip != nil {
+		if err := assertPublicIP(ip); err != nil {
+			return fmt.Errorf("feed URL host %s: %w", hostname, err)
+		}
+	} else if isReservedHostname(hostname) {
+		return fmt.Errorf("feed URL host %q targets a reserved name", hostname)
+	}
+	return nil
 }
 
+// assertPublicIP rejects loopback, link-local, multicast, unspecified, and
+// RFC1918 / RFC4193 / cloud-metadata addresses. This is the SSRF guard for
+// the RSS adapter — without it a vault SCHEDULE.md could point feed_urls at
+// http://169.254.169.254/ (AWS/GCP IMDS) or http://10.x.x.x/ (internal admin
+// endpoints) and the daemon would happily fetch + surface the response.
+func assertPublicIP(ip net.IP) error {
+	if ip.IsUnspecified() {
+		return errors.New("address is unspecified (0.0.0.0/::)")
+	}
+	if ip.IsLoopback() {
+		return errors.New("address is loopback")
+	}
+	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return errors.New("address is link-local")
+	}
+	if ip.IsMulticast() {
+		return errors.New("address is multicast")
+	}
+	if ip.IsPrivate() {
+		return errors.New("address is private (RFC1918 / RFC4193)")
+	}
+	// Cloud-metadata + benchmark ranges. IsPrivate() does not cover
+	// 169.254.169.254 (link-local handled above), but 100.64.0.0/10
+	// (RFC6598 carrier-grade NAT) and IPv4-mapped IPv6 of the same need an
+	// explicit check.
+	if v4 := ip.To4(); v4 != nil {
+		// 100.64.0.0/10 RFC6598 shared address space.
+		if v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
+			return errors.New("address is RFC6598 shared address space")
+		}
+	}
+	return nil
+}
+
+// isReservedHostname returns true for DNS names that map to local/internal
+// services we never want to fetch even if the operator forgets to use an
+// IP literal.
+func isReservedHostname(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	if host == "" {
+		return true
+	}
+	if host == "localhost" {
+		return true
+	}
+	suffixes := []string{
+		".localhost",
+		".local",       // mDNS
+		".internal",    // common internal TLD
+		".intranet",
+		".corp",
+		".home",
+		".lan",
+	}
+	for _, suffix := range suffixes {
+		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// safeFeedURLLabel returns a single-URL form of sanitize.FeedURLList: useful
+// for tagging a fetched snapshot with its (sanitized) source URL without
+// retaining user-info / query / fragment leaks.
+func safeFeedURLLabel(value string) string {
+	labels := sanitize.FeedURLList(value)
+	if len(labels) == 0 {
+		return ""
+	}
+	return labels[0]
+}
+
+// splitFeedURLs is still used by the RSS input-parsing path (validateFeedURL
+// loop in newRSSAdapterConfig). The earlier sanitized-URL helpers moved to
+// internal/sanitize; the splitter stays here because it serves a parsing
+// purpose rather than a redaction one.
 func splitFeedURLs(value string) []string {
 	parts := strings.FieldsFunc(value, func(r rune) bool {
 		return r == ',' || r == '\n' || r == '\r'
@@ -330,39 +407,6 @@ func splitFeedURLs(value string) []string {
 		}
 	}
 	return out
-}
-
-func safeFeedURLLabel(value string) string {
-	parsed, err := url.Parse(value)
-	if err != nil {
-		return ""
-	}
-	parsed.User = nil
-	parsed.RawQuery = ""
-	parsed.Fragment = ""
-	return parsed.String()
-}
-
-func sanitizedFeedURLList(value string) []string {
-	rawURLs := splitFeedURLs(value)
-	out := make([]string, 0, len(rawURLs))
-	for _, rawURL := range rawURLs {
-		label := safeFeedURLLabel(rawURL)
-		if label != "" {
-			out = append(out, label)
-		}
-	}
-	return out
-}
-
-func isSensitiveConfigKey(key string) bool {
-	key = strings.ToLower(strings.TrimSpace(key))
-	for _, marker := range []string{"token", "secret", "password", "api_key", "apikey", "authorization", "auth"} {
-		if strings.Contains(key, marker) {
-			return true
-		}
-	}
-	return false
 }
 
 func atomLink(links []atomXMLLink) string {
@@ -401,4 +445,66 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// newSafeRSSClient returns the default outbound HTTP client used by the RSS
+// adapter when the caller doesn't inject one. It wraps http.DefaultTransport
+// with a RoundTripper that resolves the request hostname and re-applies the
+// public-IP guard to every resolved address (defeating DNS rebinding /
+// CNAME-to-private-IP attacks against feed URLs whose hostnames passed the
+// initial validateFeedURL check). The wrapper preserves http.DefaultTransport
+// as the underlying transport so callers that swap DefaultTransport (e.g.
+// integration tests using a stub round-tripper) continue to win.
+func newSafeRSSClient() *http.Client {
+	return &http.Client{
+		Timeout:   rssHTTPClientTimeout,
+		Transport: safeRSSTransport{},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return errors.New("too many redirects")
+			}
+			return validateFeedURL(req.URL.String())
+		},
+	}
+}
+
+type safeRSSTransport struct{}
+
+func (safeRSSTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if err := assertRequestHostPublic(req); err != nil {
+		return nil, err
+	}
+	return http.DefaultTransport.RoundTrip(req)
+}
+
+// assertRequestHostPublic resolves the request hostname and rejects the
+// request if any returned address is non-public. If resolution fails or
+// returns no addresses, the underlying transport handles the dial (and any
+// failure that follows), so this function never adds a false positive.
+func assertRequestHostPublic(req *http.Request) error {
+	hostname := req.URL.Hostname()
+	if hostname == "" {
+		return errors.New("rss adapter: request has no hostname")
+	}
+	if ip := net.ParseIP(hostname); ip != nil {
+		if err := assertPublicIP(ip); err != nil {
+			return fmt.Errorf("rss adapter: refusing host %s: %w", hostname, err)
+		}
+		return nil
+	}
+	resolver := net.DefaultResolver
+	addrs, err := resolver.LookupHost(req.Context(), hostname)
+	if err != nil || len(addrs) == 0 {
+		return nil
+	}
+	for _, addr := range addrs {
+		ip := net.ParseIP(addr)
+		if ip == nil {
+			continue
+		}
+		if err := assertPublicIP(ip); err != nil {
+			return fmt.Errorf("rss adapter: %s resolved to %s: %w", hostname, addr, err)
+		}
+	}
+	return nil
 }

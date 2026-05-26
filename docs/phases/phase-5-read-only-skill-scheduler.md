@@ -21,7 +21,7 @@
 - 首版 Scheduler Host 已拆出可替换的 `SkillEngine` 和 info-only `ExternalInfoAdapter` 接口：默认 engine 仍只生成 generic outbox 摘要；CLI 可显式选择 OpenAI-compatible Scheduler Engine；`knowledge-vault` profile 允许 `rss` 外部信息源，CLI 配置了只读 RSS / Atom adapter，可读取 RSSHub route、普通 RSS feed 或 Atom feed。
 - outbox 已有 `actor` 字段：Scheduler 产生的消息标记为 `scheduler` actor，既有知识处理链路默认是 `knowledge` actor；Matrix delivery 可以按 actor 选择 Knowledge Bot / Scheduler Bot 发送身份，并忽略同 room 内两个 bot 自己发出的消息。
 - `payload.suggested_raw_captures` 已有显式确认入口：`openwhisker scheduler accept <run_id>` 和 Matrix `/scheduler accept <run_id> [item_number]` 会读取指定 scheduler run 的指定建议条目，并转入既有 low-risk raw capture workflow；Scheduler 本身仍不写 vault。
-- 独立 `openwhisker daemon` 已实现 scheduler tick loop、可选 Matrix poll loop、tick 后 outbox delivery、状态文件和 `openwhisker daemon status`；macOS launchd 部署模板见 `docs/deployment/launchd.md`。
+- 独立 `openwhisker daemon` 已实现 scheduler tick loop、可选 Matrix poll loop、tick 后 outbox delivery、状态文件和 `openwhisker daemon status`；macOS launchd 部署模板见 `docs/deployment/launchd.md`，Linux systemd 部署模板见 `docs/deployment/systemd.md`。
 
 ## 背景
 

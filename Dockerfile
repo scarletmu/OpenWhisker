@@ -33,6 +33,6 @@ COPY --from=build /out/openwhisker /usr/local/bin/openwhisker
 # Persistent state (SQLite DB, Matrix session cache, /sync since-token).
 VOLUME ["/home/openwhisker/data"]
 
-# Default to the long-running Matrix daemon. Override args via compose `command:`.
+# Default to the long-running workflow host. Override args via compose `command:`.
 ENTRYPOINT ["openwhisker"]
-CMD ["matrix", "daemon"]
+CMD ["daemon"]

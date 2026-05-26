@@ -1,5 +1,98 @@
 # Changelog
 
+## 2026-05-26 - Phase 6 落地：Agent-Driven Vault Knowledge Response
+
+按 `docs/phases/phase-6-scheduler-skill-creator.md` 草稿完成 Phase 6 一次性实现。Phase 5 read-only scheduler 之外新增了 agent runtime（多轮 ReAct + 受限工具集 + budget enforcement）、三条 trigger 通道（cron / Matrix @-mention / CLI `openwhisker ask`）、vault Skill 创作链路的工程基础（schema + lint CLI）、链接图索引子系统。
+
+新增子系统：
+
+- `internal/sanitize/`：通用脱敏包。`FreeText` 处理私有主机名、邮箱、Bearer token、Matrix ID、`/Users/<user>` 路径、私网 IP；`SkillConfigJSON` / `FeedURLList` / `IsSensitiveConfigKey` 从 `internal/scheduler/rss_adapter.go` 抽取并扩展。RSS adapter 改为薄包装。
+- `internal/vault/linkindex/`：fsnotify-based 内存链接图索引。daemon 异步全量构建 + 200ms debounce 增量维护；CLI 进程同步构建并受 5000-文件软门槛保护（`--force-build-index` 越权）。
+- `internal/agent/`：新增 `AgentRunner`、`ToolCallingEngine`、5 vault tools (`list_vault_dir` / `read_vault_note` / `vault_outlinks` / `vault_backlinks` / `vault_text_search`) + 内置 `submit_result` 终止协议。OpenAI Chat Completions function-calling 接入；DeepSeek `deepseek-chat` 为主 provider。
+- `internal/agentdispatch/`：胶水包，把 `agent.AgentRunner` 适配为 `core.AgentDispatcher`（避免 `core ↔ agent` import cycle）；同时管理 ad-hoc `agent_runs` 行生命周期。
+
+Registry / schema：
+
+- `internal/scheduler/registry.go`：增加 `Agent/Skills/<id>/SKILL.md` 加载路径；Phase 5 `Scheduler/Skills/*/SCHEDULE.md` 作为 backwards-compat 加载源 + deprecation warning。SKILL.md 是 agent runtime 配置的唯一来源（engine / vault_tools / vault_scope / budget / capabilities）；SCHEDULE.md 仅触发字段（cron / timezone / enabled / id），Phase 6 新字段出现在 SCHEDULE.md = lint error，Phase 5 旧字段 = warning。隐式 engine 推断（非空 `vault_tools` → `tool-calling`）；显式冲突 reject。全局 Skill id 唯一性跨两个目录树校验。
+- `IsForbiddenScopePath`：拒绝 `.obsidian/`、`.git/`、`.trash/`、`.DS_Store` 前缀；在 registry load 和 tool execute 两层都强制。
+- `docs/phases/phase-6-scheduler-skill-creator/{skill,schedule}-schema.json`：正式 JSON Schema，registry loader 与 `openwhisker skill lint` 共享。
+
+存储 / migration：
+
+- `scheduler_runs` → `agent_runs` RENAME；新增 `tool_trace_json TEXT` + `trigger_kind TEXT NOT NULL DEFAULT 'scheduler'` 两列；新增 `idx_agent_runs_trigger_kind` 索引。无 down migration，daemon 首次启动检测旧表自动迁移。`model.SchedulerRun` 增加对应字段；`AgentTriggerKindScheduler/AdhocMatrix/AdhocCLI`、`SchedulerRunStatusPartial`、`AgentTraceTermination*` 常量补齐。
+- `Store.FinishAgentRun` 新方法处理 trace 列；旧的 `FinishSchedulerRun` 保留为不带 trace 的兼容入口。`ListRecentAgentRuns(triggerKind, limit)` 支持按触发源筛选。
+
+CLI 命令：
+
+- `openwhisker ask --skill <id> [--json] [--debug] "<query>"`：本地终端单次 ad-hoc 查询。同步现建 link index（受软门槛保护），debug 模式落 `data/agent-debug/<run_id>.ndjson`。
+- `openwhisker skill lint [--strict] <path>`：read-only schema 校验。退出码 0/1/2。共用 registry loader 的实际规则，避免 lint 与 runtime 漂移。
+- `openwhisker agent runs list [--trigger-kind ...]` / `openwhisker agent runs <id> [--trace]`：trace 查看入口。`openwhisker scheduler runs` 保留为 `--trigger-kind=scheduler` 的兼容别名。
+
+Trigger 通路：
+
+- Scheduler tick / daemon：自动判定 Skill 是否 tool-calling，是则走 AgentRunner；否则 Phase 5 `StaticSkillRunner` 路径不变。
+- Matrix Bot：`AdapterService` 增加 `@<skill-id> <query>` 检测，在 hybrid intent classifier 之前路由到 AgentRunner（trigger_kind = `adhoc_matrix`）。客户端补全的 `@user:server` mention（含冒号）被显式视为非 Skill mention，回落 Phase 5 intent 分支。
+- 三条路径共用 `core.AgentDispatcher` 接口和 `agentdispatch.Dispatcher` 实现，trace 字段经 `internal/sanitize` 脱敏后落 SQLite。
+
+Budget：
+
+- `profile.SchedulerProfile.ToolBudgetDefaults` 字段；`DefaultToolBudgetDefaults()` 编译期 fallback (`8 / 200 KiB / 60s`)。
+- 每个 Skill 的 `budget` 字段可在 cap 内向下覆盖；超 cap reject 加载。运行期 `force_finalize`（call/bytes 超）+ `hard_fail`（wall-clock 超）+ `protocol_failed`（连续两次自由文本未调 submit_result）三档终止。
+
+测试：
+
+- 所有包 `go vet ./... && go test ./... -count=1` 全绿。
+- 新增测试覆盖：Phase 6 registry 加载路径、forbidden prefix 防御、engine inference / conflict、budget cap、global id uniqueness、Phase 5 backwards-compat。
+- AgentRunner / ToolCallingEngine：happy path、out-of-scope 防御、protocol-failed 双次拒绝、budget force-finalize → partial status、link index not-ready 错误流。
+- `parseAtSkillPrefix`：happy / bare mention / newline delim / Matrix user-mention 拒绝 / 非法字符。
+- LinkIndex：wikilink + frontmatter related、forbidden dir skip、read roots filter、模糊 wikilink unresolved、generation 计数。
+- Sanitize：sensitive key、feed URL list、JSON object 红ぎaction、free text 全模式覆盖、公共域名保留。
+
+未包含 / 留给后续：
+
+- **OPEN-1 demo（≥9/10 通过的 deepseek-chat 多轮稳定性验证）**：实现已完成，但实际 demo run 需要用户提供 LLM API key 并在真实 `~/Documents/KnowLedge` vault 上跑。Phase 6 主体可合入；OPEN-1 在合 deploy/main 前需用户在本地完成验证，结果摘要回写到 `docs/phases/phase-6-scheduler-skill-creator/demo/`。
+- vault 内 `Agent/Skills/skill-creator/SKILL.md` 的 prompt 编写（这是 vault 内容，不在仓库内）。
+- Phase 7+ 增量：wikilink alias 解析、向量检索、并发 tool execution、per-skill ACL、用户级 budget UI。
+
+## 2026-05-26 - 安全与正确性回归修复
+
+对 `deploy` 分支（v1 部署基建 + read-only scheduler daemon + scheduler skill creator 草案）进行了一次全量代码审查，修复 10 项问题。覆盖范围：信息泄露 / SSRF、moveNote 与 safeCreateAtomic 的数据一致性、scheduler 生命周期、cron DoS、daemon 健康信号、Matrix 投递身份错配。
+
+安全（信息泄露 / SSRF）：
+
+- `internal/scheduler/runner.go`：`readVaultContext` 改用 `Lstat` 并显式拒绝符号链接，文件读取走 `O_NOFOLLOW`；目录列表中的符号链接条目以 `name@` 标记并跳过内容读取，防止 vault 内的恶意符号链接（如指向 `~/.ssh/id_rsa`）被读出后随调度结果投递到 Matrix 房间。
+- `internal/scheduler/rss_adapter.go`：`validateFeedURL` 增加 IP 字面量校验（拒绝回环 / 私网 / 链路本地 / 多播 / 0.0.0.0 / RFC6598 共享段）与保留域名校验（`localhost`、`*.local`、`*.internal`、`*.intranet`、`*.corp`、`*.home`、`*.lan`）。默认 RSS 客户端包裹一层 `safeRSSTransport`，在 RoundTrip 时再次解析 hostname 并对所有返回 IP 重跑 `assertPublicIP`，挫败 DNS rebinding 与公开域 CNAME 指向私网的情形。`CheckRedirect` 对每次跳转 URL 重新校验。
+
+数据一致性：
+
+- `internal/executor/path_guard.go`：`safeCreateAtomic` 从 `rename(2)` 改为 `link(2)`，真正获得 "不覆盖已存在文件" 的原子语义（`rename(2)` 在 POSIX 下会静默覆盖）。新增 `safeMoveAtomic`（link + unlink）与共用 `writeTempFile` / `syncParentDir` 辅助函数。`writeViaTempAndRename` 仅保留 replace 路径，create 路径完全交给 `safeCreateAtomic`，并要求 guardInfo 不为空（消除"未守护即替换"的隐式契约）。修正了 `safeCreateAtomic` 注释中关于 "linkat-style rename" 的事实错误描述。
+- `internal/executor/direct_fs.go`：`moveNote` 改为先 `safeMoveAtomic`（inode 级移动）再按需在目的端追加 processing note，恢复 v1 之前并发编辑跟随 inode 的原子语义；旧的"读 → 写新位置 → 删旧位置"窗口下，Obsidian Sync 等并发写入会被静默丢弃。失败时不再出现"目的地落盘但审计写 FAILED + 源仍在"的状态错配。
+- 回归测试：
+  - `TestSafeCreateAtomicRefusesToClobberRace`：在并发情景下 `safeCreateAtomic` 必须拒绝覆盖既有文件。
+  - `TestDirectFSMoveNotePreservesConcurrentSourceEdits`：在源文件移动前持有 append FD，移动后的写入应当落到目的端而不是被丢弃。
+
+正确性与契约：
+
+- `internal/policy/checker.go`：`validateMutatingBeforeHash` 不再硬拒绝 sha256("")。原来的"通配空文件"理由站不住：executor 端 `readGuardedFile` 仍然会比对实际磁盘内容，空文件 hash 与其它 hash 同样会被锚定，且现实里对 0 字节 Raw/Inbox stub 的合法 append 因此被错误拦截。引入 `minBeforeHashLen = 64`，改为校验 BeforeHash 形状（64 字符十六进制）。
+- `internal/core/scheduler.go` + `internal/scheduler/runner.go` + `internal/model/types.go`：`runSchedule` 在 `runner.Run` 返回后重新检查 `ctx.Err()`，若是 `context.Canceled` / `DeadlineExceeded`（SIGTERM 中断 tick、deadline 触发）则记为新增的 `SchedulerRunStatusCancelled` 而非 `Done`，对应 outbox 标 error kind，不再误投递"调度运行完成"。`StaticSkillEngine.RunSkill` 不再忽略 ctx。被取消的运行不推进 `NextRunAt`，下次启动按原计划重试。
+
+可运维性：
+
+- `cmd/openwhisker/main.go`：`runSchedulerDaemonLoop` 改为返回 error，连续失败 `schedulerMaxConsecutiveFailures` (5) 次后向 `errCh` 升级触发 daemon 退出，让 systemd / launchd 重启策略真正生效；transient 失败仍被吞掉。原行为下持续性故障（OpenAI key 吊销、SCHEDULE.md 解析错、SQLite 损坏）只写入 status 文件，外部 liveness 探针完全感知不到。
+- `internal/scheduler/cron.go`：`ParseCron` 新增 `validateCronSatisfiable`，提前拒绝不可满足的 (month, day-of-month) 组合（如 `0 0 30 2 *`、`0 0 31 4 *`），避免每次 Tick 调 `NextAfter` 时进入 ~2.6M 次单分钟迭代。`NextAfter` 改为按天扫描定位匹配日期、再扫描该日内匹配分钟，量级降到 ~5y × 366d + 24×60。新增 `TestParseCronRejectsUnsatisfiableCalendarCombo`。
+- `internal/adapters/matrix/matrix.go`：`clientForActor` 对非 knowledge 默认值的 actor 找不到 `DeliveryClients` 条目时显式 log warning（可通过新增的 `ActorFallbackLog *log.Logger` 字段注入），让"开了 `--matrix=on` 但忘配 `OPENWHISKER_MATRIX_SCHEDULER_*`"导致调度结果用 knowledge 身份发出的错配能立即被运维看到。
+
+测试与验证：
+
+- `go vet ./...` 通过；
+- `go test ./... -count=1` 全包绿。
+
+未包含：
+
+- 旧 `vault_locks` 30 分钟 TTL 在长 Apply 下的竞争（PLAUSIBLE，留给后续真实压测后再决定是否引入 lock heartbeat）；
+- `logRemainingFailed` 中 `AppendOperationLog` 错误吞噬（best-effort 路径，现有注释已声明，留作后续配 metric）；
+- `safeWriteReplace` 对未来"create-or-replace"调用方的隐式契约风险（无现存调用点，留作后续抽象）。
+
 ## 2026-05-22 - v1 部署基建
 
 为 v1 部署补齐构建基建与原生服务部署形态，并明确 git 仓库边界。
@@ -8,7 +101,7 @@ v1 标准部署形态定为本地硬件（桌面 Mac / Linux NUC）上的原生�
 
 - 新增 `Makefile`（`build` / `test` / `vet` / `fmt` / `clean` / `docker-build` / `docker-run`）、多阶段 `Dockerfile` 和 `.dockerignore`。`Dockerfile` 保留 CGO + glibc 运行基（`debian:bookworm-slim`），以兼容 `mattn/go-sqlite3`。
 - 新增原生服务模板：`deploy/openwhisker.launchd.example.plist`（macOS launchd）与 `deploy/openwhisker.systemd.example.service`（Linux systemd），全部用占位符。daemon 从 `WorkingDirectory` 起向上查找并加载 `.env.local`，service 文件不内联密钥。
-- 新增 `deploy/openwhisker.compose.example.yaml`：可选容器形态，只定义 `matrix daemon` 单服务的部署模板，全部用占位符。
+- 新增 `deploy/openwhisker.compose.example.yaml`：可选容器形态，只定义 `openwhisker daemon` 单服务的部署模板，全部用占位符。
 - 新增 `docs/deployment/README.md` 部署引导：以原生服务为主路径，覆盖构建、配置、launchd / systemd 运行、同步形态与设备拓扑约束、v1 范围边界，容器形态列为可选。
 - `.gitignore` 加注释分节，新增构建产物与 `deploy/local/` 忽略。含真实主机名 / 密钥 / 拓扑的关键运作文档落仓库内 git-ignored 的 `deploy/local/`，不进仓库。
 - `.env.local.example` 补齐 `OPENWHISKER_LLM_ORG_ID` / `OPENWHISKER_LLM_PROJECT_ID` / `OPENWHISKER_INTENT_ORG_ID` / `OPENWHISKER_INTENT_PROJECT_ID` / `OPENWHISKER_CAPTURE_BUCKET_TTL`，与代码实际读取的环境变量对齐。

@@ -1,8 +1,20 @@
 package storage
 
-import "fmt"
+import (
+	"database/sql"
+	"errors"
+	"fmt"
+)
 
 func (s *Store) migrate() error {
+	// Phase 6: rename scheduler_runs → agent_runs before CREATE IF NOT EXISTS
+	// runs, so that pre-Phase 6 databases preserve historical rows under the
+	// new table name. Order matters: CREATE TABLE IF NOT EXISTS agent_runs
+	// would silently win on fresh databases and leave a stale scheduler_runs
+	// behind on upgraded databases.
+	if err := s.renameSchedulerRunsIfPresent(); err != nil {
+		return err
+	}
 	_, err := s.db.Exec(`
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -83,7 +95,8 @@ CREATE TABLE IF NOT EXISTS adapter_events (
 CREATE TABLE IF NOT EXISTS vault_locks (
   target_path TEXT PRIMARY KEY,
   plan_id TEXT NOT NULL,
-  acquired_at TEXT NOT NULL
+  acquired_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS capture_buckets (
@@ -138,7 +151,7 @@ CREATE TABLE IF NOT EXISTS scheduler_runtime (
 CREATE INDEX IF NOT EXISTS idx_scheduler_runtime_next_run
 ON scheduler_runtime(next_run_at);
 
-CREATE TABLE IF NOT EXISTS scheduler_runs (
+CREATE TABLE IF NOT EXISTS agent_runs (
   id TEXT PRIMARY KEY,
   schedule_id TEXT NOT NULL,
   runtime_id TEXT NOT NULL,
@@ -149,11 +162,16 @@ CREATE TABLE IF NOT EXISTS scheduler_runs (
   finished_at TEXT,
   result_json TEXT NOT NULL DEFAULT '',
   error TEXT NOT NULL DEFAULT '',
-  outbox_message_id TEXT NOT NULL DEFAULT ''
+  outbox_message_id TEXT NOT NULL DEFAULT '',
+  trigger_kind TEXT NOT NULL DEFAULT 'scheduler',
+  tool_trace_json TEXT NOT NULL DEFAULT ''
 );
 
-CREATE INDEX IF NOT EXISTS idx_scheduler_runs_schedule_status
-ON scheduler_runs(schedule_id, status, started_at);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_schedule_status
+ON agent_runs(schedule_id, status, started_at);
+
+CREATE INDEX IF NOT EXISTS idx_agent_runs_trigger_kind
+ON agent_runs(trigger_kind, started_at);
 
 CREATE TABLE IF NOT EXISTS scheduler_overrides (
   schedule_id TEXT PRIMARY KEY,
@@ -178,12 +196,64 @@ CREATE TABLE IF NOT EXISTS scheduler_overrides (
 		{"wiki_jobs", "source_key", "TEXT NOT NULL DEFAULT ''"},
 		{"vault_operation_logs", "outcome", "TEXT NOT NULL DEFAULT 'applied'"},
 		{"outbox_messages", "actor", "TEXT NOT NULL DEFAULT 'knowledge'"},
+		{"vault_locks", "expires_at", "TEXT NOT NULL DEFAULT ''"},
+		// Phase 6: agent_runs added these columns. On a brand-new database
+		// the CREATE TABLE above already includes them; on a renamed-from-
+		// scheduler_runs database we need to ALTER them in.
+		{"agent_runs", "trigger_kind", "TEXT NOT NULL DEFAULT 'scheduler'"},
+		{"agent_runs", "tool_trace_json", "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := s.addColumnIfMissing(column.table, column.name, column.def); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// renameSchedulerRunsIfPresent performs the Phase 6 table rename in a single
+// idempotent step. No down migration: a Phase 5 binary started against a
+// Phase 6 database will not find scheduler_runs and will error fast, which is
+// preferable to silently losing trace columns.
+func (s *Store) renameSchedulerRunsIfPresent() error {
+	hasOld, err := s.tableExists("scheduler_runs")
+	if err != nil {
+		return err
+	}
+	if !hasOld {
+		return nil
+	}
+	hasNew, err := s.tableExists("agent_runs")
+	if err != nil {
+		return err
+	}
+	if hasNew {
+		// Both present means a prior migration partially completed. Refuse to
+		// guess: surface the situation so the operator can intervene.
+		return fmt.Errorf("storage migration: both scheduler_runs and agent_runs exist; manual reconciliation required")
+	}
+	if _, err := s.db.Exec("ALTER TABLE scheduler_runs RENAME TO agent_runs"); err != nil {
+		return fmt.Errorf("rename scheduler_runs to agent_runs: %w", err)
+	}
+	// Drop the old index name; recreate under the new name in the main DDL.
+	if _, err := s.db.Exec("DROP INDEX IF EXISTS idx_scheduler_runs_schedule_status"); err != nil {
+		return fmt.Errorf("drop legacy scheduler_runs index: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) tableExists(name string) (bool, error) {
+	var found string
+	err := s.db.QueryRow(
+		"SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+		name,
+	).Scan(&found)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return found == name, nil
 }
 
 func (s *Store) addColumnIfMissing(table, name, def string) error {

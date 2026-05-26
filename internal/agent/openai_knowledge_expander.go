@@ -88,7 +88,7 @@ The JSON object MUST contain these fields:
 - title: short Chinese title for the human approval prompt.
 - summary: one or two Chinese sentences describing the change.
 - append_section: string. Required when kind=append; Markdown section to append at the end of the target note. Must NOT contain frontmatter and MUST start with an H2 heading. Empty string when kind!=append.
-- restructure: object. Required when kind=propose_restructure; must be null otherwise. Fields: { proposal_kind: one of ["split","merge","rename","bulk-retag","bulk-link-rewrite"], rationale: string, affected_paths: string array }.
+- restructure: object. Required when kind=propose_restructure; must be null otherwise. Fields: { proposal_kind: one of ["split","merge","rename"], rationale: string, affected_paths: string array }. For split / merge the array must list the source note followed by at least one destination path.
 - review_items: array of strings. Items the user should still verify. May be empty.
 
 Example JSON output (append):
@@ -141,6 +141,18 @@ func validateKnowledgeExpanderOutput(out knowledgeExpanderLLMOutput) error {
 		if len(out.Restructure.AffectedPaths) == 0 {
 			return errors.New("knowledge expander restructure.affected_paths must not be empty")
 		}
+		// split / merge both encode the affected children in
+		// out.Restructure.AffectedPaths and need at least one destination beyond
+		// the source. The downstream rename op uses AffectedPaths[1] as the
+		// destination; with len<2 it would silently degrade to source==dest and
+		// the proposal note would record a no-op move.
+		switch out.Restructure.ProposalKind {
+		case model.ProposalKindSplit, model.ProposalKindMerge:
+			if len(out.Restructure.AffectedPaths) < 2 {
+				return fmt.Errorf("knowledge expander %s requires >= 2 affected_paths (source + at least one destination), got %d",
+					out.Restructure.ProposalKind, len(out.Restructure.AffectedPaths))
+			}
+		}
 		if strings.TrimSpace(out.AppendSection) != "" {
 			return errors.New("knowledge expander append_section must be empty when kind=propose_restructure")
 		}
@@ -150,10 +162,15 @@ func validateKnowledgeExpanderOutput(out knowledgeExpanderLLMOutput) error {
 	return nil
 }
 
+// allowedProposalKind is the contract surface the Knowledge Expander emits.
+// bulk-retag / bulk-link-rewrite are intentionally excluded for v1: the
+// `knowledgeExpanderRestruct` JSON shape does not carry tag deltas or link
+// rewrites, so any plan built from those kinds is guaranteed to fail
+// downstream `CheckForApprovalHighRisk` validation. Re-introduce them once
+// the model contract gains the necessary delta fields.
 func allowedProposalKind(kind string) bool {
 	switch kind {
-	case model.ProposalKindSplit, model.ProposalKindMerge, model.ProposalKindRename,
-		model.ProposalKindBulkRetag, model.ProposalKindBulkLinkRewrite:
+	case model.ProposalKindSplit, model.ProposalKindMerge, model.ProposalKindRename:
 		return true
 	default:
 		return false
@@ -213,10 +230,6 @@ func buildKnowledgeRestructurePlan(req core.KnowledgeExpanderRequest, out knowle
 	switch out.Restructure.ProposalKind {
 	case model.ProposalKindRename:
 		op, err = buildKnowledgeRestructureRenameOp(req, out)
-	case model.ProposalKindBulkRetag:
-		op, err = buildKnowledgeRestructureBulkRetagOp(req, out)
-	case model.ProposalKindBulkLinkRewrite:
-		op, err = buildKnowledgeRestructureBulkLinkRewriteOp(req, out)
 	case model.ProposalKindSplit, model.ProposalKindMerge:
 		// split / merge are represented as a rename of the target note plus
 		// affected_paths; first version models them as a single rename op
@@ -268,48 +281,6 @@ func buildKnowledgeRestructureRenameOp(req core.KnowledgeExpanderRequest, out kn
 		TargetPath:  req.TargetPath,
 		PayloadJSON: string(payload),
 		Reason:      "Knowledge expander surfaced a high-risk restructure proposal.",
-		RiskLevel:   model.RiskHigh,
-	}, nil
-}
-
-func buildKnowledgeRestructureBulkRetagOp(req core.KnowledgeExpanderRequest, out knowledgeExpanderLLMOutput) (model.VaultOperation, error) {
-	payload, err := json.Marshal(model.BulkRetagPayload{
-		AffectedPaths: out.Restructure.AffectedPaths,
-		Reason:        strings.TrimSpace(out.Restructure.Rationale),
-	})
-	if err != nil {
-		return model.VaultOperation{}, err
-	}
-	return model.VaultOperation{
-		ID:          model.NewID("op"),
-		Type:        model.OperationBulkRetag,
-		TargetPath:  req.TargetPath,
-		PayloadJSON: string(payload),
-		Reason:      "Knowledge expander surfaced a bulk-retag proposal.",
-		RiskLevel:   model.RiskHigh,
-	}, nil
-}
-
-func buildKnowledgeRestructureBulkLinkRewriteOp(req core.KnowledgeExpanderRequest, out knowledgeExpanderLLMOutput) (model.VaultOperation, error) {
-	destination := req.TargetPath
-	if len(out.Restructure.AffectedPaths) >= 2 {
-		destination = out.Restructure.AffectedPaths[1]
-	}
-	payload, err := json.Marshal(model.BulkLinkRewritePayload{
-		FromPath:      req.TargetPath,
-		ToPath:        destination,
-		AffectedPaths: out.Restructure.AffectedPaths,
-		Reason:        strings.TrimSpace(out.Restructure.Rationale),
-	})
-	if err != nil {
-		return model.VaultOperation{}, err
-	}
-	return model.VaultOperation{
-		ID:          model.NewID("op"),
-		Type:        model.OperationBulkLinkRewrite,
-		TargetPath:  req.TargetPath,
-		PayloadJSON: string(payload),
-		Reason:      "Knowledge expander surfaced a bulk-link-rewrite proposal.",
 		RiskLevel:   model.RiskHigh,
 	}, nil
 }

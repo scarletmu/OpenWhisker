@@ -63,10 +63,23 @@ const (
 	OutboxActorKnowledge = "knowledge"
 	OutboxActorScheduler = "scheduler"
 
-	SchedulerRunStatusRunning = "running"
-	SchedulerRunStatusDone    = "done"
-	SchedulerRunStatusFailed  = "failed"
-	SchedulerRunStatusSkipped = "skipped"
+	SchedulerRunStatusRunning   = "running"
+	SchedulerRunStatusDone      = "done"
+	SchedulerRunStatusPartial   = "partial"
+	SchedulerRunStatusFailed    = "failed"
+	SchedulerRunStatusSkipped   = "skipped"
+	SchedulerRunStatusCancelled = "cancelled"
+
+	AgentTriggerKindScheduler   = "scheduler"
+	AgentTriggerKindAdhocMatrix = "adhoc_matrix"
+	AgentTriggerKindAdhocCLI    = "adhoc_cli"
+
+	AgentTraceTerminationNatural             = "natural"
+	AgentTraceTerminationCallCountExceeded   = "call_count_exceeded"
+	AgentTraceTerminationBytesExceeded       = "bytes_exceeded"
+	AgentTraceTerminationWallClockExceeded   = "wall_clock_exceeded"
+	AgentTraceTerminationProtocolFailed      = "protocol_failed"
+	AgentTraceTerminationError               = "error"
 
 	AdapterMatrix = "matrix"
 
@@ -307,4 +320,6 @@ type SchedulerRun struct {
 	ResultJSON      string
 	Error           string
 	OutboxMessageID string
+	TriggerKind     string
+	ToolTraceJSON   string
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -14,18 +15,80 @@ import (
 	"github.com/scarletmu/openwhisker/internal/storage"
 )
 
+// AgentDispatcher is the Phase 6 hook for routing tool-calling skill runs to
+// the AgentRunner. Defined as an interface here to keep internal/core free of
+// internal/agent imports (agent depends on core for some types).
+type AgentDispatcher interface {
+	// DispatchScheduler runs an agent skill in scheduler context. Used by
+	// SchedulerService.runSchedule when the Skill has engine=tool-calling.
+	// The caller (SchedulerService) owns the agent_runs row lifecycle.
+	DispatchScheduler(ctx context.Context, req AgentDispatchRequest) (AgentDispatchResult, error)
+
+	// DispatchAdHoc runs an agent skill in ad-hoc context (Matrix @-mention
+	// or CLI `openwhisker ask`). Unlike DispatchScheduler, the dispatcher
+	// owns the agent_runs row lifecycle here — there is no surrounding
+	// scheduler tick to wrap it. Returns the run id so callers can render
+	// `[trace: <run_id>]` references.
+	DispatchAdHoc(ctx context.Context, req AgentAdHocRequest) (AgentAdHocResult, error)
+}
+
+// AgentDispatchRequest is the host-agnostic scheduler input to AgentDispatcher.
+type AgentDispatchRequest struct {
+	Skill scheduler.ScheduledSkill
+	Now   time.Time
+}
+
+// AgentDispatchResult is what AgentDispatcher returns to the SchedulerService.
+type AgentDispatchResult struct {
+	Result    scheduler.SkillRunResult
+	Status    string // model.SchedulerRunStatusDone | Partial | Failed
+	Error     string
+	TraceJSON string
+}
+
+// AgentAdHocRequest is the ad-hoc trigger input (Matrix bot or CLI ask).
+// DebugWriter, if non-nil, gets the full LLM message stream as ndjson.
+type AgentAdHocRequest struct {
+	Skill       scheduler.ScheduledSkill
+	Query       string
+	TriggerKind string // model.AgentTriggerKindAdhocMatrix | AdhocCLI
+	Now         time.Time
+	DebugWriter interface{ Write(p []byte) (int, error) }
+}
+
+// AgentAdHocResult includes the run id so callers can show audit pointers.
+type AgentAdHocResult struct {
+	RunID     string
+	Result    scheduler.SkillRunResult
+	Status    string
+	Error     string
+	TraceJSON string
+}
+
+// SkillLookup is the registry-hit shape AdapterService needs to dispatch an
+// @-mentioned ad-hoc query. Implementations typically wrap scheduler.LoadRegistry.
+type SkillLookup interface {
+	Find(skillID string) (scheduler.ScheduledSkill, error)
+}
+
 type SchedulerService struct {
 	store        *storage.Store
 	vaultRoot    string
 	vaultProfile profile.VaultProfile
 	runner       scheduler.SkillRunner
 	now          func() time.Time
+
+	// Phase 6: optional AgentDispatcher used when a schedule's Skill has
+	// engine=tool-calling. nil = tool-calling skills run via the legacy
+	// runner (which will produce a non-tool-calling fallback result).
+	agentDispatcher AgentDispatcher
 }
 
 type SchedulerServiceOptions struct {
-	VaultProfile profile.VaultProfile
-	Runner       scheduler.SkillRunner
-	Now          func() time.Time
+	VaultProfile    profile.VaultProfile
+	Runner          scheduler.SkillRunner
+	Now             func() time.Time
+	AgentDispatcher AgentDispatcher
 }
 
 type SchedulerTickResult struct {
@@ -62,11 +125,12 @@ func NewSchedulerServiceWithOptions(store *storage.Store, vaultRoot string, opts
 		now = func() time.Time { return time.Now().UTC() }
 	}
 	return SchedulerService{
-		store:        store,
-		vaultRoot:    vaultRoot,
-		vaultProfile: opts.VaultProfile,
-		runner:       runner,
-		now:          now,
+		store:           store,
+		vaultRoot:       vaultRoot,
+		vaultProfile:    opts.VaultProfile,
+		runner:          runner,
+		now:             now,
+		agentDispatcher: opts.AgentDispatcher,
 	}
 }
 
@@ -89,6 +153,12 @@ func (s SchedulerService) Tick(ctx context.Context) (SchedulerTickResult, error)
 	}
 	result.Discovered = len(schedules)
 	for _, schedule := range schedules {
+		// Phase 6: ad-hoc-only Skills (no sibling SCHEDULE.md) appear in
+		// the registry so the @-mention path can resolve them, but they
+		// have no cron expression and must not be reconciled by the tick.
+		if schedule.AgentSkillKind == scheduler.AgentSkillKindAgent && !schedule.HasSchedule {
+			continue
+		}
 		runtime, due, err := s.reconcileSchedule(schedule, now)
 		if err != nil {
 			return result, err
@@ -223,28 +293,43 @@ func (s SchedulerService) runSchedule(ctx context.Context, schedule scheduler.Sc
 		return SchedulerTickRunResult{}, err
 	}
 	run := model.SchedulerRun{
-		ID:         model.NewID("schedrun"),
-		ScheduleID: schedule.ID,
-		RuntimeID:  runtime.ID,
-		SkillDir:   schedule.SkillDir,
-		SkillPath:  schedule.SkillPath,
-		Status:     model.SchedulerRunStatusRunning,
-		StartedAt:  now,
+		ID:          model.NewID("schedrun"),
+		ScheduleID:  schedule.ID,
+		RuntimeID:   runtime.ID,
+		SkillDir:    schedule.SkillDir,
+		SkillPath:   schedule.SkillPath,
+		Status:      model.SchedulerRunStatusRunning,
+		StartedAt:   now,
+		TriggerKind: model.AgentTriggerKindScheduler,
 	}
 	if err := s.store.CreateSchedulerRun(run); err != nil {
 		_ = s.store.UpdateJobStatus(job.ID, model.JobStatusFailed, "", err.Error())
 		return SchedulerTickRunResult{}, err
 	}
 
-	skillResult, runErr := s.runner.Run(ctx, scheduler.SkillRunRequest{Schedule: schedule, Now: now})
+	skillResult, runErr, agentStatus, traceJSON := s.dispatchSkill(ctx, schedule, now)
+	// If ctx was cancelled (SIGTERM mid-tick, daemon shutdown) prefer the
+	// cancellation reason over any partial result the runner produced. A
+	// StaticSkillEngine ignores ctx and would otherwise let us write a
+	// "done" outbox row for work the operator killed. The cancelled run is
+	// recorded so the next start can decide whether to retry.
+	if ctxErr := ctx.Err(); ctxErr != nil && runErr == nil {
+		runErr = ctxErr
+	}
 	finishedAt := s.now().UTC()
 	status := model.SchedulerRunStatusDone
 	outboxKind := model.OutboxKindResult
 	resultJSON := ""
 	errText := ""
 	body := ""
+	cancelled := false
 	if runErr != nil {
-		status = model.SchedulerRunStatusFailed
+		cancelled = errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded)
+		if cancelled {
+			status = model.SchedulerRunStatusCancelled
+		} else {
+			status = model.SchedulerRunStatusFailed
+		}
 		outboxKind = model.OutboxKindError
 		errText = safeSchedulerError(runErr)
 		body = schedulerErrorOutboxBody(schedule, errText)
@@ -258,6 +343,12 @@ func (s SchedulerService) runSchedule(ctx context.Context, schedule scheduler.Sc
 		} else {
 			resultJSON = string(encoded)
 			body = schedulerResultOutboxBody(schedule, run.ID, skillResult)
+			// Phase 6: tool-calling runs may complete naturally but with
+			// status=partial (budget forced finalize). The agent dispatcher
+			// surfaces that here; legacy path leaves agentStatus == "".
+			if agentStatus != "" {
+				status = agentStatus
+			}
 		}
 	}
 	outbox := model.OutboxMessage{
@@ -270,23 +361,29 @@ func (s SchedulerService) runSchedule(ctx context.Context, schedule scheduler.Sc
 		CreatedAt: finishedAt,
 	}
 	if err := s.store.AddOutboxMessage(outbox); err != nil {
-		_ = s.store.FinishSchedulerRun(run.ID, model.SchedulerRunStatusFailed, resultJSON, err.Error(), "", finishedAt)
+		_ = s.store.FinishAgentRun(run.ID, model.SchedulerRunStatusFailed, resultJSON, err.Error(), "", traceJSON, finishedAt)
 		_ = s.store.UpdateJobStatus(job.ID, model.JobStatusFailed, resultJSON, err.Error())
 		return SchedulerTickRunResult{}, err
 	}
-	if err := s.store.FinishSchedulerRun(run.ID, status, resultJSON, errText, outbox.ID, finishedAt); err != nil {
+	if err := s.store.FinishAgentRun(run.ID, status, resultJSON, errText, outbox.ID, traceJSON, finishedAt); err != nil {
 		_ = s.store.UpdateJobStatus(job.ID, model.JobStatusFailed, resultJSON, err.Error())
 		return SchedulerTickRunResult{}, err
 	}
 	jobStatus := model.JobStatusDone
-	if status == model.SchedulerRunStatusFailed {
+	switch status {
+	case model.SchedulerRunStatusFailed, model.SchedulerRunStatusCancelled:
 		jobStatus = model.JobStatusFailed
 	}
 	if err := s.store.UpdateJobStatus(job.ID, jobStatus, resultJSON, errText); err != nil {
 		return SchedulerTickRunResult{}, err
 	}
-	if err := s.advanceRuntime(runtime, schedule, finishedAt); err != nil {
-		return SchedulerTickRunResult{}, err
+	// Don't advance NextRunAt for cancelled runs — the schedule should fire
+	// again at its normal cadence; treating cancellation as "completed" would
+	// skip the window we just aborted.
+	if !cancelled {
+		if err := s.advanceRuntime(runtime, schedule, finishedAt); err != nil {
+			return SchedulerTickRunResult{}, err
+		}
 	}
 	return SchedulerTickRunResult{
 		RunID:           run.ID,
@@ -295,6 +392,30 @@ func (s SchedulerService) runSchedule(ctx context.Context, schedule scheduler.Sc
 		OutboxMessageID: outbox.ID,
 		Error:           errText,
 	}, nil
+}
+
+// dispatchSkill routes the run to either the legacy SkillRunner (Phase 5
+// single-turn) or the Phase 6 AgentRunner via the injected AgentDispatcher.
+// The returned agentStatus is non-empty only when the agent path is taken;
+// the legacy path implies the caller's default status logic still applies.
+func (s SchedulerService) dispatchSkill(ctx context.Context, schedule scheduler.ScheduledSkill, now time.Time) (skillResult scheduler.SkillRunResult, runErr error, agentStatus string, traceJSON string) {
+	if schedule.HasToolCalling() && s.agentDispatcher != nil {
+		dispatched, err := s.agentDispatcher.DispatchScheduler(ctx, AgentDispatchRequest{
+			Skill: schedule,
+			Now:   now,
+		})
+		if err != nil {
+			return scheduler.SkillRunResult{}, err, "", ""
+		}
+		traceJSON = dispatched.TraceJSON
+		if dispatched.Status == model.SchedulerRunStatusFailed {
+			return scheduler.SkillRunResult{}, fmt.Errorf("agent run failed: %s", dispatched.Error), "", traceJSON
+		}
+		return dispatched.Result, nil, dispatched.Status, traceJSON
+	}
+	// Legacy: SchedulerService.runner (typically StaticSkillRunner).
+	result, runErr := s.runner.Run(ctx, scheduler.SkillRunRequest{Schedule: schedule, Now: now})
+	return result, runErr, "", ""
 }
 
 func (s SchedulerService) advanceRuntime(runtime model.SchedulerRuntime, schedule scheduler.ScheduledSkill, now time.Time) error {

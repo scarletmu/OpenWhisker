@@ -18,6 +18,7 @@ import (
 
 	"github.com/scarletmu/openwhisker/internal/adapters/matrix"
 	"github.com/scarletmu/openwhisker/internal/agent"
+	"github.com/scarletmu/openwhisker/internal/agentdispatch"
 	"github.com/scarletmu/openwhisker/internal/core"
 	"github.com/scarletmu/openwhisker/internal/executor"
 	"github.com/scarletmu/openwhisker/internal/model"
@@ -25,6 +26,7 @@ import (
 	"github.com/scarletmu/openwhisker/internal/profile"
 	schedulerpkg "github.com/scarletmu/openwhisker/internal/scheduler"
 	"github.com/scarletmu/openwhisker/internal/storage"
+	"github.com/scarletmu/openwhisker/internal/vault/linkindex"
 )
 
 func main() {
@@ -33,6 +35,12 @@ func main() {
 		os.Exit(1)
 	}
 	if err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
+		// Subcommands (notably `skill lint`) can request a specific exit
+		// code via an ExitCode() method; honor it instead of the default 1.
+		if coded, ok := err.(interface{ ExitCode() int }); ok {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(coded.ExitCode())
+		}
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
@@ -94,6 +102,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runMatrixPollOnce(args[2:], stdout, stderr)
 	case args[0] == "matrix" && args[1] == "daemon":
 		return runMatrixDaemon(args[2:], stdout, stderr)
+	case args[0] == "ask":
+		return runAsk(args[1:], stdin, stdout, stderr)
+	case args[0] == "skill" && args[1] == "lint":
+		return runSkillLint(args[2:], stdout, stderr)
+	case args[0] == "agent" && args[1] == "runs":
+		return runAgentRuns(args[2:], stdout, stderr)
 	default:
 		printUsage(stderr)
 		return flag.ErrHelp
@@ -509,6 +523,19 @@ func runSchedulerTick(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// Phase 6: optional tool-calling dispatch. If the LLM is configured and
+	// any scheduled skill is tool-calling, the dispatcher routes through
+	// AgentRunner; otherwise legacy SkillRunner handles everything.
+	var dispatcher core.AgentDispatcher
+	if runner := buildAgentRunner(*vaultRoot, *llmModel); runner != nil {
+		// One-shot CLI process: synchronous link index with soft threshold.
+		idx, err := buildCLILinkIndex(context.Background(), *vaultRoot, vaultProfile.Scheduler.ReadOnlyVaultRoots, 5000, false)
+		if err != nil {
+			fmt.Fprintf(stderr, "tool-calling skills disabled: %v\n", err)
+		} else {
+			dispatcher = agentdispatch.Dispatcher{Runner: runner, LinkIndex: idx}
+		}
+	}
 	result, err := core.NewSchedulerServiceWithOptions(store, *vaultRoot, core.SchedulerServiceOptions{
 		VaultProfile: vaultProfile,
 		Runner: schedulerpkg.StaticSkillRunner{
@@ -516,6 +543,7 @@ func runSchedulerTick(args []string, stdout, stderr io.Writer) error {
 			ExternalInfoAdapters: schedulerExternalInfoAdapters(),
 			Engine:               engine,
 		},
+		AgentDispatcher: dispatcher,
 	}).Tick(context.Background())
 	if err != nil {
 		return err
@@ -554,6 +582,8 @@ func runSchedulerStatus(args []string, stdout, stderr io.Writer) error {
 }
 
 func runSchedulerRuns(args []string, stdout, stderr io.Writer) error {
+	// Phase 6 compat alias: `openwhisker scheduler runs` is preserved as a
+	// shortcut for `openwhisker agent runs list --trigger-kind=scheduler`.
 	fs := flag.NewFlagSet("scheduler runs", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	dbPath := fs.String("db", "data/openwhisker.db", "SQLite database path")
@@ -569,7 +599,7 @@ func runSchedulerRuns(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer store.Close()
-	runs, err := core.NewSchedulerStatusService(store, "", profile.VaultProfile{}).Runs(*limit)
+	runs, err := store.ListRecentAgentRuns(model.AgentTriggerKindScheduler, *limit)
 	if err != nil {
 		return err
 	}
@@ -758,6 +788,7 @@ func runMatrixPollOnce(args []string, stdout, stderr io.Writer) error {
 		RoomID:          *roomID,
 		DeliveryClients: deliveryClients,
 		IgnoredUserIDs:  ignoredUserIDs,
+		AllowedSenders:  matrixAllowedSenders(),
 	}
 	nextBatch, err := adapter.PollOnce(context.Background(), *since, *timeout)
 	if err != nil {
@@ -851,6 +882,7 @@ func runMatrixDaemon(args []string, stdout, stderr io.Writer) error {
 		RoomID:          *roomID,
 		DeliveryClients: deliveryClients,
 		IgnoredUserIDs:  ignoredUserIDs,
+		AllowedSenders:  matrixAllowedSenders(),
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -926,6 +958,25 @@ func runDaemon(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// Phase 6: daemon-side AgentRunner. The link index is built async so the
+	// daemon's poll loops are not blocked; vault_outlinks / vault_backlinks
+	// return link_index_not_ready until the build settles.
+	var daemonDispatcher core.AgentDispatcher
+	if runner := buildAgentRunner(*vaultRoot, *llmModel); runner != nil {
+		idx := linkindex.New(*vaultRoot, vaultProfile.Scheduler.ReadOnlyVaultRoots)
+		idx.BuildAsync(context.Background(), func(stats linkindex.Stats, elapsed time.Duration, err error) {
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "link_index initial build error: %v\n", err)
+				return
+			}
+			fmt.Fprintf(os.Stderr, "link_index ready: %d notes, %d out-edges, elapsed %s\n", stats.Notes, stats.OutEdges, elapsed)
+			if watchErr := idx.Watch(context.Background()); watchErr != nil {
+				fmt.Fprintf(os.Stderr, "link_index watcher error: %v\n", watchErr)
+			}
+		})
+		daemonDispatcher = agentdispatch.Dispatcher{Runner: runner, LinkIndex: idx, Store: store}
+	}
+	skillLookup := newRegistrySkillLookup(*vaultRoot, vaultProfile)
 	schedulerService := core.NewSchedulerServiceWithOptions(store, *vaultRoot, core.SchedulerServiceOptions{
 		VaultProfile: vaultProfile,
 		Runner: schedulerpkg.StaticSkillRunner{
@@ -933,6 +984,7 @@ func runDaemon(args []string, stdout, stderr io.Writer) error {
 			ExternalInfoAdapters: schedulerExternalInfoAdapters(),
 			Engine:               schedulerEngine,
 		},
+		AgentDispatcher: daemonDispatcher,
 	})
 	matrixEnabled := daemonMatrixEnabled(mode, *homeserver, *roomID, *accessToken, *password, *userID)
 	if mode == "on" && !matrixEnabled {
@@ -956,6 +1008,8 @@ func runDaemon(args []string, stdout, stderr io.Writer) error {
 				ContextMode: *contextMode,
 				Conventions: conventions,
 			},
+			AgentDispatcher: daemonDispatcher,
+			SkillLookup:     skillLookup,
 		})
 		matrixClient, resolvedUserID, err := matrixClientForAuth(context.Background(), matrixAuthOptions{
 			Homeserver:  *homeserver,
@@ -984,6 +1038,7 @@ func runDaemon(args []string, stdout, stderr io.Writer) error {
 			RoomID:          *roomID,
 			DeliveryClients: deliveryClients,
 			IgnoredUserIDs:  ignoredUserIDs,
+			AllowedSenders:  matrixAllowedSenders(),
 		}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -1002,7 +1057,12 @@ func runDaemon(args []string, stdout, stderr io.Writer) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		runSchedulerDaemonLoop(ctx, schedulerService, matrixAdapter, *roomID, *schedulerTickInterval, *statusFile, startedAt, stderr)
+		if err := runSchedulerDaemonLoop(ctx, schedulerService, matrixAdapter, *roomID, *schedulerTickInterval, *statusFile, startedAt, stderr); err != nil {
+			select {
+			case errCh <- err:
+			default:
+			}
+		}
 	}()
 	if matrixAdapter != nil {
 		wg.Add(1)
@@ -1107,9 +1167,17 @@ func daemonMatrixEnabled(mode, homeserver, roomID, accessToken, password, userID
 	return strings.TrimSpace(password) != "" && strings.TrimSpace(userID) != ""
 }
 
-func runSchedulerDaemonLoop(ctx context.Context, service core.SchedulerService, adapter *matrix.Adapter, roomID string, interval time.Duration, statusFile string, startedAt time.Time, logger io.Writer) {
+// schedulerMaxConsecutiveFailures is the number of consecutive Tick errors
+// the scheduler loop tolerates before escalating to errCh. Configuration
+// faults (missing OpenAI key, malformed SCHEDULE.md, persistent SQLite
+// failure) will hit this quickly; transient errors (single LLM 5xx, brief
+// network hiccup) are absorbed without restarting the daemon.
+const schedulerMaxConsecutiveFailures = 5
+
+func runSchedulerDaemonLoop(ctx context.Context, service core.SchedulerService, adapter *matrix.Adapter, roomID string, interval time.Duration, statusFile string, startedAt time.Time, logger io.Writer) error {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	consecutiveFailures := 0
 	for {
 		result, err := runSchedulerDaemonTick(ctx, service, adapter, roomID, logger)
 		status := daemonStatus{
@@ -1126,11 +1194,18 @@ func runSchedulerDaemonLoop(ctx context.Context, service core.SchedulerService, 
 		}
 		if err != nil {
 			status.LastTickError = err.Error()
+			consecutiveFailures++
+		} else {
+			consecutiveFailures = 0
 		}
 		writeDaemonStatus(statusFile, status)
+		if err != nil && consecutiveFailures >= schedulerMaxConsecutiveFailures {
+			logMatrixDaemon(logger, "scheduler tick failed %d times consecutively; escalating: %v", consecutiveFailures, err)
+			return fmt.Errorf("scheduler tick failed %d times consecutively: %w", consecutiveFailures, err)
+		}
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-ticker.C:
 		}
 	}
@@ -1315,6 +1390,17 @@ func compactStrings(values ...string) []string {
 		compacted = append(compacted, value)
 	}
 	return compacted
+}
+
+// matrixAllowedSenders parses OPENWHISKER_MATRIX_ALLOWED_SENDERS as a
+// comma-separated MXID list. Empty / unset falls back to "trust everyone the
+// homeserver placed in the room" mode — see matrix.Adapter.AllowedSenders.
+func matrixAllowedSenders() []string {
+	raw := strings.TrimSpace(os.Getenv("OPENWHISKER_MATRIX_ALLOWED_SENDERS"))
+	if raw == "" {
+		return nil
+	}
+	return compactStrings(strings.Split(raw, ",")...)
 }
 
 func matrixSessionMatches(session matrixSession, homeserver, userID string) bool {
@@ -1672,6 +1758,114 @@ func schedulerExternalInfoAdapters() map[string]schedulerpkg.ExternalInfoAdapter
 	return map[string]schedulerpkg.ExternalInfoAdapter{
 		"rss": schedulerpkg.RSSExternalInfoAdapter{},
 	}
+}
+
+// llmChatClient returns an OpenAIClient configured for Phase 6 ToolCallingEngine
+// use. Returns nil (no error) when no API key is configured — callers should
+// treat that as "tool-calling skills not supported in this process" and fall
+// back to the legacy engine.
+func llmChatClient(llmModel string) agent.ChatCompletionClient {
+	apiKey := llmAPIKey()
+	if apiKey == "" {
+		return nil
+	}
+	return agent.OpenAIClient{
+		APIKey:       apiKey,
+		BaseURL:      llmBaseURL(),
+		Model:        llmModel,
+		Organization: coalesce(os.Getenv("OPENWHISKER_LLM_ORG_ID"), os.Getenv("OPENAI_ORG_ID")),
+		Project:      coalesce(os.Getenv("OPENWHISKER_LLM_PROJECT_ID"), os.Getenv("OPENAI_PROJECT_ID")),
+	}
+}
+
+// buildAgentRunner constructs an AgentRunner from CLI options. Returns nil
+// (no error) when the LLM chat client is unavailable.
+func buildAgentRunner(vaultRoot, llmModel string) *agent.AgentRunner {
+	client := llmChatClient(llmModel)
+	if client == nil {
+		return nil
+	}
+	return &agent.AgentRunner{
+		VaultRoot:  vaultRoot,
+		ChatClient: client,
+		ChatModel:  llmModel,
+		Engine:     agent.ToolCallingEngine{},
+		Adapters:   schedulerExternalInfoAdapters(),
+	}
+}
+
+// buildCLILinkIndex constructs an in-memory link index for one-shot CLI
+// processes. Honors the soft thresholds described in the Phase 6 spec: if
+// the vault has more than --cli-index-file-warn .md files, the function
+// refuses unless --force is set.
+func buildCLILinkIndex(ctx context.Context, vaultRoot string, readRoots []string, fileWarnThreshold int, force bool) (*linkindex.Index, error) {
+	if fileWarnThreshold > 0 && !force {
+		count, err := countVaultMarkdownFiles(vaultRoot)
+		if err != nil {
+			return nil, err
+		}
+		if count > fileWarnThreshold {
+			return nil, fmt.Errorf("vault has %d .md files (> threshold %d); pass --force-build-index to proceed (a build at this scale may take >10s)", count, fileWarnThreshold)
+		}
+	}
+	idx := linkindex.New(vaultRoot, readRoots)
+	if err := idx.Build(ctx); err != nil {
+		return nil, fmt.Errorf("build link index: %w", err)
+	}
+	return idx, nil
+}
+
+// registrySkillLookup adapts scheduler.LoadRegistry to core.SkillLookup. Each
+// Find call reloads the registry so users can author new Skills in the vault
+// without restarting the daemon. Reload cost is negligible (a handful of
+// SKILL.md reads); cache later if it ever shows up in profiles.
+type registrySkillLookup struct {
+	vaultRoot    string
+	vaultProfile profile.VaultProfile
+}
+
+func newRegistrySkillLookup(vaultRoot string, vaultProfile profile.VaultProfile) registrySkillLookup {
+	return registrySkillLookup{vaultRoot: vaultRoot, vaultProfile: vaultProfile}
+}
+
+func (r registrySkillLookup) Find(skillID string) (schedulerpkg.ScheduledSkill, error) {
+	schedules, err := schedulerpkg.LoadRegistry(r.vaultRoot, r.vaultProfile)
+	if err != nil {
+		return schedulerpkg.ScheduledSkill{}, err
+	}
+	for _, s := range schedules {
+		if s.ID == skillID {
+			return s, nil
+		}
+	}
+	return schedulerpkg.ScheduledSkill{}, fmt.Errorf("skill %q not found in registry", skillID)
+}
+
+func countVaultMarkdownFiles(vaultRoot string) (int, error) {
+	count := 0
+	err := filepath.Walk(vaultRoot, func(_ string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			if os.IsPermission(walkErr) {
+				return nil
+			}
+			return walkErr
+		}
+		if info.IsDir() {
+			base := filepath.Base(info.Name())
+			if base == ".obsidian" || base == ".git" || base == ".trash" {
+				return filepath.SkipDir
+			}
+			if strings.HasPrefix(base, ".") && len(base) > 1 {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.EqualFold(filepath.Ext(info.Name()), ".md") {
+			count++
+		}
+		return nil
+	})
+	return count, err
 }
 
 func intentClassifierForMode(mode string) (core.IntentClassifier, error) {

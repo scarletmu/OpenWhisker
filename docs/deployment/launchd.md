@@ -22,7 +22,8 @@ cp docs/deployment/openwhisker.daemon.plist.example ~/Library/LaunchAgents/local
 
 - `<repo-root>`：OpenWhisker 仓库路径。
 - `<vault-root>`：目标 Obsidian vault 路径。
-不要把真实 token、Matrix room id、私有网关地址或账号写进仓库内模板。运行时配置应放在本机环境、shell 启动器或未提交的本地文件中。
+
+不要把真实 token、Matrix room id、私有网关地址或账号写进仓库内模板。daemon 会从 `WorkingDirectory` 起向上查找并加载 `.env.local`；运行时配置应放在 `<repo-root>/.env.local` 或其它未提交的本地文件中。
 
 ## 启动
 

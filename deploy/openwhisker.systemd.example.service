@@ -1,9 +1,10 @@
-# OpenWhisker matrix daemon - Linux systemd service template.
+# OpenWhisker daemon - Linux systemd user service template.
 #
 # This is a COMMITTED TEMPLATE. Copy it to deploy/local/ (git-ignored),
 # fill in the real <...> values there, then install it. Never put real
 # machine paths in this file.
 #
+#   mkdir -p deploy/local ~/.config/systemd/user
 #   cp deploy/openwhisker.systemd.example.service deploy/local/
 #   # edit the copy, replacing every <...> placeholder, then install as a
 #   # per-user service (recommended when the vault lives under $HOME):
@@ -21,23 +22,26 @@
 #
 # The daemon loads OPENWHISKER_* config from a .env.local file found by
 # walking up from WorkingDirectory - keep .env.local in <openwhisker-home>.
-# See docs/deployment/README.md for the full deployment guide.
+# See docs/deployment/systemd.md for the Linux runbook.
 
 [Unit]
-Description=OpenWhisker Matrix daemon
+Description=OpenWhisker daemon
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=<openwhisker-home>
-# --db / --since-file / --session-file are relative to WorkingDirectory.
-ExecStart=<openwhisker-home>/bin/openwhisker matrix daemon \
+# --db and --status-file are relative to WorkingDirectory.
+# Matrix defaults to auto: it starts only when the Matrix env vars are complete.
+ExecStart=<openwhisker-home>/bin/openwhisker daemon \
   --db data/openwhisker.db \
   --vault <target-vault-path> \
-  --since-file data/matrix-since.token \
-  --session-file data/matrix-session.json
-# The daemon saves the Matrix next_batch token on SIGTERM before exiting.
+  --vault-profile knowledge-vault \
+  --scheduler-tick-interval 1m \
+  --status-file data/daemon-status.json \
+  --matrix auto
+# The daemon handles SIGTERM and lets the Matrix poll loop save next_batch.
 KillSignal=SIGTERM
 TimeoutStopSec=30
 Restart=on-failure

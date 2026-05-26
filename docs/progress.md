@@ -1,18 +1,19 @@
 # OpenWhisker 当前进度与交接说明
 
-更新时间：2026-05-23
+更新时间：2026-05-26
 
 本文用于在不同机器之间切换开发时快速恢复上下文。长期架构以 `docs/architecture/` 和 `docs/phases/` 为准；本文只记录**当前实施进度、验证状态和下一步优先级**。各模块的设计 / 行为细节不在此重复，按"关键文档"指针进入对应 schema / contract。
 
 ## 当前阶段
 
-主线已经从 Phase 4 收束后进入 Phase 5：Read-only Skill Scheduler 的最小实现。
+主线已从 Phase 5 收束进入 Phase 6：Agent-Driven Vault Knowledge Response。代码已落地；OPEN-1 demo（≥9/10 deepseek-chat 多轮稳定性，需用户在真实 vault + LLM key 上跑）是 merge `deploy/main` 前的硬门槛。
 
 - **Phase 4B** 已闭环：Matrix 私聊入口 + Raw Organizer approve/diff/reject + 人类审批页 diff 渲染。2026-05-20 在 `testdata/vault` 跑通 Matrix daemon + DeepSeek 的 organize → `/diff` → `/approve` 全链路，Knowledge draft 与 Raw/Processed 追加段均匹配新 schema。
 - **Phase 4B.5** IM Intent Router 已落地为 partial implementation：rules / hybrid / off 三模式、source-scoped binding、capture bucket、pending clarification 状态机、OpenAI-compatible classifier、intent audit jsonl 均已接入；真实 Matrix + 真实 intent 小模型 smoke 已在 2026-05-18 跑通。
 - **Phase 4C.1** high-risk proposal-only policy 已闭环，含 proposal note schema / 渲染 / 多路径 diff 合成 / `proposal_written` 终态。
 - **Phase 4C.2** Knowledge Expander 瘦身版已落地：仅 `append` (medium) + `propose_restructure` (high) 两种出口；source-trace `RelatedNotes` 自动注入 + `SourceRefs` 透传已接 (commit 490316f)；2026-05-20 在真实 vault `Knowledge/Systems/Observability.md` 上跑通 plan 合成 + diff（DeepSeek 给出 SLI/SLO + PromQL 段落）。
 - **Phase 4C.3 / 4C.4 已取消**，Phase 4C 至此收束。4C.3（`organize` 多主题分组）与 capture bucket 在输入期就完成的话题分组职责冲突；4C.4（Knowledge Expander Matrix 自然语言入口）对非关键模块过度投入。配套地，已废弃的批量入口 `organize today` 整条链路（CLI / core / agent / intent router / model / storage / 测试 / 文档）已一并清理，构建链路收敛为 bucket 驱动的 `organize last` 与 `expand`。决策记录见 `docs/phases/phase-4-wiki-agent-workflow.md`。
+- **Phase 6** Agent-Driven Vault Knowledge Response 代码已落地（2026-05-26）。新增 `internal/sanitize/`、`internal/vault/linkindex/`、`internal/agent/` (AgentRunner + ToolCallingEngine + 5 vault tools + submit_result)、`internal/agentdispatch/`；registry 支持 `Agent/Skills/<id>/SKILL.md` 主路径并兼容 Phase 5 `Scheduler/Skills/` 旧路径；SQLite `scheduler_runs` RENAME 为 `agent_runs` + 新增 `tool_trace_json` / `trigger_kind` 列；新增 CLI `openwhisker ask`、`openwhisker skill lint`、`openwhisker agent runs`（`scheduler runs` 保留为 trigger_kind=scheduler 别名）；Matrix Bot 新增 `@<skill-id>` 路由（区分 Matrix native user mention `@user:server`）。Phase 6 硬约束 #9 强制：`.obsidian/` `.git/` `.trash/` `.DS_Store` 永远禁入；ToolCallingEngine 闭集 5 + 1 工具；budget force-finalize / hard-fail / protocol_failed 三档终止。完整变更详见 CHANGELOG。**未做**：OPEN-1 ≥9/10 真实 demo（需用户跑）、vault 内 `Agent/Skills/skill-creator/SKILL.md` prompt 编写（vault 内容）。
 - **Phase 5** Read-only Skill Scheduler 已落地最小切片：`VaultProfile.scheduler` 开启 registry、scheduler 专用 Skill root、默认 outbox delivery、只读 vault roots 和外部信息源允许列表；`Scheduler/Skills/*/SCHEDULE.md` 隐式绑定同目录 `SKILL.md`；支持 5 字段 cron + timezone；runtime/run log 进 SQLite；`openwhisker scheduler tick` 可手动执行 due schedule 并写 outbox；同一 schedule 已 running 时记录 skipped；registry 阶段拒绝 vault 写入、自动审批、外部副作用、任意 shell/HTTP/文件写等 capability。当前 Scheduler Host 是安全最小 host，已拆出可替换 `SkillEngine` 和 info-only `ExternalInfoAdapter` 接口；CLI 默认使用 static engine，也可显式启用 OpenAI-compatible Scheduler Engine；首个真实外部 adapter 为只读 `rss`，可接入 RSSHub route、普通 RSS feed 或 Atom feed。交互身份上已支持 Scheduler Bot 和 Knowledge Bot 共处同一个 Matrix room：outbox 使用 `actor` 区分 `scheduler` / `knowledge`，Matrix delivery 可按 actor 选择发送 bot，并忽略两个 bot 自己发出的消息。`suggested_raw_captures` 已有显式确认入口：CLI `scheduler accept` 和 Matrix `/scheduler accept` 会从 scheduler run payload 取指定条目并转入既有 low-risk raw capture workflow。独立 `openwhisker daemon` 已实现最小版：scheduler tick loop、可选 Matrix poll loop、tick 后 outbox delivery、SIGINT/SIGTERM 退出、基础错误日志和 `daemon status` 状态文件。可观测入口已补齐 `scheduler status` / `scheduler runs` / Matrix `/scheduler status` / `/scheduler runs`，并支持通过 SQLite override 对 schedule 做 `schedules list|enable|disable`，不直接改 vault 中的 `SCHEDULE.md`。
 
 ## 验证状态
@@ -32,7 +33,10 @@
 | Phase 4C.2 | `expand <path>` append plan synthesize + diff | CLI, DeepSeek, 真实 vault, 2026-05-20 | 已通 |
 | Phase 5 | scheduler registry / cron / runtime / run log / outbox / read-only context guard | `go test ./...`, 2026-05-23 | 已通 |
 | Phase 5 | RSSHub-compatible RSS / Atom info-only adapter | `go test ./cmd/openwhisker ./internal/scheduler`, 2026-05-23 | 已通 |
-| Phase 5 | daemon status / scheduler status-runs / schedule override 管理 / launchd 文档 | `go test ./...`, 2026-05-23 | 已通 |
+| Phase 5 | daemon status / scheduler status-runs / schedule override 管理 / launchd 与 systemd 文档 | `go test ./...`, 2026-05-23 | 已通 |
+| Phase 6 | sanitize / linkindex / agent runtime / registry / Matrix @-mention / CLI ask + lint + agent runs / SQLite migration 单元测试全绿 | `go test ./...`, 2026-05-26 | 已通 |
+| Phase 6 | OPEN-1 demo（5 次 scheduler + 5 次 CLI ask）真实 deepseek-chat 多轮稳定性 ≥9/10 | 未跑 | 待用户验证 |
+| Phase 6 | vault 内 `Agent/Skills/skill-creator/SKILL.md` 创作 | 未做 | 留给用户写在自己 vault |
 
 `GOCACHE=/private/tmp/openwhisker-go-cache go test ./...` 2026-05-23 全包绿。
 
@@ -43,7 +47,7 @@
 3. **clarification 仅覆盖 `raw_capture`**：organize / diff / approve / reject 的低 confidence 输入仍降级为 unclear。
 4. **多 pending plan 时的自然语言 approve/reject** 必须回到显式 slash 命令。
 5. **多模态 / 图片 / 文件 bucket 输入** 未实现。
-6. **Scheduler 仍缺真实长期运行反馈**：daemon、status、launchd 文档和 schedule override 已补齐；仍需要真实 vault + 真实 RSS feed 的持续运行反馈，观察输出质量、重复提醒、失败退避和 Matrix 投递稳定性。Linux `systemd` 模板仍可后续补齐。
+6. **Scheduler 仍缺真实长期运行反馈**：daemon、status、launchd / systemd 文档和 schedule override 已补齐；仍需要真实 vault + 真实 RSS feed 的持续运行反馈，观察输出质量、重复提醒、失败退避和 Matrix 投递稳定性。
 
 ## 验证队列（可选 follow-up，不阻塞主线）
 
@@ -70,4 +74,6 @@ testdata 已通的能力默认视为验证充分；真实 vault apply 只是 nic
 
 1. 根据真实使用反馈扩展 rules-only 短句词表与 clarification 回复词表（基于真实未命中样本，避免盲扩）。
 2. Phase 4C 主干已收束，没有预排的 4C.3 / 4C.4；后续推进改为真实使用驱动。新增能力（多模态 bucket 输入、clarification 回复 `additional_payload_text` 抽取等）按"关键已知遗留"里的实际需求单独立项。
-3. Phase 5 下一步进入真实运行反馈：用 launchd 跑 `openwhisker daemon`，结合 `daemon status`、`scheduler status`、`scheduler runs` 和 `scheduler schedules list|enable|disable` 观察真实 RSSHub / RSS scheduled Skill 输出质量。RSSHub / Folo 仍只作为上游 feed 来源，不进入 Scheduler Core 概念，adapter 只返回信息快照，不提供外部写操作。
+3. Phase 5 下一步进入真实运行反馈：用 launchd 或 systemd 跑 `openwhisker daemon`，结合 `daemon status`、`scheduler status`、`scheduler runs` 和 `scheduler schedules list|enable|disable` 观察真实 RSSHub / RSS scheduled Skill 输出质量。RSSHub / Folo 仍只作为上游 feed 来源，不进入 Scheduler Core 概念，adapter 只返回信息快照，不提供外部写操作。
+4. Phase 6 OPEN-1 demo：在 `~/Documents/KnowLedge` 真实 vault 上跑 5 次 `openwhisker scheduler tick`（带 tool-calling Skill）+ 5 次 `openwhisker ask`，要求每次 3-4 轮 tool call、无 schema 错误、无 stuck loop、submit_result 收尾。≥9/10 通过为合并 deploy/main 硬门槛；脚本与脱敏摘要落 `docs/phases/phase-6-scheduler-skill-creator/demo/`。
+5. Phase 6 vault skill-creator：在 `~/Documents/KnowLedge/Agent/Skills/skill-creator/SKILL.md` 写 prompt（vault 内容；本仓库不动）；可通过 `openwhisker ask --skill skill-creator "..."` 触发新 Skill 创建流，输出 VaultPlan 走 medium-risk approval。

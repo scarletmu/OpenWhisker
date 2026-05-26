@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -54,17 +53,52 @@ func (e DirectFS) Apply(ctx context.Context, plan model.VaultPlan) (model.VaultA
 	if err := e.preflightApply(plan); err != nil {
 		return result, err
 	}
-	for _, op := range plan.Operations {
+	for i, op := range plan.Operations {
 		if err := ctx.Err(); err != nil {
+			e.logRemainingFailed(plan, plan.Operations[i:], err)
 			return result, err
 		}
 		applied, err := e.applyOperation(plan, op)
 		if err != nil {
+			// Audit trail: record this op as failed and every remaining op as
+			// failed too so operators can see exactly where the partial apply
+			// stopped. Earlier ops already wrote applied-status logs from
+			// inside applyOperation.
+			e.logRemainingFailed(plan, plan.Operations[i:], err)
 			return result, err
 		}
 		result.AppliedOperations = append(result.AppliedOperations, applied)
 	}
 	return result, nil
+}
+
+// logRemainingFailed records OperationStatusFailed log rows for the failing
+// op (head of the slice) and any ops that never got attempted. Best-effort:
+// errors writing the audit row itself are swallowed because the caller is
+// already returning the underlying apply error.
+func (e DirectFS) logRemainingFailed(plan model.VaultPlan, ops []model.VaultOperation, applyErr error) {
+	now := time.Now().UTC()
+	errText := ""
+	if applyErr != nil {
+		errText = applyErr.Error()
+	}
+	for _, op := range ops {
+		log := model.VaultOperationLog{
+			ID:          model.NewID("vop"),
+			PlanID:      plan.ID,
+			JobID:       plan.JobID,
+			OpType:      op.Type,
+			TargetPath:  op.TargetPath,
+			BeforeHash:  op.BeforeHash,
+			AfterHash:   "",
+			PayloadJSON: op.PayloadJSON,
+			ResultJSON:  fmt.Sprintf(`{"error":%q}`, errText),
+			Reason:      op.Reason,
+			Status:      model.OperationStatusFailed,
+			CreatedAt:   now,
+		}
+		_ = e.store.AppendOperationLog(log)
+	}
 }
 
 func (e DirectFS) applyOperation(plan model.VaultPlan, op model.VaultOperation) (model.AppliedOperation, error) {
@@ -274,10 +308,7 @@ func (e DirectFS) createNote(plan model.VaultPlan, op model.VaultOperation) (mod
 	if payload.Content == "" {
 		return model.AppliedOperation{}, fmt.Errorf("create_note payload content is required")
 	}
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
-		return model.AppliedOperation{}, err
-	}
-	if err := os.WriteFile(fullPath, []byte(payload.Content), 0o644); err != nil {
+	if err := safeCreateAtomic(fullPath, []byte(payload.Content)); err != nil {
 		return model.AppliedOperation{}, err
 	}
 	afterHash := sha256Hex([]byte(payload.Content))
@@ -310,11 +341,11 @@ func (e DirectFS) createNote(plan model.VaultPlan, op model.VaultOperation) (mod
 }
 
 func (e DirectFS) appendNote(plan model.VaultPlan, op model.VaultOperation) (model.AppliedOperation, error) {
-	current, err := e.readGuarded(op.TargetPath, op.BeforeHash)
+	fullPath, err := ResolveVaultPath(e.vaultRoot, op.TargetPath)
 	if err != nil {
 		return model.AppliedOperation{}, err
 	}
-	fullPath, err := ResolveVaultPath(e.vaultRoot, op.TargetPath)
+	current, guardInfo, err := readGuardedFile(fullPath, op.TargetPath, op.BeforeHash)
 	if err != nil {
 		return model.AppliedOperation{}, err
 	}
@@ -323,17 +354,18 @@ func (e DirectFS) appendNote(plan model.VaultPlan, op model.VaultOperation) (mod
 		return model.AppliedOperation{}, fmt.Errorf("decode append_note payload: %w", err)
 	}
 	next := append(append([]byte{}, current...), []byte(payload.Content)...)
-	if err := os.WriteFile(fullPath, next, 0o644); err != nil {
+	if err := safeWriteReplace(fullPath, next, guardInfo); err != nil {
 		return model.AppliedOperation{}, err
 	}
 	return e.recordApplied(plan, op, sha256Hex(next))
 }
 
 func (e DirectFS) rewriteNote(plan model.VaultPlan, op model.VaultOperation) (model.AppliedOperation, error) {
-	if _, err := e.readGuarded(op.TargetPath, op.BeforeHash); err != nil {
+	fullPath, err := ResolveVaultPath(e.vaultRoot, op.TargetPath)
+	if err != nil {
 		return model.AppliedOperation{}, err
 	}
-	fullPath, err := ResolveVaultPath(e.vaultRoot, op.TargetPath)
+	_, guardInfo, err := readGuardedFile(fullPath, op.TargetPath, op.BeforeHash)
 	if err != nil {
 		return model.AppliedOperation{}, err
 	}
@@ -342,19 +374,26 @@ func (e DirectFS) rewriteNote(plan model.VaultPlan, op model.VaultOperation) (mo
 		return model.AppliedOperation{}, fmt.Errorf("decode rewrite_note payload: %w", err)
 	}
 	next := []byte(payload.Content)
-	if err := os.WriteFile(fullPath, next, 0o644); err != nil {
+	if err := safeWriteReplace(fullPath, next, guardInfo); err != nil {
 		return model.AppliedOperation{}, err
 	}
 	return e.recordApplied(plan, op, sha256Hex(next))
 }
 
+// moveNote moves the source note to the destination atomically and then, if
+// the operation carries a processing note, appends it to the destination via
+// the standard safeWriteReplace path. Atomic-link semantics preserve any
+// concurrent edit to the source (the inode moves with the file) instead of
+// the previous read-then-write window that silently dropped concurrent writes.
 func (e DirectFS) moveNote(plan model.VaultPlan, op model.VaultOperation) (model.AppliedOperation, error) {
-	current, err := e.readGuarded(op.TargetPath, op.BeforeHash)
+	sourcePath, err := ResolveVaultPath(e.vaultRoot, op.TargetPath)
 	if err != nil {
 		return model.AppliedOperation{}, err
 	}
-	sourcePath, err := ResolveVaultPath(e.vaultRoot, op.TargetPath)
-	if err != nil {
+	// Hash-guard the read so a stale plan against a modified source still
+	// fails fast; we don't keep the FileInfo because the move below operates
+	// at the directory-entry level, not on the open FD.
+	if _, _, err := readGuardedFile(sourcePath, op.TargetPath, op.BeforeHash); err != nil {
 		return model.AppliedOperation{}, err
 	}
 	var payload model.MoveNotePayload
@@ -365,39 +404,51 @@ func (e DirectFS) moveNote(plan model.VaultPlan, op model.VaultOperation) (model
 	if err != nil {
 		return model.AppliedOperation{}, err
 	}
-	if _, err := os.Lstat(destPath); err == nil {
-		return model.AppliedOperation{}, conflictError("destination already exists: %s", payload.DestinationPath)
-	} else if !os.IsNotExist(err) {
+	if err := safeMoveAtomic(sourcePath, destPath); err != nil {
 		return model.AppliedOperation{}, err
 	}
-	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
-		return model.AppliedOperation{}, err
+	// Read the destination back to compute the final after-hash. If a
+	// processing note was provided, append it under the same TOCTOU guard
+	// safeWriteReplace uses elsewhere (the guardInfo from this single
+	// safeReadAll is the basis for the pre-rename re-check).
+	finalContent, guardInfo, err := safeReadAll(destPath)
+	if err != nil {
+		return model.AppliedOperation{}, fmt.Errorf("move_note: re-read destination %s: %w", payload.DestinationPath, err)
 	}
-	if err := os.Rename(sourcePath, destPath); err != nil {
-		return model.AppliedOperation{}, err
-	}
-	next := movedContent(current, payload.ProcessingNote)
 	if payload.ProcessingNote != "" {
-		if err := os.WriteFile(destPath, next, 0o644); err != nil {
+		next := movedContent(finalContent, payload.ProcessingNote)
+		if err := safeWriteReplace(destPath, next, guardInfo); err != nil {
 			return model.AppliedOperation{}, err
 		}
+		finalContent = next
 	}
-	return e.recordApplied(plan, op, sha256Hex(next))
+	return e.recordApplied(plan, op, sha256Hex(finalContent))
 }
 
+// readGuardedFile opens fullPath with O_NOFOLLOW (rejecting symlink swaps at
+// the leaf), reads its full content, verifies the sha256 matches beforeHash,
+// and returns content + an os.FileInfo snapshot used by safeWriteReplace to
+// detect mutation between read and write.
+func readGuardedFile(fullPath, targetPath, beforeHash string) ([]byte, os.FileInfo, error) {
+	current, info, err := safeReadAll(fullPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	if got := sha256Hex(current); got != beforeHash {
+		return nil, nil, conflictError("hash conflict for %s: plan %s current %s", targetPath, beforeHash, got)
+	}
+	return current, info, nil
+}
+
+// readGuarded is kept for callers (preflightApply) that only need to verify
+// the hash without taking a guard handle.
 func (e DirectFS) readGuarded(targetPath, beforeHash string) ([]byte, error) {
 	fullPath, err := ResolveVaultPath(e.vaultRoot, targetPath)
 	if err != nil {
 		return nil, err
 	}
-	current, err := os.ReadFile(fullPath)
-	if err != nil {
-		return nil, err
-	}
-	if got := sha256Hex(current); got != beforeHash {
-		return nil, conflictError("hash conflict for %s: plan %s current %s", targetPath, beforeHash, got)
-	}
-	return current, nil
+	content, _, err := readGuardedFile(fullPath, targetPath, beforeHash)
+	return content, err
 }
 
 func (e DirectFS) recordApplied(plan model.VaultPlan, op model.VaultOperation, afterHash string) (model.AppliedOperation, error) {

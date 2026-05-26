@@ -4,7 +4,7 @@
 # (git-ignored) and fill in real values there. Never put real homeserver
 # URLs, room IDs, tokens, or machine paths in this file.
 #
-# It defines only the OpenWhisker `matrix daemon` service. To co-locate it
+# It defines only the OpenWhisker `daemon` service. To co-locate it
 # with a self-hosted homeserver, merge this service into the Synapse / Caddy /
 # PostgreSQL skeleton in docs/adapters/matrix-private-im.md.
 #
@@ -15,9 +15,20 @@ services:
   openwhisker:
     image: openwhisker:local
     restart: unless-stopped
-    # Long-running Matrix poll loop. Drop --vault to use the in-container
-    # default test vault.
-    command: ["matrix", "daemon", "--vault", "/vault"]
+    # Long-running workflow host. Matrix poll starts only when Matrix env vars
+    # are complete.
+    command:
+      - daemon
+      - --db
+      - data/openwhisker.db
+      - --vault
+      - /vault
+      - --vault-profile
+      - knowledge-vault
+      - --status-file
+      - data/daemon-status.json
+      - --matrix
+      - auto
     # OPENWHISKER_* configuration is injected from the env file.
     # The path is relative to THIS compose file — adjust it after copying.
     # See .env.local.example for the full variable reference.

@@ -120,6 +120,22 @@ external_info_sources:
 	}
 }
 
+func TestParseCronRejectsUnsatisfiableCalendarCombo(t *testing.T) {
+	cases := []string{
+		"0 0 30 2 *",    // Feb 30
+		"0 0 31 4 *",    // Apr 31
+		"0 0 31 2,4 *",  // Feb/Apr 31
+	}
+	for _, expr := range cases {
+		t.Run(expr, func(t *testing.T) {
+			_, err := ParseCron(expr)
+			if err == nil {
+				t.Fatalf("ParseCron(%q) expected satisfiability error", expr)
+			}
+		})
+	}
+}
+
 func TestCronCurrentWindowAndNext(t *testing.T) {
 	cronSchedule, err := ParseCron("*/15 8-9 * * *")
 	if err != nil {

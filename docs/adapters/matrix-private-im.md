@@ -120,12 +120,12 @@ export OPENWHISKER_LLM_MODEL=your-model
 
 OpenAI-compatible organizer 在真实 vault 启用前，应先用合成 raw 或 test vault 做 provider smoke。确认 endpoint、模型名、key 权限和 structured JSON 输出都正常后，再显式决定是否把真实 vault raw/context 发送到该 endpoint。
 
-真实 vault 外发前可先本地预览将进入 Raw Organizer 的上下文：
+真实 vault 外发前可先本地预览将进入 Raw Organizer 的上下文。以下示例用 `VAULT_ROOT` 表示本机真实 vault 路径：
 
 ```sh
 go run ./cmd/openwhisker organize preview-context \
   --db data/openwhisker-real.db \
-  --vault /Users/wang/Documents/KnowLedge
+  --vault "$VAULT_ROOT"
 ```
 
 该命令只读本地数据，不调用 LLM，也不写 vault。
@@ -151,14 +151,16 @@ docs/skills/vault-profile-analyzer/SKILL.md
 最小运行：
 
 ```sh
-go run ./cmd/openwhisker matrix daemon \
-  --vault /Users/wang/Documents/KnowLedge \
+go run ./cmd/openwhisker daemon \
+  --db data/openwhisker-real.db \
+  --vault "$VAULT_ROOT" \
   --organizer=openai-compatible \
   --vault-profile=knowledge-vault \
-  --since-file data/matrix-since.token
+  --since-file data/matrix-since.token \
+  --matrix auto
 ```
 
-当前 daemon 仍是单房间 MVP；多房间路由、room-scoped outbox 和真实 Matrix 环境压测留给后续切片。部署见 [`docs/deployment/README.md`](../deployment/README.md)。
+当前部署约束是单 Matrix 自动化房间：一个私有、非 E2EE 房间同时承载 capture、命令、diff / approve / reject、scheduler 输出和告警。`OPENWHISKER_MATRIX_ROOM_ID` 是目标配置边界，不是临时 MVP 降级；不要为当前部署形态拆出 Inbox / Approval / Alerts 等多房间路由。部署见 [`docs/deployment/README.md`](../deployment/README.md)。
 
 Phase 5 引入 Scheduler 后，Matrix 交互身份支持同一 room 内的双 bot 模型：Knowledge Bot 负责用户主动的 capture / organize / expand / diff / approve / reject；Scheduler Bot 负责定时简报、RSSHub / RSS 观察、提醒和 suggested capture 确认提示。两者可以共享同一个 OpenWhisker 后端和同一个 Matrix room，但在 outbox / delivery 层通过 actor identity 区分：`knowledge` actor 默认由 Knowledge Bot 发送，`scheduler` actor 在配置 Scheduler Bot 凭据后由 Scheduler Bot 发送。Matrix adapter 会忽略两个 bot 自己发出的消息，避免 Knowledge Bot 把 Scheduler Bot 的简报当成用户 raw input。Scheduler Bot 只是展示和交互身份，不获得 vault 写入权限。
 
@@ -168,7 +170,7 @@ Phase 5 引入 Scheduler 后，Matrix 交互身份支持同一 room 内的双 bo
 scripts/local/matrix-debug.sh status
 scripts/local/matrix-debug.sh daemon
 
-OPENWHISKER_DEBUG_VAULT=/Users/wang/Documents/KnowLedge \
+OPENWHISKER_DEBUG_VAULT="$VAULT_ROOT" \
 OPENWHISKER_DEBUG_DB=data/openwhisker-real.db \
 scripts/local/matrix-debug.sh daemon
 ```
@@ -294,7 +296,18 @@ services:
     # Build with `make docker-build`; see docs/deployment/README.md.
     image: openwhisker:local
     restart: unless-stopped
-    command: ["matrix", "daemon", "--vault", "/vault"]
+    command:
+      - daemon
+      - --db
+      - data/openwhisker.db
+      - --vault
+      - /vault
+      - --vault-profile
+      - knowledge-vault
+      - --status-file
+      - data/daemon-status.json
+      - --matrix
+      - auto
     env_file:
       # OPENWHISKER_* configuration, including LLM and Matrix credentials.
       - ./openwhisker/.env.local
@@ -367,13 +380,11 @@ media_store_path: /media
 - `@me:matrix.example.com`：日常主账号。
 - `@openwhisker-bot:matrix.example.com`：Matrix Adapter 使用的 bot 账号。
 
-bot 账号加入固定房间：
+bot 账号加入一个固定的私有自动化房间，例如 `#openwhisker:matrix.example.com`。
+这个房间同时承载默认 raw capture、命令入口、中风险审批提示与结果、scheduler
+输出、错误、同步和维护提醒。
 
-- `#openwhisker-inbox:matrix.example.com`：默认 raw capture 和命令入口。
-- `#openwhisker-approvals:matrix.example.com`：中风险审批提示和结果。
-- `#openwhisker-alerts:matrix.example.com`：错误、同步和维护提醒。
-
-这些房间首期保持非 E2EE，避免 bot 处理设备验证、密钥备份、历史解密和跨设备 key state。人工私聊可以启用 E2EE，但不作为自动化入口。
+自动化房间首期保持非 E2EE，避免 bot 处理设备验证、密钥备份、历史解密和跨设备 key state。人工私聊可以启用 E2EE，但不作为自动化入口。
 
 ## Adapter 入站契约
 
@@ -593,7 +604,8 @@ Token 与 secret：
 
 房间与权限：
 
-- Bot 只加入 OpenWhisker 需要的私有房间。
+- Bot 只加入 OpenWhisker 需要的一个私有自动化房间。
+- 当前部署不拆分 Inbox / Approval / Alert 等多房间拓扑。
 - Bot 不应拥有 Synapse 管理员权限。
 - 管理员账号和 bot 账号分离。
 - 自动化房间首期不启用 E2EE。

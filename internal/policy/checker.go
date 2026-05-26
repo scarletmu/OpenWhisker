@@ -10,6 +10,12 @@ import (
 	"github.com/scarletmu/openwhisker/internal/model"
 )
 
+// minBeforeHashLen is the expected length of a hex-encoded sha256 hash. The
+// checker only enforces the shape of BeforeHash; the actual hash match is
+// performed by the executor against the on-disk file content, which is the
+// authoritative TOCTOU guard for mutating ops.
+const minBeforeHashLen = 64
+
 type Conventions struct {
 	ProfileID         string   `json:"profile_id"`
 	RawInboxDir       string   `json:"raw_inbox_dir"`
@@ -17,6 +23,7 @@ type Conventions struct {
 	KnowledgeDir      string   `json:"knowledge_dir"`
 	KnowledgeDraftDir string   `json:"knowledge_draft_dir"`
 	AgentProposalsDir string   `json:"agent_proposals_dir"`
+	AgentReportsDir   string   `json:"agent_reports_dir"`
 	RequiredDraftTags []string `json:"required_draft_tags,omitempty"`
 }
 
@@ -40,6 +47,7 @@ func DefaultConventions() Conventions {
 		KnowledgeDir:      "Knowledge",
 		KnowledgeDraftDir: "Knowledge/Drafts",
 		AgentProposalsDir: "Raw/Agent-Proposals",
+		AgentReportsDir:   "Meta/Reports",
 	}
 }
 
@@ -80,11 +88,15 @@ func (c Conventions) Normalize() Conventions {
 	if strings.TrimSpace(c.AgentProposalsDir) == "" {
 		c.AgentProposalsDir = "Raw/Agent-Proposals"
 	}
+	if strings.TrimSpace(c.AgentReportsDir) == "" {
+		c.AgentReportsDir = "Meta/Reports"
+	}
 	c.RawInboxDir = cleanRelativeDir(c.RawInboxDir)
 	c.RawProcessedDir = cleanRelativeDir(c.RawProcessedDir)
 	c.KnowledgeDir = cleanRelativeDir(c.KnowledgeDir)
 	c.KnowledgeDraftDir = cleanRelativeDir(c.KnowledgeDraftDir)
 	c.AgentProposalsDir = cleanRelativeDir(c.AgentProposalsDir)
+	c.AgentReportsDir = cleanRelativeDir(c.AgentReportsDir)
 	c.ProfileID = strings.ToLower(strings.TrimSpace(c.ProfileID))
 	c.RequiredDraftTags = cleanStringList(c.RequiredDraftTags)
 	return c
@@ -117,6 +129,9 @@ func (c Checker) Check(plan model.VaultPlan) error {
 			if !hasDirPrefix(op.TargetPath, conventions.RawInboxDir) {
 				return fmt.Errorf("append_note target %q is outside %s", op.TargetPath, conventions.RawInboxDir)
 			}
+			if err := validateMutatingBeforeHash(op); err != nil {
+				return err
+			}
 			var payload model.AppendNotePayload
 			if err := json.Unmarshal([]byte(op.PayloadJSON), &payload); err != nil {
 				return fmt.Errorf("decode append_note payload for %s: %w", op.ID, err)
@@ -128,6 +143,9 @@ func (c Checker) Check(plan model.VaultPlan) error {
 			if !hasDirPrefix(op.TargetPath, conventions.RawInboxDir) {
 				return fmt.Errorf("rewrite_note target %q is outside %s", op.TargetPath, conventions.RawInboxDir)
 			}
+			if err := validateMutatingBeforeHash(op); err != nil {
+				return err
+			}
 			var payload model.CreateNotePayload
 			if err := json.Unmarshal([]byte(op.PayloadJSON), &payload); err != nil {
 				return fmt.Errorf("decode rewrite_note payload for %s: %w", op.ID, err)
@@ -136,8 +154,8 @@ func (c Checker) Check(plan model.VaultPlan) error {
 				return fmt.Errorf("rewrite_note payload content is required for %s", op.ID)
 			}
 		case model.OperationWriteAgentReport:
-			if !strings.HasPrefix(op.TargetPath, "Meta/Reports/") {
-				return fmt.Errorf("write_agent_report target %q is outside Meta/Reports", op.TargetPath)
+			if !hasDirPrefix(op.TargetPath, conventions.AgentReportsDir) {
+				return fmt.Errorf("write_agent_report target %q is outside %s", op.TargetPath, conventions.AgentReportsDir)
 			}
 		default:
 			return fmt.Errorf("operation type %q is not allowed in phase 1", op.Type)
@@ -267,8 +285,10 @@ func (c Checker) CheckApproved(plan model.VaultPlan) error {
 		return err
 	}
 	for _, op := range plan.Operations {
-		if (op.Type == model.OperationAppendNote || op.Type == model.OperationRewriteNote || op.Type == model.OperationMoveNote) && op.BeforeHash == "" {
-			return fmt.Errorf("%s operation %s requires before_hash", op.Type, op.ID)
+		if op.Type == model.OperationAppendNote || op.Type == model.OperationRewriteNote || op.Type == model.OperationMoveNote {
+			if err := validateMutatingBeforeHash(op); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -464,6 +484,28 @@ func mergeOrSplitKind(plan model.VaultPlan) string {
 		return model.ProposalKindMerge
 	}
 	return model.ProposalKindSplit
+}
+
+// validateMutatingBeforeHash enforces that any mutating op (append, rewrite,
+// move, ...) carries a syntactically valid sha256 before_hash. The empty-file
+// hash is allowed: a 0-byte file is a legitimate target (e.g. a freshly
+// touched Raw/Inbox stub the ingest job appends into), and the executor's
+// readGuardedFile already compares against the actual on-disk content, so
+// the hash value itself is not a "wildcard" — it is anchored at apply time.
+func validateMutatingBeforeHash(op model.VaultOperation) error {
+	hash := strings.TrimSpace(op.BeforeHash)
+	if hash == "" {
+		return fmt.Errorf("%s operation %s requires before_hash", op.Type, op.ID)
+	}
+	if len(hash) != minBeforeHashLen {
+		return fmt.Errorf("%s operation %s before_hash must be a hex sha256 (%d chars)", op.Type, op.ID, minBeforeHashLen)
+	}
+	for _, r := range hash {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return fmt.Errorf("%s operation %s before_hash must be hex-encoded", op.Type, op.ID)
+		}
+	}
+	return nil
 }
 
 func validateRelativeVaultPath(path string) error {

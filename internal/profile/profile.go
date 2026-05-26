@@ -33,7 +33,62 @@ type SchedulerProfile struct {
 	DefaultDelivery     []string `json:"default_delivery,omitempty"`
 	ReadOnlyVaultRoots  []string `json:"read_only_vault_roots,omitempty"`
 	ExternalInfoSources []string `json:"external_info_sources,omitempty"`
+
+	// Phase 6 additions. All fields are backwards-compatible: zero values
+	// fall back to compile-time defaults so Phase 5 profile files continue
+	// to load unchanged.
+	AgentSkillRoots     []string             `json:"agent_skill_roots,omitempty"`
+	AgentRegistryPaths  []string             `json:"agent_registry_paths,omitempty"`
+	DefaultEngine       string               `json:"default_engine,omitempty"`
+	ToolBudgetDefaults  ToolBudgetDefaults   `json:"tool_budget_defaults,omitempty"`
 }
+
+// ToolBudgetDefaults caps Phase 6 ToolCallingEngine runs. Per-Skill budget in
+// SKILL.md may override downward but never upward; registry loader enforces.
+// A zero field means "use the compile-time default" (see DefaultToolBudgetDefaults).
+type ToolBudgetDefaults struct {
+	MaxToolCalls        int `json:"max_tool_calls,omitempty"`
+	MaxTotalBytes       int `json:"max_total_bytes,omitempty"`
+	MaxWallClockSeconds int `json:"max_wall_clock_seconds,omitempty"`
+}
+
+// DefaultToolBudgetDefaults returns the compile-time defaults the spec lists
+// (8 tool calls / 200 KiB / 60s). Phase 6 uses these as upper bounds for any
+// per-Skill budget declaration.
+func DefaultToolBudgetDefaults() ToolBudgetDefaults {
+	return ToolBudgetDefaults{
+		MaxToolCalls:        8,
+		MaxTotalBytes:       200 * 1024,
+		MaxWallClockSeconds: 60,
+	}
+}
+
+// ResolveToolBudgetDefaults fills in any zero fields with the compile-time
+// defaults. Callers should use the returned value rather than the raw profile
+// field so per-field overrides compose cleanly.
+func (b ToolBudgetDefaults) Resolve() ToolBudgetDefaults {
+	defaults := DefaultToolBudgetDefaults()
+	if b.MaxToolCalls <= 0 {
+		b.MaxToolCalls = defaults.MaxToolCalls
+	}
+	if b.MaxTotalBytes <= 0 {
+		b.MaxTotalBytes = defaults.MaxTotalBytes
+	}
+	if b.MaxWallClockSeconds <= 0 {
+		b.MaxWallClockSeconds = defaults.MaxWallClockSeconds
+	}
+	return b
+}
+
+// AgentSkillEngineStatic / Tool / OpenAI: stored engine values for SKILL.md.
+// `static` is the Phase 5 single-turn behavior; `tool-calling` is Phase 6
+// multi-turn function calling; `openai-compatible` is the Phase 5 LLM single-
+// turn engine retained for backwards-compat.
+const (
+	AgentSkillEngineStatic          = "static"
+	AgentSkillEngineToolCalling     = "tool-calling"
+	AgentSkillEngineOpenAICompatible = "openai-compatible"
+)
 
 type VaultSkill struct {
 	Name    string `json:"name"`
@@ -73,12 +128,20 @@ func NewConfiguredVaultProfile(conventions policy.Conventions) VaultProfile {
 
 func DefaultSchedulerProfile() SchedulerProfile {
 	return SchedulerProfile{
-		Enabled:             true,
+		Enabled: true,
+		// Phase 5 legacy roots stay registered so existing
+		// Scheduler/Skills/*/SCHEDULE.md vaults keep loading; the loader
+		// emits a deprecation warning when it finds skills there. Phase 6
+		// agent skills live under Agent/Skills/.
 		RegistryPaths:       []string{"Scheduler/Skills/*/SCHEDULE.md"},
 		ScheduledSkillRoots: []string{"Scheduler/Skills/"},
+		AgentSkillRoots:     []string{"Agent/Skills/"},
+		AgentRegistryPaths:  []string{"Agent/Skills/*/SKILL.md"},
 		DefaultDelivery:     []string{"outbox"},
 		ReadOnlyVaultRoots:  []string{"Raw/", "Knowledge/", "Interview/", "Life/", "Meta/"},
 		ExternalInfoSources: []string{"rss"},
+		DefaultEngine:       AgentSkillEngineStatic,
+		ToolBudgetDefaults:  DefaultToolBudgetDefaults(),
 	}
 }
 

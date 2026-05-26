@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -29,6 +30,20 @@ type Adapter struct {
 	RoomID          string
 	DeliveryClients map[string]Client
 	IgnoredUserIDs  []string
+	// AllowedSenders is the strict sender allowlist. When non-empty, PollOnce
+	// drops every incoming event whose Sender (trimmed) is not in the list.
+	// When empty, the adapter falls back to "homeserver placed the event in
+	// our room, minus IgnoredUserIDs and the bot itself" — acceptable only for
+	// trusted single-tenant rooms. Production deployments should always set
+	// this to a non-empty list of the operator's MXIDs.
+	AllowedSenders []string
+	// ActorFallbackLog receives a line every time clientForActor sees an
+	// outbox row whose actor has no matching DeliveryClients entry and the
+	// default Client is used instead. Operators wire this up to stderr in
+	// production to surface scheduler-credentials misconfiguration (a
+	// scheduler outbox row silently delivered from the knowledge bot).
+	// When nil, falls back to the standard logger.
+	ActorFallbackLog *log.Logger
 }
 
 type Client struct {
@@ -96,6 +111,9 @@ func (a Adapter) PollOnce(ctx context.Context, since string, timeout time.Durati
 			if !isTextMessage(event) || a.shouldIgnoreSender(event.Sender) {
 				continue
 			}
+			if !a.senderAllowed(event.Sender) {
+				continue
+			}
 			response, err := a.Core.HandleText(ctx, core.AdapterRequest{
 				Adapter:   model.AdapterMatrix,
 				EventID:   event.EventID,
@@ -152,6 +170,18 @@ func (a Adapter) clientForActor(actor string) Client {
 		if client, ok := a.DeliveryClients[actor]; ok {
 			return client
 		}
+	}
+	// Surface the fallback for non-default actors so an operator who turns
+	// on --matrix=on but forgets to wire up scheduler credentials notices
+	// that scheduler outbox rows are leaving from the knowledge-bot
+	// identity. The knowledge-actor fallback is silent because it is the
+	// expected default (legacy outbox rows + empty-actor rows map here).
+	if actor != model.OutboxActorKnowledge {
+		logger := a.ActorFallbackLog
+		if logger == nil {
+			logger = log.Default()
+		}
+		logger.Printf("matrix adapter: no DeliveryClients entry for actor %q; falling back to default Client", actor)
 	}
 	return a.Client
 }
@@ -306,6 +336,26 @@ func (a Adapter) shouldIgnoreSender(sender string) bool {
 	}
 	for _, ignored := range a.IgnoredUserIDs {
 		if sender == strings.TrimSpace(ignored) {
+			return true
+		}
+	}
+	return false
+}
+
+// senderAllowed enforces the strict sender allowlist when configured. An empty
+// AllowedSenders falls back to "permit anyone the homeserver placed in the
+// room (minus shouldIgnoreSender)" — operators should treat the empty-list
+// fallback as a lab-only mode.
+func (a Adapter) senderAllowed(sender string) bool {
+	if len(a.AllowedSenders) == 0 {
+		return true
+	}
+	sender = strings.TrimSpace(sender)
+	if sender == "" {
+		return false
+	}
+	for _, allowed := range a.AllowedSenders {
+		if sender == strings.TrimSpace(allowed) {
 			return true
 		}
 	}

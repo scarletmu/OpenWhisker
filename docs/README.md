@@ -48,6 +48,7 @@ docs/
   deployment/
     README.md
     launchd.md
+    systemd.md
     openwhisker.daemon.plist.example
   startup/
     android-matrix-console.md
