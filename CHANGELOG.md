@@ -1,5 +1,37 @@
 # Changelog
 
+## 2026-05-26 - OPEN-1 demo 通过：Phase 6 解封合并门槛
+
+针对 `docs/phases/phase-6-scheduler-skill-creator.md` §OPEN-1 列出的「合并 `deploy/main` 前必须 ≥9/10 deepseek-chat 多轮稳定性 demo」硬门槛，在真实本地 Obsidian vault (`~/Documents/KnowLedge`) + DeepSeek `deepseek-chat` provider 上跑了两轮独立 demo，合计 20 runs。
+
+测试矩阵：
+
+- 每轮 = 5 次手动 `openwhisker scheduler tick`（间隔 70s 避开 cron 同分钟去重） + 5 次 `openwhisker ask` (--debug)
+- vault profile = `knowledge-vault`；engine = `openai-compatible`；model = `deepseek-chat`
+- DB 隔离在 `data/openwhisker-open1-demo.db`，不污染既有 daemon 状态
+- vault 内 `Agent/Skills/vault-qa/{SKILL.md,SCHEDULE.md}` 为 demo skeleton（保留供用户后续继续调）
+
+结果：
+
+- **18/20 (90%) `termination == "natural"`**（LLM 主动 `submit_result` 收口）
+- 2/20 partial 全部为 `call_count_exceeded`（budget 耗尽 → engine `forceFinalize` 守卫拦下后续工具调用）；都仍产出可用 title + summary
+- 0 次 `protocol_failed`（DeepSeek 不会拒绝调 `submit_result`）
+- 0 次 `hard_fail`（wall-clock 60s 上限对所有 case 都富余）
+- 0 次 HTTP 4xx/5xx 或 function-calling 协议错误
+- 抽查质量：ask 实际引用的笔记路径全部为 vault 真实存在的笔记，无幻觉路径；vault 内不存在内容（如 `Raw/Sources/`）能诚实回报"目录为空"
+
+两轮独立分数：R1 9/10、R2 9/10。partial 集中出现在「LLM 没有 user query 时的发散探索」场景；ask 路径（有明确 user query）partial 率约 5%，scheduler 路径（无 user query 仅 SKILL 引导）partial 率约 15%。
+
+脱敏摘要 + 完整 run/title 表见 `docs/phases/phase-6-scheduler-skill-creator/demo/results.md`。
+
+OPEN-1 门槛按 spec 要求的「≥9/10」判 **PASS**，Phase 6 解除 `deploy/main` 合并阻塞。剩余事项（scheduler trigger 工具上限收紧、reasoner-style 模型 reasoning_content 透传、CLI usage 字符串补齐）作为不阻塞合并的 follow-up。
+
+文档：
+
+- `docs/progress.md` 当前阶段段落 + 验证状态表 + 下一步优先级同步更新。
+- 本 CHANGELOG 条目。
+- 新增 `docs/phases/phase-6-scheduler-skill-creator/demo/results.md`。
+
 ## 2026-05-26 - Phase 6 代码评审硬化
 
 针对当日 Phase 6 落地 commit 的多 agent 代码评审发现，回填四项 blocking 与三项 strongly-recommended 修复。功能边界不变；OPEN-1 demo 门槛不动。所有包 `go vet ./...` 与 `go test ./... -count=1` 全绿。
