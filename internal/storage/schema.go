@@ -210,9 +210,11 @@ CREATE TABLE IF NOT EXISTS scheduler_overrides (
 	return nil
 }
 
-// renameSchedulerRunsIfPresent performs the Phase 6 table rename in a single
-// idempotent step. No down migration: a Phase 5 binary started against a
-// Phase 6 database will not find scheduler_runs and will error fast, which is
+// renameSchedulerRunsIfPresent performs the Phase 6 table rename atomically.
+// RENAME + legacy index drop run inside a single transaction so a crash
+// between the two statements cannot leave the database in a half-renamed
+// state. No down migration: a Phase 5 binary started against a Phase 6
+// database will not find scheduler_runs and will error fast, which is
 // preferable to silently losing trace columns.
 func (s *Store) renameSchedulerRunsIfPresent() error {
 	hasOld, err := s.tableExists("scheduler_runs")
@@ -231,12 +233,20 @@ func (s *Store) renameSchedulerRunsIfPresent() error {
 		// guess: surface the situation so the operator can intervene.
 		return fmt.Errorf("storage migration: both scheduler_runs and agent_runs exist; manual reconciliation required")
 	}
-	if _, err := s.db.Exec("ALTER TABLE scheduler_runs RENAME TO agent_runs"); err != nil {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin scheduler_runs rename tx: %w", err)
+	}
+	if _, err := tx.Exec("ALTER TABLE scheduler_runs RENAME TO agent_runs"); err != nil {
+		_ = tx.Rollback()
 		return fmt.Errorf("rename scheduler_runs to agent_runs: %w", err)
 	}
-	// Drop the old index name; recreate under the new name in the main DDL.
-	if _, err := s.db.Exec("DROP INDEX IF EXISTS idx_scheduler_runs_schedule_status"); err != nil {
+	if _, err := tx.Exec("DROP INDEX IF EXISTS idx_scheduler_runs_schedule_status"); err != nil {
+		_ = tx.Rollback()
 		return fmt.Errorf("drop legacy scheduler_runs index: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit scheduler_runs rename: %w", err)
 	}
 	return nil
 }

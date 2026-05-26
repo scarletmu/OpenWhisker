@@ -110,7 +110,12 @@ var (
 	// Order matters: more specific patterns run first so a broad rule does
 	// not consume substrings that a precise rule would label more cleanly.
 
-	reBearerToken      = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._\-]{8,}`)
+	// Bearer tokens are opaque blobs of [A-Za-z0-9._-]. We deliberately
+	// exclude '/', ':' and whitespace so that legitimate text like
+	// "Bearer https://api.example.com/..." or "Bearer authentication
+	// scheme" survives untouched — the former isn't a token, the latter is
+	// a short common English word that mustn't be eaten by a greedy regex.
+	reBearerToken      = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9_\-][A-Za-z0-9._\-]{15,}\b`)
 	reSyaToken         = regexp.MustCompile(`\bsyt_[A-Za-z0-9_\-]{10,}`)
 	reSecretAssignment = regexp.MustCompile(`(?i)\b(api[_-]?key|access[_-]?token|secret|password|authorization)\s*[:=]\s*['"]?[A-Za-z0-9._\-/+]{8,}['"]?`)
 

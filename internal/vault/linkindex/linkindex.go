@@ -689,7 +689,10 @@ func buildBacklinks(outlinks map[string][]ResolvedLink) map[string][]string {
 }
 
 // relInsideVault returns the vault-relative forward-slash path, or an error
-// if absPath escapes vaultRoot (symlinks pointing outside, etc.).
+// if absPath escapes vaultRoot. Symlinks anywhere along absPath are resolved
+// before the containment check so a symlink whose target lives outside
+// vaultRoot is rejected — Phase 6 hard constraint #6 (no indirect read of
+// vault-external files via the link graph).
 func relInsideVault(vaultRoot, absPath string) (string, error) {
 	rel, err := filepath.Rel(vaultRoot, absPath)
 	if err != nil {
@@ -701,6 +704,27 @@ func relInsideVault(vaultRoot, absPath string) (string, error) {
 	}
 	if rel == ".." || strings.HasPrefix(rel, "../") {
 		return "", errors.New("path escapes vault root")
+	}
+	// Symlink-aware containment check. EvalSymlinks resolves every component;
+	// if the file is missing (race with delete) we accept the lexical result
+	// because the next Stat() will surface the not-exists case cleanly.
+	resolvedRoot, rootErr := filepath.EvalSymlinks(vaultRoot)
+	if rootErr != nil {
+		resolvedRoot = filepath.Clean(vaultRoot)
+	}
+	resolved, evalErr := filepath.EvalSymlinks(absPath)
+	if evalErr != nil {
+		// Most often os.ErrNotExist (transient between fsnotify and stat).
+		// Fall through to the lexical result.
+		return rel, nil
+	}
+	resolvedAbs, absErr := filepath.Abs(resolved)
+	if absErr != nil {
+		resolvedAbs = resolved
+	}
+	rootWithSep := strings.TrimRight(resolvedRoot, string(os.PathSeparator)) + string(os.PathSeparator)
+	if resolvedAbs != resolvedRoot && !strings.HasPrefix(resolvedAbs, rootWithSep) {
+		return "", errors.New("path escapes vault root via symlink")
 	}
 	return rel, nil
 }

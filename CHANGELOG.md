@@ -1,5 +1,34 @@
 # Changelog
 
+## 2026-05-26 - Phase 6 代码评审硬化
+
+针对当日 Phase 6 落地 commit 的多 agent 代码评审发现，回填四项 blocking 与三项 strongly-recommended 修复。功能边界不变；OPEN-1 demo 门槛不动。所有包 `go vet ./...` 与 `go test ./... -count=1` 全绿。
+
+安全：
+
+- `internal/vault/linkindex/linkindex.go`：`relInsideVault` 在 `filepath.Rel` 之外补 `filepath.EvalSymlinks` 双向解析（vault root + 候选 absPath），任何 realpath 落在 vault root 之外的路径被显式拒绝，阻断"vault 内符号链接指向 vault 外文件 → 经链接图被 LLM 间接读出"的路径（呼应 Phase 6 硬约束 #6）。EvalSymlinks 在 ENOENT 时回落到 lexical 结果，避免与 fsnotify 删除事件竞争。
+- `internal/agent/vault_tools.go`：`vault_text_search` 三处加固。(a) 入参 `scope_subset` 现在按"清洗 → forbidden-prefix 检查 → 严格 `pathInScope`（不再用宽松 `containsAnyPrefix`）→ 用清洗后的值替换 walk 用 scope"流程处理；空串 / 落到 vault root 的条目立即 reject。(b) walk 内显式 `Lstat` 并丢弃任何被标记为符号链接的条目（`read_vault_note` 已经 `O_NOFOLLOW`，搜索路径不应成为非对称逃逸口）。(c) walk 内每条 entry 都重新 `ctx.Err()` 探活并对 `rel` 重跑 `IsForbiddenScopePath`，防止大型 vault 把 wall-clock budget 烧光、防止允许根下深埋的 `.git/` 子树被搜到。
+
+正确性：
+
+- `internal/agent/tool_calling_engine.go`：`Run` 把 `req.Skill.Budget` 通过显式命名的本地 `remaining` 持有并消费。`scheduler.ToolBudget` 是纯值类型、`req` 已按值传入，原代码不会回写 registry，但通过命名 + 注释把"本地副本语义"写死，避免后续重构误改成指针后悄悄回归。`budgetSnapshot` 函数名与 `[budget]` LLM-visible system note 保持不变。
+- `internal/agent/tool_calling_engine.go`：`forceFinalize` 模式下新增显式工具名守卫。原本只靠 `tool_choice = "required"` 偏置模型 + 下游 budget 闸门兜底；现在 engine 层直接拒绝任何非 `submit_result` 的工具调用，写 trace 记 `force_finalize: only submit_result is permitted` 并回吐 budget-exhausted 错误给 LLM。契约从 prompt-only 升级为 prompt + code 双重保证。
+- `internal/storage/schema.go`：`renameSchedulerRunsIfPresent` 把 `ALTER TABLE … RENAME` 与 `DROP INDEX IF EXISTS …` 包进单一 `sql.Tx`，commit 失败统一 rollback。原顺序执行在两条语句之间崩溃会留下半迁移状态（表已重命名 + 旧索引仍存），下次启动需手工介入；现在 SQLite 要么完整迁移要么完全未迁移。"两表共存即报错"的守卫保留。
+
+脱敏：
+
+- `internal/sanitize/sanitize.go`：`reBearerToken` 收紧。原 `\bBearer\s+[A-Za-z0-9._\-]{8,}` 会把 "Bearer https://api.example.com/resource"、"Bearer authentication scheme"、"Bearer token spec / RFC 6750" 一并替换成 `Bearer <token>`，污染合法 trace 文本。新规则要求开头是 `[A-Za-z0-9_-]`（首字符不允许是 `.`），紧跟 ≥15 个 `[A-Za-z0-9._-]` 字符（总长 ≥16），不含 `/` `:` 与空白；字符类排除 `/` `:` 后 URL 路径形式不再误伤。新增 `TestFreeText_BearerNotOverzealous` 三例守住回归；既有 `sk_test_abcdefgh1234567890`（20 字符）依然被正常 mask。
+
+文档：
+
+- 本 CHANGELOG 条目；评审命中的 spec-level 边界未发生变化，`docs/phases/phase-6-scheduler-skill-creator.md` 不动。
+
+未做 / 留下：
+
+- `linkindex.parseNoteLinks` 在 fenced code block 内仍会把 ` ```[[Foo]]``` ` 当真链接计入索引（污染 backlink 图但不影响安全语义）；评审报告标注为 notable concern，独立 follow-up。
+- `vault_text_search` walk 在巨大 vault 上的 wall-clock 检查现在为 per-entry 级别，但 LLM 历史保留策略本身仍是全保留（spec 中明确"等真撞 token 上限再做摘要化"），不在本次硬化范围。
+- fsnotify watcher overflow 触发的异步全量重建仍是单次尝试，没有退避重试循环；评审 notable concern，独立 follow-up。
+
 ## 2026-05-26 - Phase 6 落地：Agent-Driven Vault Knowledge Response
 
 按 `docs/phases/phase-6-scheduler-skill-creator.md` 草稿完成 Phase 6 一次性实现。Phase 5 read-only scheduler 之外新增了 agent runtime（多轮 ReAct + 受限工具集 + budget enforcement）、三条 trigger 通道（cron / Matrix @-mention / CLI `openwhisker ask`）、vault Skill 创作链路的工程基础（schema + lint CLI）、链接图索引子系统。

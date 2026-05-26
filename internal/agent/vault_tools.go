@@ -312,19 +312,34 @@ func (e VaultToolExecutor) vaultTextSearch(ctx context.Context, rawArgs json.Raw
 	if len(query) < textSearchMinQueryLen {
 		return ToolResult{}, newToolError("query_too_short", fmt.Sprintf("query must be at least %d characters", textSearchMinQueryLen))
 	}
-	// Validate scope_subset is a subset of Skill.VaultScope.
+	// Validate scope_subset is a strict subset of Skill.VaultScope and is not
+	// caught by the forbidden-prefix blacklist. We replace the working scope
+	// with the *cleaned* entries (not the LLM-supplied raw strings) so the
+	// walk and the post-walk containsAnyPrefix check use a normalized form.
 	scope := e.Skill.VaultScope
 	if len(args.ScopeSubset) > 0 {
+		cleaned := make([]string, 0, len(args.ScopeSubset))
 		for _, s := range args.ScopeSubset {
-			cleanS, err := scheduler.CleanRelativeDirExport(strings.TrimSuffix(s, "/"))
+			trimmed := strings.TrimSpace(s)
+			if trimmed == "" {
+				return ToolResult{}, newToolError("bad_scope", "scope_subset entry is empty")
+			}
+			if scheduler.IsForbiddenScopePath(trimmed) {
+				return ToolResult{}, newToolError("forbidden_prefix", fmt.Sprintf("%q falls under a forbidden prefix", s))
+			}
+			cleanS, err := scheduler.CleanRelativeDirExport(strings.TrimSuffix(trimmed, "/"))
 			if err != nil {
 				return ToolResult{}, newToolError("bad_scope", err.Error())
 			}
-			if !containsAnyPrefix(cleanS, scope) {
+			if cleanS == "" {
+				return ToolResult{}, newToolError("bad_scope", "scope_subset entry resolved to vault root")
+			}
+			if err := e.pathInScope(cleanS); err != nil {
 				return ToolResult{}, newToolError("scope_violation", fmt.Sprintf("%q is not within the Skill's vault_scope", s))
 			}
+			cleaned = append(cleaned, cleanS)
 		}
-		scope = args.ScopeSubset
+		scope = cleaned
 	}
 
 	needle := strings.ToLower(query)
@@ -347,13 +362,21 @@ func (e VaultToolExecutor) vaultTextSearch(ctx context.Context, rawArgs json.Raw
 				}
 				return walkErr
 			}
-			if ctx.Err() != nil {
-				return ctx.Err()
+			// Poll the deadline on every entry so large vaults can't outrun
+			// the wall-clock budget by burning the walk loop.
+			if err := ctx.Err(); err != nil {
+				return err
 			}
 			if info.IsDir() {
 				if scheduler.IsForbiddenScopePath(filepath.Base(absPath)) {
 					return filepath.SkipDir
 				}
+				return nil
+			}
+			// Reject symlinks outright: read_vault_note uses O_NOFOLLOW, and
+			// vault_text_search must not be the asymmetric escape hatch that
+			// would let the LLM read files outside the vault via a symlink.
+			if info.Mode()&os.ModeSymlink != 0 {
 				return nil
 			}
 			if !info.Mode().IsRegular() {
@@ -367,7 +390,21 @@ func (e VaultToolExecutor) vaultTextSearch(ctx context.Context, rawArgs json.Raw
 				return nil
 			}
 			rel = filepath.ToSlash(rel)
+			// Belt-and-braces: the cleaned scope already excludes forbidden
+			// prefixes, but walks under a permissive ancestor could surface
+			// a forbidden subtree we haven't pruned yet (e.g. a `.git/` deep
+			// inside an allowed root).
+			if scheduler.IsForbiddenScopePath(rel) {
+				return nil
+			}
 			if !containsAnyPrefix(rel, scope) {
+				return nil
+			}
+			// Re-stat without following symlinks so we never open a symlink
+			// the directory entry didn't already flag (race window between
+			// readdir and now).
+			lstat, statErr := os.Lstat(absPath)
+			if statErr != nil || lstat.Mode()&os.ModeSymlink != 0 {
 				return nil
 			}
 			data, err := os.ReadFile(absPath)

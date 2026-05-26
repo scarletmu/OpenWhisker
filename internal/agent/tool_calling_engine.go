@@ -38,7 +38,11 @@ type EngineConfig struct {
 // way so audit history is consistent.
 func (e ToolCallingEngine) Run(ctx context.Context, cfg EngineConfig, req AgentRunRequest) AgentRunResult {
 	now := time.Now()
-	budget := req.Skill.Budget
+	// remaining is the live-decrementing copy of the Skill's budget. ToolBudget
+	// is a plain value type and req is by value, but we copy through a
+	// distinct local so reads/writes here cannot be mistaken for mutation of
+	// the registry-cached Skill.
+	remaining := req.Skill.Budget
 	result := AgentRunResult{
 		SkillID: req.Skill.ID,
 		Trace: AgentTrace{
@@ -62,7 +66,7 @@ func (e ToolCallingEngine) Run(ctx context.Context, cfg EngineConfig, req AgentR
 		}
 
 		// Refresh the budget line before every LLM call.
-		messages = setBudgetSystemNote(messages, budgetSnapshot(budget, now), forceFinalize)
+		messages = setBudgetSystemNote(messages, budgetSnapshot(remaining, now), forceFinalize)
 
 		chatReq := ChatCompletionRequest{
 			Model:     cfg.Model,
@@ -162,6 +166,28 @@ func (e ToolCallingEngine) Run(ctx context.Context, cfg EngineConfig, req AgentR
 				break
 			}
 
+			// In force-finalize mode, only submit_result is allowed. The
+			// tool_choice="required" hint above biases the model, but a
+			// non-compliant provider could still emit a vault tool call —
+			// reject it explicitly so the engine contract is enforced in code,
+			// not just in the prompt.
+			if forceFinalize {
+				record := AgentToolCallRecord{
+					Seq:         nextSeq(&seq),
+					Tool:        tc.Function.Name,
+					Args:        sanitizedArgsForTrace(tc.Function.Arguments),
+					Error:       "force_finalize: only submit_result is permitted",
+					BudgetAfter: budgetSnapshot(remaining, now),
+				}
+				result.Trace.Calls = append(result.Trace.Calls, record)
+				messages = append(messages, ChatMessage{
+					Role:       "tool",
+					ToolCallID: tc.ID,
+					Content:    `{"error":"budget exhausted; call submit_result with what you have"}`,
+				})
+				continue
+			}
+
 			// Vault tool. Validate name in whitelist, args.path in scope, etc.
 			if !toolNameAllowed(tc.Function.Name, req.Skill.VaultTools) {
 				record := AgentToolCallRecord{
@@ -169,7 +195,7 @@ func (e ToolCallingEngine) Run(ctx context.Context, cfg EngineConfig, req AgentR
 					Tool:        tc.Function.Name,
 					Args:        json.RawMessage(tc.Function.Arguments),
 					Error:       fmt.Sprintf("tool %q is not in the Skill's vault_tools whitelist", tc.Function.Name),
-					BudgetAfter: budgetSnapshot(budget, now),
+					BudgetAfter: budgetSnapshot(remaining, now),
 				}
 				result.Trace.Calls = append(result.Trace.Calls, record)
 				messages = append(messages, ChatMessage{
@@ -189,9 +215,9 @@ func (e ToolCallingEngine) Run(ctx context.Context, cfg EngineConfig, req AgentR
 
 			// Charge tool_calls budget regardless of outcome (prevents
 			// pathological retry loops on a bad input).
-			budget.MaxToolCalls -= 1
-			budget.MaxTotalBytes -= toolResult.Bytes
-			snapshot := budgetSnapshot(budget, now)
+			remaining.MaxToolCalls -= 1
+			remaining.MaxTotalBytes -= toolResult.Bytes
+			snapshot := budgetSnapshot(remaining, now)
 
 			record := AgentToolCallRecord{
 				Seq:                 nextSeq(&seq),
@@ -222,9 +248,9 @@ func (e ToolCallingEngine) Run(ctx context.Context, cfg EngineConfig, req AgentR
 			})
 
 			// Budget gate after the call.
-			if budget.MaxToolCalls <= 0 || budget.MaxTotalBytes <= 0 {
+			if remaining.MaxToolCalls <= 0 || remaining.MaxTotalBytes <= 0 {
 				forceFinalize = true
-				if budget.MaxToolCalls <= 0 {
+				if remaining.MaxToolCalls <= 0 {
 					result.Trace.Termination = model.AgentTraceTerminationCallCountExceeded
 				} else {
 					result.Trace.Termination = model.AgentTraceTerminationBytesExceeded

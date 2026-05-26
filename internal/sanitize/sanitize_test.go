@@ -115,3 +115,21 @@ func TestFreeText_PreservesPublicServices(t *testing.T) {
 		t.Errorf("FreeText masked public services: %q → %q", in, got)
 	}
 }
+
+// TestFreeText_BearerNotOverzealous guards against the Bearer regex eating
+// legitimate text. Pre-Phase-6 the rule was greedy enough to mangle "Bearer
+// https://..." or "Bearer authentication scheme"; the tightened pattern
+// requires an opaque token-shaped continuation and leaves these alone.
+func TestFreeText_BearerNotOverzealous(t *testing.T) {
+	cases := []string{
+		"use Bearer authentication scheme to authorize",
+		"docs: Bearer https://api.example.com/resource explained",
+		"Bearer token spec / RFC 6750",
+	}
+	for _, in := range cases {
+		got := FreeText(in)
+		if strings.Contains(got, "<token>") {
+			t.Errorf("FreeText(%q) over-masked a non-token Bearer phrase: %q", in, got)
+		}
+	}
+}
