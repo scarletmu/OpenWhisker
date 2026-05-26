@@ -55,10 +55,6 @@ type AdapterResponse struct {
 	OutboxKind string `json:"outbox_kind,omitempty"`
 }
 
-func NewAdapterService(store *storage.Store, vaultRoot string) AdapterService {
-	return NewAdapterServiceWithOptions(store, vaultRoot, AdapterServiceOptions{})
-}
-
 func NewAdapterServiceWithOptions(store *storage.Store, vaultRoot string, opts AdapterServiceOptions) AdapterService {
 	return AdapterService{
 		store:            store,
@@ -580,19 +576,10 @@ func renderHighRiskAdapterDiff(plan model.VaultPlan, diff *model.VaultDiff) stri
 		lines = append(lines, fmt.Sprintf("- 来源: %s", strings.Join(plan.SourceRefs, ", ")))
 	}
 	lines = append(lines, "", "## 影响路径")
-	if len(previewEntries) == 0 {
-		// Defensive fallback if a future caller skips BuildAffectedRows.
-		for _, op := range plan.Operations {
-			for _, line := range highRiskOpAdapterLines(op) {
-				lines = append(lines, "- "+line)
-			}
-		}
-	} else {
-		for _, entry := range previewEntries {
-			lines = append(lines, "- "+entry.Summary)
-			if entry.Preview != "" {
-				lines = append(lines, "  - 理由："+entry.Preview)
-			}
+	for _, entry := range previewEntries {
+		lines = append(lines, "- "+entry.Summary)
+		if entry.Preview != "" {
+			lines = append(lines, "  - 理由："+entry.Preview)
 		}
 	}
 	lines = append(lines,
@@ -602,35 +589,6 @@ func renderHighRiskAdapterDiff(plan model.VaultPlan, diff *model.VaultDiff) stri
 		fmt.Sprintf("- 拒绝：//reject %s", diff.PlanID),
 	)
 	return strings.Join(lines, "\n")
-}
-
-func highRiskOpAdapterLines(op model.VaultOperation) []string {
-	switch op.Type {
-	case model.OperationRenameNote:
-		var payload model.RenameNotePayload
-		if err := json.Unmarshal([]byte(op.PayloadJSON), &payload); err != nil {
-			return []string{fmt.Sprintf("rename (payload decode failed: %s)", err.Error())}
-		}
-		return []string{fmt.Sprintf("rename: `%s` → `%s`", payload.SourcePath, payload.DestinationPath)}
-	case model.OperationBulkRetag:
-		var payload model.BulkRetagPayload
-		if err := json.Unmarshal([]byte(op.PayloadJSON), &payload); err != nil {
-			return []string{fmt.Sprintf("bulk-retag (payload decode failed: %s)", err.Error())}
-		}
-		return []string{fmt.Sprintf("bulk-retag: 影响 %d 篇; +[%s] -[%s]",
-			len(payload.AffectedPaths),
-			strings.Join(payload.AddTags, ", "),
-			strings.Join(payload.RemoveTags, ", "))}
-	case model.OperationBulkLinkRewrite:
-		var payload model.BulkLinkRewritePayload
-		if err := json.Unmarshal([]byte(op.PayloadJSON), &payload); err != nil {
-			return []string{fmt.Sprintf("bulk-link-rewrite (payload decode failed: %s)", err.Error())}
-		}
-		return []string{fmt.Sprintf("bulk-link-rewrite: `%s` → `%s` (影响 %d 篇)",
-			payload.FromPath, payload.ToPath, len(payload.AffectedPaths))}
-	default:
-		return []string{fmt.Sprintf("unknown high-risk op: %s", op.Type)}
-	}
 }
 
 func renderCreatedNotePreview(operations []model.VaultOperation) string {

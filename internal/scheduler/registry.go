@@ -24,21 +24,11 @@ const (
 	CapabilitySchedulerRunLogWrite = "scheduler_run_log_write"
 	CapabilityOutboxNotify         = "outbox_notify"
 
-	// Phase 6 additions:
 	CapabilityVaultLinkGraphRead = "vault_link_graph_read"
 	CapabilityVaultTextSearch    = "vault_text_search"
-	// AgentRunLogWrite is the Phase 6 successor of scheduler_run_log_write.
-	// Both names are accepted in SKILL.md so Phase 5 skills load unchanged.
+	// AgentRunLogWrite is the successor of scheduler_run_log_write. Both
+	// names are accepted in SKILL.md so Phase 5 skills load unchanged.
 	CapabilityAgentRunLogWrite = "agent_run_log_write"
-
-	// AgentSkillKindLegacy marks a skill loaded from the Phase 5
-	// Scheduler/Skills/*/SCHEDULE.md tree. Such skills always have
-	// HasSchedule=true and an inferred engine of static unless explicitly
-	// upgraded.
-	AgentSkillKindLegacy = "legacy"
-	// AgentSkillKindAgent marks a skill loaded from the Phase 6
-	// Agent/Skills/*/SKILL.md tree.
-	AgentSkillKindAgent = "agent"
 )
 
 // Phase 6 hard constraint #9: these path prefixes are never allowed inside
@@ -88,12 +78,6 @@ type ToolBudget struct {
 	MaxToolCalls        int `json:"max_tool_calls,omitempty"`
 	MaxTotalBytes       int `json:"max_total_bytes,omitempty"`
 	MaxWallClockSeconds int `json:"max_wall_clock_seconds,omitempty"`
-}
-
-// CleanRelativePatternExport is the exported form of cleanRelativePattern;
-// other packages (agent, CLI lint) re-use it to validate tool-provided paths.
-func CleanRelativePatternExport(value string) (string, error) {
-	return cleanRelativePattern(value)
 }
 
 // LintAgentSkillDir validates a single Phase 6 agent Skill directory the
@@ -183,12 +167,6 @@ type LintIssue struct {
 	Message  string
 }
 
-// CleanRelativeDirExport is the exported form of cleanRelativeDir, used by
-// agent tool implementations when validating scope_subset arguments.
-func CleanRelativeDirExport(value string) (string, error) {
-	return cleanRelativeDir(value)
-}
-
 // IsForbiddenScopePath reports whether path falls under any of the always-
 // forbidden prefixes (Phase 6 hard constraint #9). Called both at registry
 // load time and again at tool execution time as defense in depth.
@@ -235,9 +213,6 @@ type ScheduledSkill struct {
 	SkillPath       string          `json:"skill_path"`
 	Body            string          `json:"body,omitempty"`
 
-	// Phase 6 additions. AgentSkillKind disambiguates the load source so the
-	// scheduler tick can apply legacy vs. agent semantics where they differ.
-	AgentSkillKind      string     `json:"agent_skill_kind,omitempty"`
 	VaultTools          []string   `json:"vault_tools,omitempty"`
 	VaultScope          []string   `json:"vault_scope,omitempty"`
 	Budget              ToolBudget `json:"budget,omitempty"`
@@ -348,10 +323,9 @@ func LoadRegistry(vaultRoot string, vaultProfile profile.VaultProfile) ([]Schedu
 }
 
 // loadLegacyScheduleSkills implements the Phase 5 SCHEDULE.md-driven loader,
-// preserved unchanged for backwards-compat. The only difference vs. Phase 5 is
-// that the loader now stamps the result with AgentSkillKind="legacy" and runs
-// engine inference (vault_tools is always empty in this branch, so the engine
-// resolves to defaultEngine — which is `static` for Phase 5 vaults).
+// preserved for backwards-compat with vaults that still use the
+// Scheduler/Skills/*/SCHEDULE.md layout. Phase 6 vaults use Agent/Skills/
+// instead; see loadAgentSkills.
 func loadLegacyScheduleSkills(
 	vaultRoot string,
 	registryPaths []string,
@@ -363,7 +337,7 @@ func loadLegacyScheduleSkills(
 ) ([]ScheduledSkill, error) {
 	var schedules []ScheduledSkill
 	for _, pattern := range registryPaths {
-		cleanPattern, err := cleanRelativePattern(pattern)
+		cleanPattern, err := CleanRelativePattern(pattern)
 		if err != nil {
 			return nil, fmt.Errorf("scheduler registry path %q: %w", pattern, err)
 		}
@@ -429,7 +403,6 @@ func loadLegacyScheduleSkills(
 			schedule.RegistryHash = hex.EncodeToString(hash[:])
 			schedule.SkillDir = skillDir
 			schedule.SkillPath = skillPath
-			schedule.AgentSkillKind = AgentSkillKindLegacy
 			schedule.HasSchedule = true
 			schedule.Engine = inferEngine("", schedule.VaultTools, defaultEngine)
 			// Legacy SCHEDULE.md has no per-Skill budget; use profile caps.
@@ -463,7 +436,7 @@ func loadAgentSkills(
 ) ([]ScheduledSkill, error) {
 	var schedules []ScheduledSkill
 	for _, pattern := range registryPaths {
-		cleanPattern, err := cleanRelativePattern(pattern)
+		cleanPattern, err := CleanRelativePattern(pattern)
 		if err != nil {
 			return nil, fmt.Errorf("agent skill registry path %q: %w", pattern, err)
 		}
@@ -529,7 +502,6 @@ func loadAgentSkills(
 			schedule.RegistryHash = hex.EncodeToString(hash[:])
 			schedule.SkillDir = skillDir
 			schedule.SkillPath = rel
-			schedule.AgentSkillKind = AgentSkillKindAgent
 
 			// Optional sibling SCHEDULE.md → enables cron triggering.
 			schedulePath := filepath.ToSlash(filepath.Join(skillDir, ScheduleFileName))
@@ -823,7 +795,7 @@ func canonicalizeCapabilities(caps []string) []string {
 func normalizeScopeList(values []string) []string {
 	out := make([]string, 0, len(values))
 	for _, v := range cleanList(values) {
-		clean, err := cleanRelativePattern(v)
+		clean, err := CleanRelativePattern(v)
 		if err != nil {
 			// Keep the raw value; downstream validateVaultScope will surface
 			// the proper error context.
@@ -1187,7 +1159,7 @@ func valuesList(values map[string]string, key string) []string {
 func cleanRootSet(values []string) ([]string, error) {
 	var roots []string
 	for _, value := range values {
-		clean, err := cleanRelativeDir(value)
+		clean, err := CleanRelativeDir(value)
 		if err != nil {
 			return nil, err
 		}
@@ -1196,7 +1168,7 @@ func cleanRootSet(values []string) ([]string, error) {
 	return roots, nil
 }
 
-func cleanRelativePattern(value string) (string, error) {
+func CleanRelativePattern(value string) (string, error) {
 	value = strings.TrimSpace(filepath.ToSlash(value))
 	if value == "" {
 		return "", errors.New("path is required")
@@ -1212,8 +1184,8 @@ func cleanRelativePattern(value string) (string, error) {
 	return filepath.ToSlash(filepath.Clean(value)), nil
 }
 
-func cleanRelativeDir(value string) (string, error) {
-	clean, err := cleanRelativePattern(value)
+func CleanRelativeDir(value string) (string, error) {
+	clean, err := CleanRelativePattern(value)
 	if err != nil {
 		return "", err
 	}
@@ -1224,7 +1196,7 @@ func cleanRelativeDir(value string) (string, error) {
 }
 
 func cleanRelativePath(value string) (string, error) {
-	clean, err := cleanRelativePattern(value)
+	clean, err := CleanRelativePattern(value)
 	if err != nil {
 		return "", err
 	}

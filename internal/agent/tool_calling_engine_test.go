@@ -76,8 +76,7 @@ func testSkill(scope []string, tools []string) scheduler.ScheduledSkill {
 			MaxTotalBytes:       100 * 1024,
 			MaxWallClockSeconds: 30,
 		},
-		Body:           "Test agent.",
-		AgentSkillKind: scheduler.AgentSkillKindAgent,
+		Body: "Test agent.",
 	}
 }
 

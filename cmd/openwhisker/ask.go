@@ -1,8 +1,8 @@
 package main
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -76,11 +76,9 @@ func runAsk(args []string, _ io.Reader, stdout, stderr io.Writer) error {
 		return fmt.Errorf("skill %q is not configured for tool-calling (engine = %q, vault_tools = %v)", skill.ID, skill.Engine, skill.VaultTools)
 	}
 
-	// Debug ndjson writer: open lazily so we know the run id; we open after
-	// the dispatcher has created the row. Easier: open before with a temp
-	// name and rename. Simpler still: pass an in-memory buffer, then write
-	// it to the run-id-named file after the dispatch returns.
-	var debugBuf debugBuffer
+	// Capture debug ndjson in-memory so we can name the file after the run id
+	// the dispatcher mints.
+	var debugBuf bytes.Buffer
 	var debugWriter interface{ Write(p []byte) (int, error) }
 	if *debug {
 		debugWriter = &debugBuf
@@ -123,22 +121,3 @@ func runAsk(args []string, _ io.Reader, stdout, stderr io.Writer) error {
 	return nil
 }
 
-// debugBuffer is a tiny in-memory io.Writer used to capture debug ndjson
-// before we know the run id (the dispatcher mints it). We could use bytes.Buffer
-// directly but the struct lets us add metadata fields without changing the
-// caller signature later.
-type debugBuffer struct {
-	data []byte
-}
-
-func (b *debugBuffer) Write(p []byte) (int, error) {
-	b.data = append(b.data, p...)
-	return len(p), nil
-}
-
-func (b *debugBuffer) Len() int      { return len(b.data) }
-func (b *debugBuffer) Bytes() []byte { return b.data }
-
-// (json package is imported by other ask helpers; declared here as a marker
-// in case future additions need direct json access.)
-var _ = json.Marshal

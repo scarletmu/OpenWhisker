@@ -147,18 +147,26 @@ func TestRenderAdapterDiffPrependsHighRiskWarning(t *testing.T) {
 	diff := &model.VaultDiff{
 		PlanID:  plan.ID,
 		Summary: "⚠ 高风险计划：批准后只生成 proposal note，不写入 Knowledge。原摘要：" + plan.Summary,
-		Entries: []model.DiffEntry{{
-			OperationID: plan.ID,
-			Type:        model.OperationWriteProposal,
-			TargetPath:  "Raw/Agent-Proposals/proposal_high.md",
-			Summary:     "write proposal note (proposal/rename)",
-		}},
+		Entries: []model.DiffEntry{
+			{
+				OperationID: plan.ID,
+				Type:        model.OperationWriteProposal,
+				TargetPath:  "Raw/Agent-Proposals/proposal_high.md",
+				Summary:     "write proposal note (proposal/rename)",
+			},
+			{
+				OperationID: plan.ID,
+				Type:        model.OperationRenameNote,
+				TargetPath:  dst,
+				Summary:     "rename: " + src + " → " + dst + " → proposal only",
+			},
+		},
 	}
 	body := renderAdapterDiff(plan, diff)
 	for _, needle := range []string{
 		"⚠ 高风险计划",
 		"## 影响路径",
-		"rename: `" + src + "` → `" + dst + "`",
+		"rename: " + src + " → " + dst,
 		"proposal 路径: Raw/Agent-Proposals/proposal_high.md",
 		"批准 (写 proposal)",
 	} {

@@ -172,7 +172,6 @@ func runOrganizeLast(args []string, stdout, stderr io.Writer) error {
 	contextMode := fs.String("context-mode", contextModeDefault(), "raw organizer context mode: minimal or vault-rules")
 	vaultProfile := fs.String("vault-profile", vaultProfileDefault(), "vault profile: generic or knowledge-vault")
 	llmModel := fs.String("llm-model", llmModelDefault(), "OpenAI-compatible model for --organizer=openai-compatible")
-	openAIModel := fs.String("openai-model", "", "deprecated alias for --llm-model")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -181,7 +180,7 @@ func runOrganizeLast(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer store.Close()
-	organizer, err := rawOrganizerForName(*organizerName, coalesce(*openAIModel, *llmModel))
+	organizer, err := rawOrganizerForName(*organizerName, *llmModel)
 	if err != nil {
 		return err
 	}
@@ -416,6 +415,9 @@ func runPlanReject(args []string, stdout, stderr io.Writer) error {
 	return printJSON(stdout, result)
 }
 
+// parsePlanRejectArgs hand-rolls flag parsing so users can interleave the
+// positional plan_id with --reason / --db (the standard flag package stops at
+// the first non-flag arg).
 func parsePlanRejectArgs(args []string) (dbPath, identifier, reason string, err error) {
 	dbPath = "data/openwhisker.db"
 	reason = "rejected by user"
@@ -551,6 +553,24 @@ func runSchedulerTick(args []string, stdout, stderr io.Writer) error {
 	return printJSON(stdout, result)
 }
 
+// openSchedulerStatusService parses --db / --vault / --vault-profile flags,
+// opens the store, and returns a SchedulerStatusService alongside the store
+// (caller must Close it). Used by `scheduler status` / `schedules list` /
+// `schedules enable|disable`.
+func openSchedulerStatusService(dbPath, vaultRoot, vaultProfileName string) (*storage.Store, core.SchedulerStatusService, error) {
+	store, err := storage.Open(dbPath)
+	if err != nil {
+		return nil, core.SchedulerStatusService{}, err
+	}
+	conventions, err := vaultConventionsForProfile(vaultProfileName)
+	if err != nil {
+		store.Close()
+		return nil, core.SchedulerStatusService{}, err
+	}
+	vaultProfile := profile.NewConfiguredVaultProfile(conventions)
+	return store, core.NewSchedulerStatusService(store, vaultRoot, vaultProfile), nil
+}
+
 func runSchedulerStatus(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("scheduler status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -564,17 +584,12 @@ func runSchedulerStatus(args []string, stdout, stderr io.Writer) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("usage: openwhisker scheduler status [--db data/openwhisker.db] [--vault testdata/vault] [--vault-profile generic|knowledge-vault] [--limit 10]")
 	}
-	store, err := storage.Open(*dbPath)
+	store, svc, err := openSchedulerStatusService(*dbPath, *vaultRoot, *vaultProfileName)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
-	conventions, err := vaultConventionsForProfile(*vaultProfileName)
-	if err != nil {
-		return err
-	}
-	vaultProfile := profile.NewConfiguredVaultProfile(conventions)
-	status, err := core.NewSchedulerStatusService(store, *vaultRoot, vaultProfile).Status(*limit)
+	status, err := svc.Status(*limit)
 	if err != nil {
 		return err
 	}
@@ -618,17 +633,12 @@ func runSchedulerSchedulesList(args []string, stdout, stderr io.Writer) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("usage: openwhisker scheduler schedules list [--db data/openwhisker.db] [--vault testdata/vault] [--vault-profile generic|knowledge-vault]")
 	}
-	store, err := storage.Open(*dbPath)
+	store, svc, err := openSchedulerStatusService(*dbPath, *vaultRoot, *vaultProfileName)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
-	conventions, err := vaultConventionsForProfile(*vaultProfileName)
-	if err != nil {
-		return err
-	}
-	vaultProfile := profile.NewConfiguredVaultProfile(conventions)
-	schedules, err := core.NewSchedulerStatusService(store, *vaultRoot, vaultProfile).Schedules()
+	schedules, err := svc.Schedules()
 	if err != nil {
 		return err
 	}
@@ -651,17 +661,12 @@ func runSchedulerSchedulesSetEnabled(args []string, stdout, stderr io.Writer, en
 	if fs.NArg() != 1 {
 		return fmt.Errorf("usage: openwhisker scheduler schedules enable|disable [--db data/openwhisker.db] [--vault testdata/vault] [--vault-profile generic|knowledge-vault] <schedule_id>")
 	}
-	store, err := storage.Open(*dbPath)
+	store, svc, err := openSchedulerStatusService(*dbPath, *vaultRoot, *vaultProfileName)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
-	conventions, err := vaultConventionsForProfile(*vaultProfileName)
-	if err != nil {
-		return err
-	}
-	vaultProfile := profile.NewConfiguredVaultProfile(conventions)
-	result, err := core.NewSchedulerStatusService(store, *vaultRoot, vaultProfile).SetScheduleEnabled(fs.Arg(0), enabled)
+	result, err := svc.SetScheduleEnabled(fs.Arg(0), enabled)
 	if err != nil {
 		return err
 	}
@@ -727,7 +732,6 @@ func runMatrixPollOnce(args []string, stdout, stderr io.Writer) error {
 	contextMode := fs.String("context-mode", contextModeDefault(), "raw organizer context mode: minimal or vault-rules")
 	vaultProfile := fs.String("vault-profile", vaultProfileDefault(), "vault profile: generic or knowledge-vault")
 	llmModel := fs.String("llm-model", llmModelDefault(), "OpenAI-compatible model for --organizer=openai-compatible")
-	openAIModel := fs.String("openai-model", "", "deprecated alias for --llm-model")
 	intentRouter := fs.String("intent-router", intentRouterDefault(), "intent router mode: hybrid, rules, or off")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -740,7 +744,7 @@ func runMatrixPollOnce(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer store.Close()
-	organizer, err := rawOrganizerForName(*organizerName, coalesce(*openAIModel, *llmModel))
+	organizer, err := rawOrganizerForName(*organizerName, *llmModel)
 	if err != nil {
 		return err
 	}
@@ -821,7 +825,6 @@ func runMatrixDaemon(args []string, stdout, stderr io.Writer) error {
 	contextMode := fs.String("context-mode", contextModeDefault(), "raw organizer context mode: minimal or vault-rules")
 	vaultProfile := fs.String("vault-profile", vaultProfileDefault(), "vault profile: generic or knowledge-vault")
 	llmModel := fs.String("llm-model", llmModelDefault(), "OpenAI-compatible model for --organizer=openai-compatible")
-	openAIModel := fs.String("openai-model", "", "deprecated alias for --llm-model")
 	intentRouter := fs.String("intent-router", intentRouterDefault(), "intent router mode: hybrid, rules, or off")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -834,7 +837,7 @@ func runMatrixDaemon(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer store.Close()
-	organizer, err := rawOrganizerForName(*organizerName, coalesce(*openAIModel, *llmModel))
+	organizer, err := rawOrganizerForName(*organizerName, *llmModel)
 	if err != nil {
 		return err
 	}
@@ -1893,15 +1896,15 @@ func intentClassifierForMode(mode string) (core.IntentClassifier, error) {
 }
 
 func llmAPIKey() string {
-	return coalesce(os.Getenv("OPENWHISKER_LLM_API_KEY"), os.Getenv("OPENWHISKER_OPENAI_API_KEY"), os.Getenv("OPENAI_API_KEY"))
+	return coalesce(os.Getenv("OPENWHISKER_LLM_API_KEY"), os.Getenv("OPENAI_API_KEY"))
 }
 
 func llmBaseURL() string {
-	return coalesce(os.Getenv("OPENWHISKER_LLM_BASE_URL"), os.Getenv("OPENWHISKER_OPENAI_BASE_URL"))
+	return os.Getenv("OPENWHISKER_LLM_BASE_URL")
 }
 
 func llmModelDefault() string {
-	return coalesce(os.Getenv("OPENWHISKER_LLM_MODEL"), os.Getenv("OPENWHISKER_OPENAI_MODEL"))
+	return os.Getenv("OPENWHISKER_LLM_MODEL")
 }
 
 func intentAPIKey() string {

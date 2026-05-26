@@ -81,9 +81,6 @@ func TestLoadRegistry_AgentSkillOnly_AdHocOnly(t *testing.T) {
 	if s.ID != "vault-qa" {
 		t.Errorf("id = %q, want vault-qa", s.ID)
 	}
-	if s.AgentSkillKind != AgentSkillKindAgent {
-		t.Errorf("kind = %q, want %q", s.AgentSkillKind, AgentSkillKindAgent)
-	}
 	if s.HasSchedule {
 		t.Errorf("HasSchedule = true, want false (no SCHEDULE.md)")
 	}
@@ -278,9 +275,6 @@ func TestLoadRegistry_LegacyKindStillLoads(t *testing.T) {
 		t.Fatalf("schedule count = %d, want 1", len(schedules))
 	}
 	s := schedules[0]
-	if s.AgentSkillKind != AgentSkillKindLegacy {
-		t.Errorf("kind = %q, want %q", s.AgentSkillKind, AgentSkillKindLegacy)
-	}
 	if s.Engine != profile.AgentSkillEngineStatic {
 		t.Errorf("engine = %q, want static (legacy default)", s.Engine)
 	}
