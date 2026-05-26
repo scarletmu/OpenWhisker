@@ -650,16 +650,6 @@ INSERT INTO agent_runs (
 	return err
 }
 
-func (s *Store) FinishSchedulerRun(id, status, resultJSON, errText, outboxMessageID string, finishedAt time.Time) error {
-	_, err := s.db.Exec(`
-UPDATE agent_runs
-SET status = ?, finished_at = ?, result_json = ?, error = ?, outbox_message_id = ?
-WHERE id = ?`, status, formatTime(finishedAt), resultJSON, errText, outboxMessageID, id)
-	return err
-}
-
-// FinishAgentRun is the Phase 6 superset of FinishSchedulerRun: it also writes
-// the tool_trace_json column. Used by AgentRunner for tool-calling runs.
 func (s *Store) FinishAgentRun(id, status, resultJSON, errText, outboxMessageID, toolTraceJSON string, finishedAt time.Time) error {
 	_, err := s.db.Exec(`
 UPDATE agent_runs

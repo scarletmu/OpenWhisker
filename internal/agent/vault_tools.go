@@ -327,7 +327,7 @@ func (e VaultToolExecutor) vaultTextSearch(ctx context.Context, rawArgs json.Raw
 			if scheduler.IsForbiddenScopePath(trimmed) {
 				return ToolResult{}, newToolError("forbidden_prefix", fmt.Sprintf("%q falls under a forbidden prefix", s))
 			}
-			cleanS, err := scheduler.CleanRelativeDirExport(strings.TrimSuffix(trimmed, "/"))
+			cleanS, err := scheduler.CleanRelativeDir(strings.TrimSuffix(trimmed, "/"))
 			if err != nil {
 				return ToolResult{}, newToolError("bad_scope", err.Error())
 			}
@@ -454,7 +454,7 @@ func (e VaultToolExecutor) resolveAndCheckPath(raw string) (string, *ToolError) 
 	if scheduler.IsForbiddenScopePath(raw) {
 		return "", newToolError("forbidden_prefix", fmt.Sprintf("%q falls under a forbidden prefix", raw))
 	}
-	rel, err := scheduler.CleanRelativePatternExport(raw)
+	rel, err := scheduler.CleanRelativePattern(raw)
 	if err != nil {
 		return "", newToolError("bad_path", err.Error())
 	}

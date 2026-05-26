@@ -13,6 +13,7 @@ package agentdispatch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"time"
 
@@ -155,13 +156,7 @@ type writerAdapter struct {
 
 func (a *writerAdapter) Write(p []byte) (int, error) { return a.inner.Write(p) }
 
-// errNoRunner / errNoStore are returned when the Dispatcher was constructed
-// without required fields — a configuration bug at the call site.
 var (
-	errNoRunner = errStr("agentdispatch.Dispatcher: AgentRunner is nil")
-	errNoStore  = errStr("agentdispatch.Dispatcher: Store is nil (required for DispatchAdHoc)")
+	errNoRunner = errors.New("agentdispatch.Dispatcher: AgentRunner is nil")
+	errNoStore  = errors.New("agentdispatch.Dispatcher: Store is nil (required for DispatchAdHoc)")
 )
-
-type errStr string
-
-func (e errStr) Error() string { return string(e) }

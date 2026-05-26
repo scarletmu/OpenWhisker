@@ -111,10 +111,6 @@ type SchedulerTickRunResult struct {
 	Error           string `json:"error,omitempty"`
 }
 
-func NewSchedulerService(store *storage.Store, vaultRoot string, vaultProfile profile.VaultProfile) SchedulerService {
-	return NewSchedulerServiceWithOptions(store, vaultRoot, SchedulerServiceOptions{VaultProfile: vaultProfile})
-}
-
 func NewSchedulerServiceWithOptions(store *storage.Store, vaultRoot string, opts SchedulerServiceOptions) SchedulerService {
 	runner := opts.Runner
 	if runner == nil {
@@ -153,10 +149,10 @@ func (s SchedulerService) Tick(ctx context.Context) (SchedulerTickResult, error)
 	}
 	result.Discovered = len(schedules)
 	for _, schedule := range schedules {
-		// Phase 6: ad-hoc-only Skills (no sibling SCHEDULE.md) appear in
-		// the registry so the @-mention path can resolve them, but they
+		// Ad-hoc-only Skills (SKILL.md without a sibling SCHEDULE.md) appear
+		// in the registry so the @-mention path can resolve them, but they
 		// have no cron expression and must not be reconciled by the tick.
-		if schedule.AgentSkillKind == scheduler.AgentSkillKindAgent && !schedule.HasSchedule {
+		if !schedule.HasSchedule {
 			continue
 		}
 		runtime, due, err := s.reconcileSchedule(schedule, now)

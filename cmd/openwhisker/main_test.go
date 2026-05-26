@@ -160,7 +160,6 @@ func TestEffectivePlanSyncModeDefaultsOffForTestVault(t *testing.T) {
 
 func TestRawOrganizerForNameRequiresOpenAIKey(t *testing.T) {
 	t.Setenv("OPENWHISKER_LLM_API_KEY", "")
-	t.Setenv("OPENWHISKER_OPENAI_API_KEY", "")
 	t.Setenv("OPENAI_API_KEY", "")
 	_, err := rawOrganizerForName("openai-compatible", "")
 	if err == nil || !strings.Contains(err.Error(), "OPENWHISKER_LLM_API_KEY") {
@@ -182,7 +181,6 @@ func TestRawOrganizerForNameBuildsOpenAIOrganizer(t *testing.T) {
 
 func TestSchedulerEngineForNameRequiresOpenAIKey(t *testing.T) {
 	t.Setenv("OPENWHISKER_LLM_API_KEY", "")
-	t.Setenv("OPENWHISKER_OPENAI_API_KEY", "")
 	t.Setenv("OPENAI_API_KEY", "")
 	_, err := schedulerEngineForName("openai-compatible", "")
 	if err == nil || !strings.Contains(err.Error(), "OPENWHISKER_LLM_API_KEY") {
