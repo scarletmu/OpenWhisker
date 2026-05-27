@@ -1,13 +1,15 @@
 # OpenWhisker 当前进度与交接说明
 
-更新时间：2026-05-26
+更新时间：2026-05-27
 
 本文用于在不同机器之间切换开发时快速恢复上下文。长期架构以 `docs/architecture/` 和 `docs/phases/` 为准；本文只记录**当前实施进度、验证状态和下一步优先级**。各模块的设计 / 行为细节不在此重复，按"关键文档"指针进入对应 schema / contract。
 
 ## 当前阶段
 
-主线已从 Phase 5 收束进入 Phase 6：Agent-Driven Vault Knowledge Response。代码已落地，OPEN-1 demo 已在真实 vault + `deepseek-chat` 上跑通（两轮独立、合计 18/20 = 90% 自然收口），合并 `deploy/main` 前的硬门槛已解封；剩余事项均为 follow-up，不再阻塞主线合并。
+主线已从 Phase 6 推进到 **Phase 7 Inbox Enrichment v1 已合并 main**（commit `2558928`，2026-05-27）；**Phase 8 Memory Recall Service 设计稿评审结束，已升级为"待实现"**。下一步是 Phase 8 端到端实现。
 
+- **Phase 8** Memory Recall Service：设计稿已收尾（`docs/phases/phase-8-memory-recall.md`），7 条原待决问题于 2026-05-27 全部转为决议，PR 边界沿用 Phase 7 模式（单 PR + 单 commit）。代码未落地。计划范围：`internal/memory/`（KnownTags / Recall / wikilink_resolver / sqlite_store）+ 四张派生 cache 表（`memory_tag_index` / `memory_link_index` / `memory_known_tags` / `memory_recalls`）+ executor Apply hook + Phase 6 工具集 `recall_memory` +1 + 把 Phase 7 `internal/tagvocab/` 迁入 + `openwhisker memory reindex` CLI。
+- **Phase 7** Inbox Enrichment v1 已落地 main（2026-05-27，commit `2558928`）。代码层包含 `internal/enrich/`（enrich 编排 + worker + scan + queue DAO）、`internal/tagvocab/`（派生自 vault frontmatter 的已知 tag 词表，Phase 8 落地时迁入 `internal/memory/`）、`enrich_jobs` SQLite 表（状态机 pending / running / done / skipped_concurrent_edit / failed / attempts_exhausted）、policy 三 guard（path / field / body）扩展、`JobTypeEnrichRaw` + `model.frontmatter` 常量、IngestRaw 末尾入队 hook、daemon scan tick（5 分钟周期 + mtime 10 分钟静默期 + attempts 5 次熔断）、enrich worker goroutine 串行消费、内置 enrich skill prompt、CLI `openwhisker enrich <rawJobID>`（手动重跑，重置 attempts，绕过静默期）、Matrix `/no-enrich`（一次性开关）。enrich 复用 Phase 6 `AgentRunner` 与 5 + 1 read-only 工具，独立 budget（`max_tool_calls=8 / wall_clock=20s` 硬编码）。enrich 写回走主线 `VaultPlan → Policy → Executor`，唯一允许的 op 是 `rewrite_note` 且 target_path 严格限定为本次 enrich 对应的 inbox 文件；frontmatter 仅允许追加 `topic/*` / `skill/*`（必须命中已知词表）/ `status/needs-review` / `raw/*`，禁止删除已有项；body sha256 由 body_guard 钉死，Raw Text 永不被改。失败 / 超时 / policy reject 一律静默丢弃 + debug outbox，不进 approval 队列。testdata 烟测全绿；真实 vault demo 放在验证队列（不挂顶部 priority）。
 - **Phase 4B** 已闭环：Matrix 私聊入口 + Raw Organizer approve/diff/reject + 人类审批页 diff 渲染。2026-05-20 在 `testdata/vault` 跑通 Matrix daemon + DeepSeek 的 organize → `/diff` → `/approve` 全链路，Knowledge draft 与 Raw/Processed 追加段均匹配新 schema。
 - **Phase 4B.5** IM Intent Router 已落地为 partial implementation：rules / hybrid / off 三模式、source-scoped binding、capture bucket、pending clarification 状态机、OpenAI-compatible classifier、intent audit jsonl 均已接入；真实 Matrix + 真实 intent 小模型 smoke 已在 2026-05-18 跑通。
 - **Phase 4C.1** high-risk proposal-only policy 已闭环，含 proposal note schema / 渲染 / 多路径 diff 合成 / `proposal_written` 终态。
@@ -37,6 +39,9 @@
 | Phase 6 | sanitize / linkindex / agent runtime / registry / Matrix @-mention / CLI ask + lint + agent runs / SQLite migration 单元测试全绿 | `go test ./...`, 2026-05-26 | 已通 |
 | Phase 6 | OPEN-1 demo（5 次 scheduler + 5 次 CLI ask）真实 deepseek-chat 多轮稳定性 ≥9/10 | 真实 vault + DeepSeek `deepseek-chat`，两轮独立跑共 20 runs，18/20 (90%) 自然收口；摘要 `docs/phases/phase-6-scheduler-skill-creator/demo/results.md`，2026-05-26 | 已通 |
 | Phase 6 | vault 内 `Agent/Skills/skill-creator/SKILL.md` 创作 | 未做 | 留给用户写在自己 vault |
+| Phase 7 | tagvocab / enrich / policy 三 guard / enrich_jobs DAO / IngestRaw hook 单元测试与 testdata 烟测 | `go test ./...`, 2026-05-27 | 已通 |
+| Phase 7 | 真实 vault Demo（明显归属 / needs-review / new_tag_candidate 三类样本各若干条） | 未做 | 验证队列，不挂顶部 priority |
+| Phase 8 | 待实现 | — | 未做 |
 
 `GOCACHE=/private/tmp/openwhisker-go-cache go test ./...` 2026-05-23 全包绿。
 
@@ -63,6 +68,9 @@ testdata 已通的能力默认视为验证充分；真实 vault apply 只是 nic
 - `docs/phases/phase-4-wiki-agent-workflow.md`
 - `docs/phases/phase-4-im-intent-router.md`
 - `docs/phases/phase-5-read-only-skill-scheduler.md`
+- `docs/phases/phase-6-scheduler-skill-creator.md`
+- `docs/phases/phase-7-inbox-enrichment.md`
+- `docs/phases/phase-8-memory-recall.md`
 - `docs/architecture/im-intent-router.md`
 - `docs/architecture/capture-bucket.md`
 - `docs/architecture/intent-router-model-contract.md`
@@ -72,11 +80,13 @@ testdata 已通的能力默认视为验证充分；真实 vault apply 只是 nic
 
 ## 下一步优先级
 
-1. 根据真实使用反馈扩展 rules-only 短句词表与 clarification 回复词表（基于真实未命中样本，避免盲扩）。
-2. Phase 4C 主干已收束，没有预排的 4C.3 / 4C.4；后续推进改为真实使用驱动。新增能力（多模态 bucket 输入、clarification 回复 `additional_payload_text` 抽取等）按"关键已知遗留"里的实际需求单独立项。
-3. Phase 5 下一步进入真实运行反馈：用 launchd 或 systemd 跑 `openwhisker daemon`，结合 `daemon status`、`scheduler status`、`scheduler runs` 和 `scheduler schedules list|enable|disable` 观察真实 RSSHub / RSS scheduled Skill 输出质量。RSSHub / Folo 仍只作为上游 feed 来源，不进入 Scheduler Core 概念，adapter 只返回信息快照，不提供外部写操作。
-4. Phase 6 follow-up（OPEN-1 后续，不阻塞合并）：
+1. **Phase 8 Memory Recall Service 端到端实现**（当前主线焦点）：按 `docs/phases/phase-8-memory-recall.md` "决议"小节执行，单 PR + 单 commit；同 PR 内完成 `internal/tagvocab/` → `internal/memory/` 迁移与 enrich 切换。验收以 Phase 7 enrich 复跑通过 + 真实 vault `recall_memory` 召回质量人工检验为门槛。
+2. 根据真实使用反馈扩展 rules-only 短句词表与 clarification 回复词表（基于真实未命中样本，避免盲扩）。
+3. Phase 4C 主干已收束，没有预排的 4C.3 / 4C.4；后续推进改为真实使用驱动。新增能力（多模态 bucket 输入、clarification 回复 `additional_payload_text` 抽取等）按"关键已知遗留"里的实际需求单独立项。
+4. Phase 5 下一步进入真实运行反馈：用 launchd 或 systemd 跑 `openwhisker daemon`，结合 `daemon status`、`scheduler status`、`scheduler runs` 和 `scheduler schedules list|enable|disable` 观察真实 RSSHub / RSS scheduled Skill 输出质量。RSSHub / Folo 仍只作为上游 feed 来源，不进入 Scheduler Core 概念，adapter 只返回信息快照，不提供外部写操作。
+5. Phase 6 follow-up（OPEN-1 后续，不阻塞合并）：
    - **scheduler trigger 工具上限收紧**：当 `AgentRunRequest.Query == ""` 时把 `max_tool_calls` 砍半（≤4）并写 trace，降低 scheduler 无 query 时 LLM 发散探索导致 `call_count_exceeded` partial 的概率；当前实测 partial 率约 10%。
    - **CLI usage 字符串补齐**：`cmd/openwhisker/main.go` 顶部 usage 漏列 `ask` / `agent runs` / `skill lint` 三个 Phase 6 命令，命令本身可用，只是 `--help` 不见。
    - **LLM 多模型对齐**：`.env.local` 若仍指向 reasoner-style 模型（如 `deepseek-v4-flash` 要求把 `reasoning_content` 回传），需要给 `OpenAIClient` 加 reasoning-history 透传或在文档里强约束使用非 reasoner 模型；当前 OPEN-1 demo 显式用 `--llm-model deepseek-chat` 覆盖。
-5. Phase 6 vault skill-creator：在 `~/Documents/KnowLedge/Agent/Skills/skill-creator/SKILL.md` 写 prompt（vault 内容；本仓库不动）；可通过 `openwhisker ask --skill skill-creator "..."` 触发新 Skill 创建流，输出 VaultPlan 走 medium-risk approval。
+6. Phase 6 vault skill-creator：在 `~/Documents/KnowLedge/Agent/Skills/skill-creator/SKILL.md` 写 prompt（vault 内容；本仓库不动）；可通过 `openwhisker ask --skill skill-creator "..."` 触发新 Skill 创建流，输出 VaultPlan 走 medium-risk approval。
+7. Phase 7 真实 vault demo：覆盖明显归属命中 / `status/needs-review` 触发 / `new_tag_candidate` 触发三类样本各若干条，人工评估 tag 选择是否合理（不挂顶部 priority，按需触发）。
