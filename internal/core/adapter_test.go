@@ -128,6 +128,78 @@ func TestAdapterServiceHandlesMatrixRawDedupeAndApproval(t *testing.T) {
 	}
 }
 
+// TestAdapterNoEnrichSkipsHook verifies that `/no-enrich <text>` ingests the
+// raw capture without firing the Phase 7 enqueue hook. The hook is a fake that
+// records every Enqueue call; we assert it stays empty for /no-enrich and
+// fires for a plain capture under the same service.
+func TestAdapterNoEnrichSkipsHook(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "openwhisker.db")
+	vaultRoot := filepath.Join(dir, "vault")
+	if err := os.MkdirAll(vaultRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	hook := &recordingEnrichHook{}
+	service := NewAdapterServiceWithOptions(store, vaultRoot, AdapterServiceOptions{
+		IntentRouterMode: "off",
+		EnrichHook:       hook,
+	})
+
+	skipped, err := service.HandleText(context.Background(), AdapterRequest{
+		Adapter: model.AdapterMatrix,
+		EventID: "$noenrich-1",
+		Sender:  "@user:example.test",
+		Text:    "/no-enrich raw capture without enrich",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skipped.Status != model.JobStatusDone {
+		t.Fatalf("/no-enrich status = %s, want done", skipped.Status)
+	}
+	if !strings.Contains(skipped.Body, "enrichment skipped") {
+		t.Fatalf("/no-enrich body = %q, want hint about skipped enrichment", skipped.Body)
+	}
+	if len(hook.calls) != 0 {
+		t.Fatalf("/no-enrich fired hook %d times, want 0", len(hook.calls))
+	}
+
+	normal, err := service.HandleText(context.Background(), AdapterRequest{
+		Adapter: model.AdapterMatrix,
+		EventID: "$noenrich-2",
+		Sender:  "@user:example.test",
+		Text:    "ordinary raw capture",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if normal.Status != model.JobStatusDone {
+		t.Fatalf("plain capture status = %s, want done", normal.Status)
+	}
+	if len(hook.calls) != 1 {
+		t.Fatalf("plain capture hook calls = %d, want 1", len(hook.calls))
+	}
+}
+
+type recordingEnrichHook struct {
+	calls []enrichCall
+}
+
+type enrichCall struct {
+	rawPath     string
+	parentJobID string
+}
+
+func (h *recordingEnrichHook) Enqueue(rawPath, parentJobID string) error {
+	h.calls = append(h.calls, enrichCall{rawPath: rawPath, parentJobID: parentJobID})
+	return nil
+}
+
 func TestRenderAdapterDiffPrependsHighRiskWarning(t *testing.T) {
 	src := "Knowledge/topic/old-name.md"
 	dst := "Knowledge/topic/new-name.md"

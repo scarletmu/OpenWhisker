@@ -24,6 +24,16 @@ type IngestService struct {
 	conventions policy.Conventions
 	vaultRoot   string
 	now         func() time.Time
+	enrichHook  EnrichEnqueuer
+}
+
+// EnrichEnqueuer is the dependency-inverted interface IngestService uses to
+// schedule Phase 7 enrich jobs without importing internal/enrich (which
+// would create a cycle: enrich → core → enrich). cmd wires the concrete
+// enrich.Queue into the service at construction time. nil disables the
+// hook (tests and legacy paths).
+type EnrichEnqueuer interface {
+	Enqueue(rawPath, parentJobID string) error
 }
 
 type IngestRawRequest struct {
@@ -32,6 +42,10 @@ type IngestRawRequest struct {
 	SourceKey      string `json:"source_key,omitempty"`
 	BucketID       string `json:"bucket_id,omitempty"`
 	SuppressOutbox bool   `json:"suppress_outbox,omitempty"`
+	// NoEnrich is set by the Matrix /no-enrich one-shot toggle. Other
+	// callers leave it false; the enrich hook also respects bucket-id and
+	// source_key blocklists configured on the enqueuer.
+	NoEnrich bool `json:"no_enrich,omitempty"`
 }
 
 type IngestRawResult struct {
@@ -76,6 +90,14 @@ func NewIngestServiceWithConventions(store *storage.Store, vaultRoot string, con
 		vaultRoot:   vaultRoot,
 		now:         func() time.Time { return time.Now().UTC() },
 	}
+}
+
+// WithEnrichHook attaches a Phase 7 enrich enqueuer. The hook fires after a
+// successful low-risk Raw capture; bucket-related ingestions (BucketID set)
+// and explicit /no-enrich requests are skipped.
+func (s IngestService) WithEnrichHook(h EnrichEnqueuer) IngestService {
+	s.enrichHook = h
+	return s
 }
 
 func (s IngestService) IngestRaw(ctx context.Context, req IngestRawRequest) (IngestRawResult, error) {
@@ -157,6 +179,22 @@ func (s IngestService) IngestRaw(ctx context.Context, req IngestRawRequest) (Ing
 			CreatedAt: s.now(),
 		}); err != nil {
 			return IngestRawResult{}, err
+		}
+	}
+	// Phase 7: enqueue an enrich job after Apply + outbox. CaptureBucket
+	// ingestions (BucketID set) and explicit /no-enrich requests are
+	// skipped (decision 2 + Matrix one-shot). Errors are logged via outbox
+	// but never roll back the successful Raw capture.
+	if s.enrichHook != nil && !req.NoEnrich && strings.TrimSpace(req.BucketID) == "" && strings.TrimSpace(result.TargetPath) != "" {
+		if hookErr := s.enrichHook.Enqueue(result.TargetPath, job.ID); hookErr != nil {
+			_ = s.store.AddOutboxMessage(model.OutboxMessage{
+				ID:        model.NewID("out"),
+				JobID:     job.ID,
+				Kind:      model.OutboxKindError,
+				Body:      fmt.Sprintf("enrich enqueue: %v", hookErr),
+				Status:    model.OutboxStatusPending,
+				CreatedAt: s.now(),
+			})
 		}
 	}
 	return result, nil

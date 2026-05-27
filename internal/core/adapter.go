@@ -26,6 +26,11 @@ type AdapterService struct {
 	// to the existing intent classifier.
 	agentDispatcher AgentDispatcher
 	skillLookup     SkillLookup
+
+	// Phase 7: optional enrich enqueuer. When set, IngestRaw calls from
+	// this adapter (and downstream intent_router bucket paths that are not
+	// bucket-scoped) schedule an enrich job after Apply.
+	enrichHook EnrichEnqueuer
 }
 
 type AdapterServiceOptions struct {
@@ -36,6 +41,10 @@ type AdapterServiceOptions struct {
 	// Phase 6 optional ad-hoc dispatch (Matrix @-mention).
 	AgentDispatcher AgentDispatcher
 	SkillLookup     SkillLookup
+
+	// Phase 7 optional enrich enqueuer. Passed through to every IngestService
+	// the adapter constructs.
+	EnrichHook EnrichEnqueuer
 }
 
 type AdapterRequest struct {
@@ -65,6 +74,7 @@ func NewAdapterServiceWithOptions(store *storage.Store, vaultRoot string, opts A
 		now:              func() time.Time { return time.Now().UTC() },
 		agentDispatcher:  opts.AgentDispatcher,
 		skillLookup:      opts.SkillLookup,
+		enrichHook:       opts.EnrichHook,
 	}
 }
 
@@ -211,12 +221,17 @@ func (s AdapterService) handleAdapterCommand(ctx context.Context, req AdapterReq
 	command, args := splitAdapterCommand(req.Text)
 	switch command {
 	case "":
-		return s.ingestRaw(ctx, req, req.Text)
+		return s.ingestRaw(ctx, req, req.Text, false)
 	case "/raw":
 		if strings.TrimSpace(args) == "" {
 			return AdapterResponse{}, fmt.Errorf("/raw requires text")
 		}
-		return s.ingestRaw(ctx, req, args)
+		return s.ingestRaw(ctx, req, args, false)
+	case "/no-enrich":
+		if strings.TrimSpace(args) == "" {
+			return AdapterResponse{}, fmt.Errorf("/no-enrich requires raw text")
+		}
+		return s.ingestRaw(ctx, req, args, true)
 	case "/organize":
 		return s.handleOrganize(ctx, strings.Fields(args))
 	case "/diff":
@@ -235,7 +250,7 @@ func (s AdapterService) handleAdapterCommand(ctx context.Context, req AdapterReq
 		if strings.HasPrefix(command, "/") {
 			return AdapterResponse{}, fmt.Errorf("unsupported adapter command %q", command)
 		}
-		return s.ingestRaw(ctx, req, req.Text)
+		return s.ingestRaw(ctx, req, req.Text, false)
 	}
 }
 
@@ -313,19 +328,26 @@ func (s AdapterService) MarkOutboxDelivered(id string) error {
 	return s.store.MarkOutboxDelivered(id)
 }
 
-func (s AdapterService) ingestRaw(ctx context.Context, req AdapterRequest, text string) (AdapterResponse, error) {
-	result, err := NewIngestServiceWithConventions(s.store, s.vaultRoot, s.planOpts.Conventions).IngestRaw(ctx, IngestRawRequest{
-		Text:   text,
-		Source: adapterSource(req),
-	})
+func (s AdapterService) ingestRaw(ctx context.Context, req AdapterRequest, text string, noEnrich bool) (AdapterResponse, error) {
+	result, err := NewIngestServiceWithConventions(s.store, s.vaultRoot, s.planOpts.Conventions).
+		WithEnrichHook(s.enrichHook).
+		IngestRaw(ctx, IngestRawRequest{
+			Text:     text,
+			Source:   adapterSource(req),
+			NoEnrich: noEnrich,
+		})
 	if err != nil {
 		return AdapterResponse{}, err
+	}
+	body := fmt.Sprintf("Raw capture saved to %s", result.TargetPath)
+	if noEnrich {
+		body += " (enrichment skipped)"
 	}
 	return AdapterResponse{
 		Status:     model.JobStatusDone,
 		JobID:      result.JobID,
 		PlanID:     result.PlanID,
-		Body:       fmt.Sprintf("Raw capture saved to %s", result.TargetPath),
+		Body:       body,
 		OutboxKind: model.OutboxKindResult,
 	}, nil
 }

@@ -178,6 +178,25 @@ CREATE TABLE IF NOT EXISTS scheduler_overrides (
   enabled_override INTEGER NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS enrich_jobs (
+  raw_path TEXT PRIMARY KEY,
+  parent_job_id TEXT NOT NULL DEFAULT '',
+  state TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  enqueued_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_enrich_jobs_state_enqueued
+ON enrich_jobs(state, enqueued_at);
+
+CREATE TABLE IF NOT EXISTS memory_known_tags (
+  tag TEXT PRIMARY KEY,
+  first_seen_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL
+);
 `)
 	if err != nil {
 		return err

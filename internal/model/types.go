@@ -8,6 +8,27 @@ const (
 	JobTypeOrganizeRaw     = "organize_raw"
 	JobTypeExpandKnowledge = "expand_knowledge"
 	JobTypeSchedulerRun    = "scheduler_run"
+	JobTypeEnrichRaw       = "enrich_raw"
+
+	EnrichJobStatePending          = "pending"
+	EnrichJobStateRunning          = "running"
+	EnrichJobStateDone             = "done"
+	EnrichJobStateSkippedConcEdit  = "skipped_concurrent_edit"
+	EnrichJobStateFailed           = "failed"
+	EnrichJobStateAttemptsExceeded = "attempts_exhausted"
+
+	EnrichAttemptsMax = 5
+
+	EnrichFrontmatterEnrichedAt        = "openwhisker_enriched_at"
+	EnrichFrontmatterEnrichRunID       = "openwhisker_enrich_run_id"
+	EnrichFrontmatterEnrichAttempts    = "openwhisker_enrich_attempts"
+	EnrichFrontmatterRouteSuggestion   = "openwhisker_route_suggestion"
+	EnrichFrontmatterNewTagCandidates  = "openwhisker_new_tag_candidates"
+	EnrichFrontmatterTags              = "tags"
+	EnrichFrontmatterRelated           = "related"
+
+	EnrichRouteSuggestionMinConfidence = 0.7
+	EnrichRelatedAppendMax             = 3
 
 	JobStatusPending          = "pending"
 	JobStatusAwaitingApproval = "awaiting_approval"

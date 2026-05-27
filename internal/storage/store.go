@@ -872,6 +872,199 @@ func (s *Store) ReleaseLocks(planID string) error {
 	return err
 }
 
+// EnrichJob mirrors one row of the enrich_jobs table. The DAO converts
+// timestamps to/from RFC3339Nano like the rest of the store.
+type EnrichJob struct {
+	RawPath     string
+	ParentJobID string
+	State       string
+	Attempts    int
+	LastError   string
+	EnqueuedAt  time.Time
+	UpdatedAt   time.Time
+}
+
+// EnqueueEnrichJob inserts a new pending row, or — if a row already exists —
+// resets it to pending only when the previous state was a terminal failure
+// state that warrants another attempt. Rows in done / running / pending stay
+// untouched so the scan path can call this idempotently.
+func (s *Store) EnqueueEnrichJob(rawPath, parentJobID string, now time.Time) error {
+	if strings.TrimSpace(rawPath) == "" {
+		return errors.New("enrich job raw_path is required")
+	}
+	ts := formatTime(now.UTC())
+	_, err := s.db.Exec(`
+INSERT INTO enrich_jobs (raw_path, parent_job_id, state, attempts, last_error, enqueued_at, updated_at)
+VALUES (?, ?, ?, 0, '', ?, ?)
+ON CONFLICT(raw_path) DO UPDATE SET
+  state = CASE
+    WHEN enrich_jobs.state IN ('failed', 'skipped_concurrent_edit') AND enrich_jobs.attempts < ?
+      THEN 'pending'
+    ELSE enrich_jobs.state
+  END,
+  parent_job_id = CASE
+    WHEN excluded.parent_job_id <> '' THEN excluded.parent_job_id
+    ELSE enrich_jobs.parent_job_id
+  END,
+  enqueued_at = CASE
+    WHEN enrich_jobs.state IN ('failed', 'skipped_concurrent_edit') AND enrich_jobs.attempts < ?
+      THEN excluded.enqueued_at
+    ELSE enrich_jobs.enqueued_at
+  END,
+  updated_at = excluded.updated_at
+`,
+		rawPath, parentJobID, model.EnrichJobStatePending, ts, ts,
+		model.EnrichAttemptsMax, model.EnrichAttemptsMax)
+	return err
+}
+
+// ResetEnrichJob forces a row back to pending and clears attempts. Used by
+// the `openwhisker enrich <rawJobID>` manual retry path — bypasses the
+// attempts ceiling and mtime quiet window enforced by the scan path.
+func (s *Store) ResetEnrichJob(rawPath string, now time.Time) error {
+	ts := formatTime(now.UTC())
+	res, err := s.db.Exec(`
+UPDATE enrich_jobs
+SET state = ?, attempts = 0, last_error = '', enqueued_at = ?, updated_at = ?
+WHERE raw_path = ?`,
+		model.EnrichJobStatePending, ts, ts, rawPath)
+	if err != nil {
+		return err
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		// Row absent — insert as a fresh pending job. The manual retry path
+		// should work even if scan never saw the file (eg. user wants to
+		// re-enrich a long-resolved Raw).
+		_, err = s.db.Exec(`
+INSERT INTO enrich_jobs (raw_path, parent_job_id, state, attempts, last_error, enqueued_at, updated_at)
+VALUES (?, '', ?, 0, '', ?, ?)`,
+			rawPath, model.EnrichJobStatePending, ts, ts)
+	}
+	return err
+}
+
+// ClaimNextEnrichJob atomically picks the oldest pending (or
+// skipped_concurrent_edit) row with attempts < max, flips it to running, and
+// returns it. Returns sql.ErrNoRows when the queue is empty.
+func (s *Store) ClaimNextEnrichJob(now time.Time) (EnrichJob, error) {
+	ts := formatTime(now.UTC())
+	tx, err := s.db.Begin()
+	if err != nil {
+		return EnrichJob{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	row := tx.QueryRow(`
+SELECT raw_path, parent_job_id, state, attempts, last_error, enqueued_at, updated_at
+FROM enrich_jobs
+WHERE state IN (?, ?) AND attempts < ?
+ORDER BY enqueued_at ASC
+LIMIT 1`,
+		model.EnrichJobStatePending, model.EnrichJobStateSkippedConcEdit, model.EnrichAttemptsMax)
+	var job EnrichJob
+	var enqueuedAt, updatedAt string
+	if err := row.Scan(&job.RawPath, &job.ParentJobID, &job.State, &job.Attempts,
+		&job.LastError, &enqueuedAt, &updatedAt); err != nil {
+		return EnrichJob{}, err
+	}
+	job.EnqueuedAt = parseTime(enqueuedAt)
+	job.UpdatedAt = parseTime(updatedAt)
+	if _, err := tx.Exec(`
+UPDATE enrich_jobs SET state = ?, updated_at = ? WHERE raw_path = ?`,
+		model.EnrichJobStateRunning, ts, job.RawPath); err != nil {
+		return EnrichJob{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return EnrichJob{}, err
+	}
+	job.State = model.EnrichJobStateRunning
+	job.UpdatedAt = now.UTC()
+	return job, nil
+}
+
+// FinishEnrichJob writes the terminal (or retriable) state for a row.
+// state=done leaves attempts as-is; other states bump attempts by 1 and may
+// flip the row to attempts_exhausted when the ceiling is hit.
+func (s *Store) FinishEnrichJob(rawPath, state, errText string, now time.Time) error {
+	ts := formatTime(now.UTC())
+	if state == model.EnrichJobStateDone {
+		_, err := s.db.Exec(`
+UPDATE enrich_jobs SET state = ?, last_error = '', updated_at = ? WHERE raw_path = ?`,
+			state, ts, rawPath)
+		return err
+	}
+	// Bump attempts and, if at ceiling, transition to attempts_exhausted.
+	_, err := s.db.Exec(`
+UPDATE enrich_jobs
+SET attempts = attempts + 1,
+    state = CASE WHEN attempts + 1 >= ? THEN ? ELSE ? END,
+    last_error = ?,
+    updated_at = ?
+WHERE raw_path = ?`,
+		model.EnrichAttemptsMax, model.EnrichJobStateAttemptsExceeded, state,
+		errText, ts, rawPath)
+	return err
+}
+
+// GetEnrichJob loads a single row by raw_path. Returns sql.ErrNoRows when
+// the row is absent.
+func (s *Store) GetEnrichJob(rawPath string) (EnrichJob, error) {
+	row := s.db.QueryRow(`
+SELECT raw_path, parent_job_id, state, attempts, last_error, enqueued_at, updated_at
+FROM enrich_jobs WHERE raw_path = ?`, rawPath)
+	var job EnrichJob
+	var enqueuedAt, updatedAt string
+	if err := row.Scan(&job.RawPath, &job.ParentJobID, &job.State, &job.Attempts,
+		&job.LastError, &enqueuedAt, &updatedAt); err != nil {
+		return EnrichJob{}, err
+	}
+	job.EnqueuedAt = parseTime(enqueuedAt)
+	job.UpdatedAt = parseTime(updatedAt)
+	return job, nil
+}
+
+// UpsertKnownTag records that tag was seen at now. first_seen_at is set on
+// the first observation and never moves; last_seen_at always advances.
+func (s *Store) UpsertKnownTag(tag string, now time.Time) error {
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		return nil
+	}
+	ts := formatTime(now.UTC())
+	_, err := s.db.Exec(`
+INSERT INTO memory_known_tags (tag, first_seen_at, last_seen_at)
+VALUES (?, ?, ?)
+ON CONFLICT(tag) DO UPDATE SET last_seen_at = excluded.last_seen_at`,
+		tag, ts, ts)
+	return err
+}
+
+// KnownTags returns all tags whose name starts with prefix, sorted asc.
+// Empty prefix returns every tag in the table.
+func (s *Store) KnownTags(prefix string) ([]string, error) {
+	var rows *sql.Rows
+	var err error
+	if prefix == "" {
+		rows, err = s.db.Query(`SELECT tag FROM memory_known_tags ORDER BY tag ASC`)
+	} else {
+		rows, err = s.db.Query(`SELECT tag FROM memory_known_tags WHERE tag LIKE ? ORDER BY tag ASC`,
+			prefix+"%")
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 func formatTime(t time.Time) string {
 	if t.IsZero() {
 		return ""

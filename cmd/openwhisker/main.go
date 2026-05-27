@@ -20,12 +20,14 @@ import (
 	"github.com/scarletmu/openwhisker/internal/agent"
 	"github.com/scarletmu/openwhisker/internal/agentdispatch"
 	"github.com/scarletmu/openwhisker/internal/core"
+	"github.com/scarletmu/openwhisker/internal/enrich"
 	"github.com/scarletmu/openwhisker/internal/executor"
 	"github.com/scarletmu/openwhisker/internal/model"
 	"github.com/scarletmu/openwhisker/internal/policy"
 	"github.com/scarletmu/openwhisker/internal/profile"
 	schedulerpkg "github.com/scarletmu/openwhisker/internal/scheduler"
 	"github.com/scarletmu/openwhisker/internal/storage"
+	"github.com/scarletmu/openwhisker/internal/tagvocab"
 	"github.com/scarletmu/openwhisker/internal/vault/linkindex"
 )
 
@@ -108,6 +110,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runSkillLint(args[2:], stdout, stderr)
 	case args[0] == "agent" && args[1] == "runs":
 		return runAgentRuns(args[2:], stdout, stderr)
+	case args[0] == "enrich":
+		return runEnrich(args[1:], stdout, stderr)
 	default:
 		printUsage(stderr)
 		return flag.ErrHelp
@@ -495,6 +499,93 @@ func runJobShow(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	return printJSON(stdout, job)
+}
+
+// runEnrich is the manual escape hatch for re-running Phase 7 inbox enrich
+// on a single raw job. Resets the enrich_jobs row to pending+attempts=0
+// (bypassing the 5-attempt ceiling and mtime quiet window) and runs one
+// pass synchronously so the user sees the outcome immediately.
+//
+// Racy with a running daemon worker on the same path — Claim() is
+// transactional so only one of them wins, the other gets "queue empty".
+func runEnrich(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("enrich", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dbPath := fs.String("db", "data/openwhisker.db", "SQLite database path")
+	vaultRoot := fs.String("vault", "testdata/vault", "target vault root")
+	llmModel := fs.String("llm-model", llmModelDefault(), "OpenAI-compatible model for the enrich agent")
+	rawPathFlag := fs.String("path", "", "raw note path (vault-relative); if set, takes precedence over <rawJobID>")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	rawPath := strings.TrimSpace(*rawPathFlag)
+	if rawPath == "" {
+		if fs.NArg() != 1 {
+			return fmt.Errorf("usage: openwhisker enrich [--db data/openwhisker.db] [--vault testdata/vault] [--llm-model name] (<rawJobID> | --path Raw/Inbox/...)")
+		}
+		jobID := fs.Arg(0)
+		store, err := storage.Open(*dbPath)
+		if err != nil {
+			return err
+		}
+		plan, err := store.GetPlanByJobID(jobID)
+		store.Close()
+		if err != nil {
+			return fmt.Errorf("lookup raw plan for job %s: %w", jobID, err)
+		}
+		if len(plan.TargetPaths) == 0 {
+			return fmt.Errorf("raw job %s has no target_path on its plan", jobID)
+		}
+		rawPath = plan.TargetPaths[0]
+	}
+	runner := buildAgentRunner(*vaultRoot, *llmModel)
+	if runner == nil {
+		return fmt.Errorf("LLM chat client unavailable (set OPENWHISKER_LLM_API_KEY etc.); manual enrich requires an agent")
+	}
+	store, err := storage.Open(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	queue := enrich.NewQueue(store)
+	if err := queue.Reset(rawPath); err != nil {
+		return fmt.Errorf("reset enrich job %s: %w", rawPath, err)
+	}
+	vocab := tagvocab.NewService(store, *vaultRoot, nil, nil)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := vocab.RescanAll(ctx); err != nil {
+		return fmt.Errorf("tagvocab rescan: %w", err)
+	}
+	svc, err := enrich.NewService(enrich.Config{
+		Store:     store,
+		Queue:     queue,
+		VaultRoot: *vaultRoot,
+		Runner:    runner,
+		Vocab:     vocab,
+		Executor:  executor.NewDirectFS(*vaultRoot, store),
+	})
+	if err != nil {
+		return err
+	}
+	job, claimed, err := queue.Claim()
+	if err != nil {
+		return fmt.Errorf("claim enrich job: %w", err)
+	}
+	if !claimed {
+		return fmt.Errorf("enrich job for %s was not claimable (likely picked up by a running daemon)", rawPath)
+	}
+	outcome := svc.RunOne(ctx, job)
+	out := map[string]any{
+		"raw_path": rawPath,
+		"state":    outcome.State,
+		"applied":  outcome.Applied,
+		"run_id":   outcome.RunID,
+	}
+	if outcome.Err != nil {
+		out["error"] = outcome.Err.Error()
+	}
+	return printJSON(stdout, out)
 }
 
 func runSchedulerTick(args []string, stdout, stderr io.Writer) error {
@@ -965,7 +1056,8 @@ func runDaemon(args []string, stdout, stderr io.Writer) error {
 	// daemon's poll loops are not blocked; vault_outlinks / vault_backlinks
 	// return link_index_not_ready until the build settles.
 	var daemonDispatcher core.AgentDispatcher
-	if runner := buildAgentRunner(*vaultRoot, *llmModel); runner != nil {
+	agentRunner := buildAgentRunner(*vaultRoot, *llmModel)
+	if agentRunner != nil {
 		idx := linkindex.New(*vaultRoot, vaultProfile.Scheduler.ReadOnlyVaultRoots)
 		idx.BuildAsync(context.Background(), func(stats linkindex.Stats, elapsed time.Duration, err error) {
 			if err != nil {
@@ -977,7 +1069,33 @@ func runDaemon(args []string, stdout, stderr io.Writer) error {
 				fmt.Fprintf(os.Stderr, "link_index watcher error: %v\n", watchErr)
 			}
 		})
-		daemonDispatcher = agentdispatch.Dispatcher{Runner: runner, LinkIndex: idx, Store: store}
+		daemonDispatcher = agentdispatch.Dispatcher{Runner: agentRunner, LinkIndex: idx, Store: store}
+	}
+	// Phase 7: enrich pipeline. Vocab rescans the vault in the background;
+	// HasTag / KnownTags block until the first scan completes. Enrich service
+	// only constructs when an AgentRunner is available — without LLM access
+	// the worker would just drain the queue into attempts_exhausted.
+	enrichQueue := enrich.NewQueue(store)
+	var enrichService *enrich.Service
+	if agentRunner != nil {
+		vocab := tagvocab.NewService(store, *vaultRoot, nil, nil)
+		go func() {
+			if err := vocab.RescanAll(context.Background()); err != nil {
+				fmt.Fprintf(os.Stderr, "tagvocab initial rescan error: %v\n", err)
+			}
+		}()
+		svc, err := enrich.NewService(enrich.Config{
+			Store:     store,
+			Queue:     enrichQueue,
+			VaultRoot: *vaultRoot,
+			Runner:    agentRunner,
+			Vocab:     vocab,
+			Executor:  executor.NewDirectFS(*vaultRoot, store),
+		})
+		if err != nil {
+			return fmt.Errorf("enrich service: %w", err)
+		}
+		enrichService = svc
 	}
 	skillLookup := newRegistrySkillLookup(*vaultRoot, vaultProfile)
 	schedulerService := core.NewSchedulerServiceWithOptions(store, *vaultRoot, core.SchedulerServiceOptions{
@@ -1013,6 +1131,7 @@ func runDaemon(args []string, stdout, stderr io.Writer) error {
 			},
 			AgentDispatcher: daemonDispatcher,
 			SkillLookup:     skillLookup,
+			EnrichHook:      enrichQueue,
 		})
 		matrixClient, resolvedUserID, err := matrixClientForAuth(context.Background(), matrixAuthOptions{
 			Homeserver:  *homeserver,
@@ -1055,7 +1174,7 @@ func runDaemon(args []string, stdout, stderr io.Writer) error {
 		MatrixEnabled:         matrixAdapter != nil,
 		State:                 "starting",
 	})
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 4)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -1082,7 +1201,30 @@ func runDaemon(args []string, stdout, stderr io.Writer) error {
 			}
 		}()
 	}
-	logMatrixDaemon(stderr, "openwhisker daemon started scheduler_interval=%s matrix=%t", schedulerTickInterval.String(), matrixAdapter != nil)
+	if enrichService != nil {
+		worker := enrich.NewWorker(enrichService, enrich.WithLogger(stderr))
+		scanner := enrich.NewScanner(enrichQueue, *vaultRoot, conventions).WithLogger(stderr)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if err := worker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				select {
+				case errCh <- err:
+				default:
+				}
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if err := scanner.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				select {
+				case errCh <- err:
+				default:
+				}
+			}
+		}()
+	}
+	logMatrixDaemon(stderr, "openwhisker daemon started scheduler_interval=%s matrix=%t enrich=%t", schedulerTickInterval.String(), matrixAdapter != nil, enrichService != nil)
 	select {
 	case err := <-errCh:
 		stop()
