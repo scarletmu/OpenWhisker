@@ -13,12 +13,12 @@ import (
 
 	"github.com/scarletmu/openwhisker/internal/agent"
 	"github.com/scarletmu/openwhisker/internal/executor"
+	"github.com/scarletmu/openwhisker/internal/memory"
 	"github.com/scarletmu/openwhisker/internal/model"
 	"github.com/scarletmu/openwhisker/internal/policy"
 	"github.com/scarletmu/openwhisker/internal/profile"
 	"github.com/scarletmu/openwhisker/internal/scheduler"
 	"github.com/scarletmu/openwhisker/internal/storage"
-	"github.com/scarletmu/openwhisker/internal/tagvocab"
 )
 
 // AgentRunner is the subset of agent.AgentRunner that enrich depends on.
@@ -35,7 +35,7 @@ type Config struct {
 	Queue     *Queue
 	VaultRoot string
 	Runner    AgentRunner
-	Vocab     *tagvocab.Service
+	Vocab     *memory.Service
 	Executor  executor.DirectFS
 	// Now is the clock for trace timestamps and frontmatter stamps. Defaults
 	// to time.Now().UTC() when nil.
@@ -354,10 +354,10 @@ func (s *Service) readVaultFile(relPath string) (string, error) {
 	return string(data), nil
 }
 
-// vocabAdapter satisfies policy.TagVocab without exporting the tagvocab
+// vocabAdapter satisfies policy.TagVocab without exporting the memory
 // package's full Service surface to the policy layer. Avoids drawing
-// internal/policy into a dependency on tagvocab.
-type vocabAdapter struct{ inner *tagvocab.Service }
+// internal/policy into a dependency on internal/memory.
+type vocabAdapter struct{ inner *memory.Service }
 
 func (v vocabAdapter) HasTag(tag string) bool { return v.inner.HasTag(tag) }
 

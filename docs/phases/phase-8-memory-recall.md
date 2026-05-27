@@ -7,17 +7,17 @@
 Phase 8 不引入新的 vault 写入面、不引入新的存储依赖、不引入向量索引。它把以下两件事捆成一个独立模块 `internal/memory/`：
 
 - **已知 tag 词表服务**：派生自 vault frontmatter 的 `topic/*` / `skill/*` 集合，daemon 启动时全量 rescan，executor Apply 成功时增量更新。Phase 7 enrich 用它做 tag 候选校验；未来其它写入侧也共用同一份词表。
-- **Recall 核心 API**：`Recall(ctx, RecallRequest) -> RecallResult` 的纯 Go 入口，回答"按 tag 或 query 找相关 Raw / Knowledge 笔记"。读 frontmatter 索引 + sqlite cache + 现有 `vault_text_search`，不直接调 LLM。
-- **vault 链接图索引**：派生自 vault frontmatter `related` 字段（含 enrich 自己写回的那部分），用于一跳扩散召回——tag 命中候选的 `related` 邻居自然带回，链接图不被 tag 框架废掉。
+- **Recall 核心 API**：`Recall(ctx, RecallRequest) -> RecallResult` 的纯 Go 入口，回答"按 tag 或 query 找相关 Raw / Knowledge 笔记"。读 frontmatter 索引 + sqlite cache + 现有 `vault_text_search` + 现有 `internal/vault/linkindex` 的内存邻接图，不直接调 LLM。
+- **链接图复用**：vault frontmatter `related` 邻接图沿用 Phase 6 已落地的 `internal/vault/linkindex`（内存图 + fsnotify 实时同步），Phase 8 通过 `LinkGraph` 接口注入消费，不另建 sqlite 镜像。用于一跳扩散召回——tag 命中候选的 `related` 邻居自然带回，链接图不被 tag 框架废掉。
 
 每个消费者按自己的需要包一层薄壳——LLM agent 包成 Phase 6 工具集中的 `recall_memory` 第七件工具；enrich job、未来的 intent router / scheduler skill 直接 Go 调用，无需各自再造一套检索。
 
 核心立场：
 
 - **memory 不绑死某个 agent**：核心 API 是 Go 函数，调用方决定上下文与展示形态；
-- **不引入新真值源**：索引完全派生自 vault frontmatter（enrich 写入的 vault 原生 `tags` / `related` 字段 + 词表派生）+ vault 文本，frontmatter 是源，sqlite 索引只是 cache；
+- **不引入新真值源**：索引完全派生自 vault frontmatter（enrich 写入的 vault 原生 `tags` / `related` 字段 + 词表派生）+ vault 文本，frontmatter 是源，sqlite 索引 / linkindex 内存图都是 cache；链接图的真值源与 Phase 6 同源，避免双写；
 - **不黑盒**：每条召回结果带 `source` 标签（`tag_match` / `text_match` / `related_link`），可追溯；
-- **简单优先**：v1 索引就是 tag 反向表 + 单跳 related 邻接表，不引入多跳图遍历、不引入向量、不引入个性化排序。
+- **简单优先**：v1 索引就是 tag 反向表 + 复用 linkindex 的单跳 related 邻接读，不引入多跳图遍历、不引入向量、不引入个性化排序。
 
 ## 背景
 
@@ -41,13 +41,12 @@ Phase 8 引入的能力：
 
 - 新模块 `internal/memory/`，对外两个主入口：
   - `memory.KnownTags(ctx, prefix) -> []string`：已知 tag 词表查询，支持前缀过滤（`topic/` / `skill/`）；
-  - `memory.Recall(ctx, RecallRequest) -> RecallResult`：tag/query 召回，自带一跳 related 邻居扩散。
+  - `memory.Recall(ctx, RecallRequest) -> RecallResult`：tag/query 召回，自带一跳 related 邻居扩散（邻居数据来自注入的 `LinkGraph` 接口，daemon 用 `internal/vault/linkindex` 实现）。
 - 新 sqlite 表：
   - `memory_tag_index`（`tag, note_path, updated_at`）：tag 反向索引 cache；
-  - `memory_link_index`（`src_path, dst_path, updated_at`）：vault `related` wikilink 邻接表 cache，双向都可查；
-  - `memory_known_tags`（`tag, first_seen_at, last_seen_at`）：词表 cache；
+  - `memory_known_tags`（`tag, first_seen_at, last_seen_at`）：词表 cache（沿用 Phase 7 落地的 `memory_known_tags` 表，迁入 memory 模块管理，schema 不变）；
   - `memory_recalls`（`caller_kind, query/tags 概要, result_count, latency_ms, called_at`）：轻量调用 trace；
-- 索引维护：daemon 启动时全量 rescan，executor Apply 成功且 plan 触及 frontmatter `tags` 或 `related` 时增量更新；无独立守护 goroutine、无文件系统 watcher；
+- 索引维护：daemon 启动时对 tag 反向表全量 rescan，executor Apply 成功且 plan 触及 frontmatter `tags` 时增量更新；链接邻接图沿用 `linkindex` 的 fsnotify 增量，不在 memory 模块内重复 watcher；
 - Phase 6 工具集追加第 7 件工具 `recall_memory`，参数面向 agent 友好（query / tags / limit）；
 - Phase 7 enrich 的"词表查询"段切到 `memory.KnownTags()` 上；enrich 落地若早于 Phase 8，则先在 enrich 内部做最小实现，Phase 8 落地时迁移；
 - 召回结果每条携带 `source` 标签：`tag_match` / `text_match` / `related_link`；
@@ -106,11 +105,12 @@ Caller (agent tool / enrich job / future router)
         │     → source = "tag_match"
         ├── Pass 2: 若 Query 非空 → vault_text_search(Query) 兜底
         │     → source = "text_match"
-        ├── Pass 3: 若 ExpandRelated（默认 true）→ 对 Pass 1/2 命中集做一跳 related 扩散
-        │     SELECT dst_path FROM memory_link_index WHERE src_path IN <seeds>
-        │     UNION
-        │     SELECT src_path FROM memory_link_index WHERE dst_path IN <seeds>
+        ├── Pass 3: 若 ExpandRelated（默认 true）且 linkindex.Ready() → 对 Pass 1/2 命中集做一跳 related 扩散
+        │     for seed in seeds:
+        │       neighbors += LinkGraph.OutlinksRelated(seed)   // frontmatter related 出边
+        │       neighbors += LinkGraph.BacklinksRelated(seed)  // frontmatter related 入边
         │     → source = "related_link"（仅当该 path 未被 Pass 1/2 命中时使用此 source）
+        │     linkindex 未就绪时跳过 Pass 3，结果标 degraded=true（保持失败语义一致）
         ├── 合并 + 去重 + 简单加权打分
         ├── ScopeDirs / Since 过滤（默认排除 Archive/）
         ├── Limit 截断（由调用方传，核心 API 不内置 magic number）
@@ -132,20 +132,20 @@ Caller (enrich job, agent tool 也可用)
 ```text
 executor.Apply(plan)  // 成功
   └── 若 plan 含 rewrite_note 且 diff 触及 frontmatter `tags`:
-  │     ├── memoryIndex.UpdateTagIndex(note_path, new_tags)
-  │     │     ├── DELETE FROM memory_tag_index WHERE note_path = ?
-  │     │     └── INSERT (tag, note_path) per new_tags
-  │     └── memoryIndex.UpdateKnownTags(new_tags)
-  │           └── UPSERT memory_known_tags (tag, last_seen_at) per topic/* | skill/*
-  └── 若 plan 含 rewrite_note 且 diff 触及 frontmatter `related`:
-        └── memoryIndex.UpdateLinkIndex(note_path, new_related_paths)
-              ├── DELETE FROM memory_link_index WHERE src_path = ?
-              └── INSERT (src_path, dst_path) per resolved wikilink → vault 相对路径
+        ├── memoryIndex.UpdateTagIndex(note_path, new_tags)
+        │     ├── DELETE FROM memory_tag_index WHERE note_path = ?
+        │     └── INSERT (tag, note_path) per new_tags
+        └── memoryIndex.UpdateKnownTags(new_tags)
+              └── UPSERT memory_known_tags (tag, last_seen_at) per topic/* | skill/*
+
+// frontmatter `related` 的变更不走 memory 模块——linkindex 已经在 fsnotify
+// 路径上自己感知 vault 文件变化（包括 executor 写出的 rewrite_note 结果），
+// memory.Recall 在 Pass 3 现读 linkindex.Ready 后的内存图即可。
 ```
 
-启动时：daemon boot → `memoryIndex.RescanAll(vaultRoot)`，串行扫一次 `Knowledge/` / `Interview/` / `Life/` 下所有 `.md` 的 frontmatter，幂等重建 `memory_tag_index` 与 `memory_link_index`（全量覆盖）以及 `memory_known_tags`（仅追加，不删——保持只增不减语义）。无独立守护 goroutine，无文件系统 watcher。
+启动时：daemon boot → `memoryIndex.RescanTagIndex(vaultRoot)`，串行扫一次 `Knowledge/` / `Interview/` / `Life/` 下所有 `.md` 的 frontmatter `tags`，幂等重建 `memory_tag_index`（全量覆盖）以及 `memory_known_tags`（仅追加，不删——保持只增不减语义）。链接图的全量扫由 `linkindex.BuildAsync` 在 Phase 6 既有 daemon 启动路径完成，Phase 8 不重复。memory 模块自身不引入独立守护 goroutine 与文件系统 watcher。
 
-链接解析约定：`related` 字段的 `[[...]]` wikilink 走 Obsidian 默认解析规则（短名或带子路径），落到 `memory_link_index` 时统一规一化为 vault 相对路径；解析失败的 wikilink 计 warning 日志，不入表。
+链接解析约定：沿用 `internal/vault/linkindex` 的 `resolveTarget`，已覆盖短名 / 带子路径 / 含 alias `|` 三种形态。Phase 8 不重复实现 wikilink 解析。
 
 ## 设计
 
@@ -184,7 +184,7 @@ type RecallResult struct {
 
 - base：来自 `memory_tag_index` 命中的条目，base = 命中 tag 数 / `len(Tags)`；
 - base：来自 `vault_text_search` 的条目，base = 文本匹配分（沿用现有实现的 score）；
-- base：来自 `memory_link_index` 一跳扩散的条目，base = seed 的最高分 × 0.7（一跳衰减）；
+- base：来自 `LinkGraph` 一跳扩散的条目，base = seed 的最高分 × 0.7（一跳衰减）；
 - source 权重：`tag_match` × 1.0，`text_match` × 0.6，`related_link` × 0.4；
 - 同路径多 source 命中：取最高分 source 作主排序，并在 `MatchedOn` 里聚合所有命中来源；`related_link` 不覆盖已有的 `tag_match` / `text_match` 主标签，仅作为补充来源。
 
@@ -210,13 +210,15 @@ v1 不引入时间衰减、不引入个性化、不引入学习排序。规则�
 
 ### 索引一致性
 
-- vault frontmatter 是源；`memory_tag_index` / `memory_link_index` / `memory_known_tags` 都是派生 cache；
-- 用户在 Obsidian 里手改 frontmatter 不会立即触达索引，**直到下一次 daemon 重启的全量 rescan 或手动 `openwhisker memory reindex`**——v1 不引入文件 watcher / Obsidian Sync 钩子，避免引入异步 race；
+- vault frontmatter 是源；`memory_tag_index` / `memory_known_tags` 是 memory 自有派生 cache；`related` 邻接图复用 `internal/vault/linkindex` 的内存图作 cache；
+- 用户在 Obsidian 里手改 frontmatter `tags`：不会立即触达 memory 自有 cache，**直到下一次 daemon 重启的全量 rescan 或手动 `openwhisker memory reindex`**——memory 模块自身 v1 不引入文件 watcher；
+- 用户在 Obsidian 里手改 frontmatter `related`：linkindex 的 fsnotify 会秒级感知，Pass 3 自然跟随；这部分新鲜度高于 tag 路径，是 linkindex 复用带来的副效益，不必特意保留对称的"等重启"语义；
 - `memory_known_tags` 仅追加，不主动剔除"曾经出现但现在不再出现"的 tag。剔除语义留给手动 reindex（reindex 会清空表后从 vault 重新构建，自然达成剔除）。
 
 ### 失败语义
 
-- 索引未就绪（启动 rescan 进行中）：`Recall` 返回部分结果（仅 `text_match`，标 `degraded=true`），`KnownTags` 阻塞等待 rescan 完成（enrich 必须拿到完整词表，否则可能误判 needs-review）；
+- memory 自有索引未就绪（启动 rescan 进行中）：`Recall` 返回部分结果（仅 `text_match`，标 `degraded=true`），`KnownTags` 阻塞等待 rescan 完成（enrich 必须拿到完整词表，否则可能误判 needs-review）；
+- linkindex 未就绪（`linkindex.Ready() == false`）：跳过 Pass 3，其余结果照常返回，标 `degraded=true`；
 - sqlite 故障：两个入口都返回错误，不 fallback；caller 自行决定是否兜底；
 - 文本检索失败但 tag 索引成功：返回 tag 索引结果，错误降级为 warning 日志，不抛给 caller。
 
@@ -224,13 +226,13 @@ v1 不引入时间衰减、不引入个性化、不引入学习排序。规则�
 
 包含：
 
-- `internal/memory/`（新建）：`KnownTags`、`Recall`、`RecallRequest`、`RecallResult`、`memoryIndex.Rescan/UpdateTagIndex/UpdateLinkIndex/UpdateKnownTags` 等公开 API；
-- `internal/memory/sqlite_store.go`（新建）：四张表的 schema 与 DAO；
-- `internal/memory/wikilink_resolver.go`（新建）：把 `related` 字段的 `[[...]]` 规一化为 vault 相对路径，供 link 索引和 Recall 共用；
-- `internal/executor/`：Apply 成功后对触及 frontmatter `tags` 或 `related` 的 plan 触发索引 + 词表增量更新（hook 而非 fork）；
+- `internal/memory/`（新建）：`KnownTags`、`Recall`、`RecallRequest`、`RecallResult`、`LinkGraph` 接口、`Service.RescanTagIndex/UpdateTagIndex/UpdateKnownTags` 等公开 API；
+- `internal/memory/sqlite_store.go`（新建）：`memory_tag_index` / `memory_recalls` 两张新表的 schema 与 DAO（`memory_known_tags` 表来自 Phase 7 storage 层，沿用并通过 `internal/storage` 既有 DAO 读写）；
+- `internal/memory/linkadapter.go`（新建）：把 `internal/vault/linkindex.Index` 适配成 `LinkGraph`，过滤 `SourceKindFrontmatterRelated` 出边/入边；
+- `internal/executor/`：Apply 成功后对触及 frontmatter `tags` 的 plan 触发 tag 反向索引 + 词表增量更新（hook 而非 fork）；
 - `internal/agent/tools/recall_memory.go`（新建）：Phase 6 工具集 +1；
-- `internal/core/enrich.go`（Phase 7 落地后修改）：词表查询切到 `memory.KnownTags()`；可选地把 enrich 内部检索段也接 `memory.Recall()`，但不强制；
-- `cmd/openwhisker/main.go`：`openwhisker memory reindex` 子命令；
+- `internal/enrich/`（Phase 7 落地后修改）：词表查询切到 `memory.KnownTags()`，`internal/tagvocab/` 包整体迁入 `internal/memory/`；
+- `cmd/openwhisker/main.go`：`openwhisker memory reindex` 子命令；daemon 启动注入 linkindex 作为 `LinkGraph`；
 - `docs/phases/phase-8-memory-recall.md`（本文）；
 - `CHANGELOG.md`、`docs/progress.md`：落地时联动更新。
 
@@ -238,9 +240,10 @@ v1 不引入时间衰减、不引入个性化、不引入学习排序。规则�
 
 - 修改 Phase 7 enrich 的 frontmatter 写入字段、policy guard；
 - 修改 Phase 6 其它六件工具的语义；
+- 修改或迁移 `internal/vault/linkindex` 自身（仅通过接口消费）；
 - 任何新的写工具或写路径；
 - 向量 / embedding 集成；
-- Obsidian Sync / 文件 watcher；
+- memory 模块自有文件 watcher / Obsidian Sync 钩子；
 - intent router / scheduler skill 的实际接入（接入面留给后续 Phase；Phase 8 只保证 API 形状能承载）。
 
 ## 验收
@@ -248,11 +251,11 @@ v1 不引入时间衰减、不引入个性化、不引入学习排序。规则�
 | 维度 | 验收要点 | 方式 |
 |---|---|---|
 | 单元测试 | `Recall` 在 query-only / tags-only / 两者皆有 / 两者皆空 四种入参下的行为；`TagMode = any/all` 切换正确；评分合并去重正确；`ScopeDirs` 排除 `Archive/` 默认生效 | `go test ./internal/memory/...` |
-| 单元测试 | `Recall` 一跳 related 扩散：seed 命中 → 邻居以 `related_link` 出现；`ExpandRelated=false` 时不扩散；双向（src→dst 与 dst→src）都被命中 | `go test ./internal/memory/...` |
-| 单元测试 | wikilink 解析：短名 / 带子路径 / 含 alias `|` 三种形态都能规一化到 vault 相对路径；解析失败计 warning 不入表 | `go test ./internal/memory/...` |
+| 单元测试 | `Recall` 一跳 related 扩散：seed 命中 → 邻居以 `related_link` 出现；`ExpandRelated=false` 时不扩散；双向（src→dst 与 dst→src）都被命中；用 fake `LinkGraph` 注入避免依赖真实 linkindex | `go test ./internal/memory/...` |
+| 单元测试 | `linkadapter` 只透出 `SourceKindFrontmatterRelated` 边：body 内的 `[[...]]` 不算作 related diffusion 的 seed-neighbor | `go test ./internal/memory/...` |
 | 单元测试 | `KnownTags(prefix)` 在 fixture vault 上返回正确集合；`topic/*` 与 `skill/*` 分别命中 | `go test ./internal/memory/...` |
-| 单元测试 | 索引增量：执行一个改动 frontmatter `tags` 的 rewrite_note plan 后，`memory_tag_index` 与 `memory_known_tags` 变化符合预期；改动 `related` 的 plan 同样触发 `memory_link_index` 增量；不触及任一字段的 rewrite 不更新索引 | `go test ./internal/executor/...` |
-| 集成测试 | daemon 启动→rescan 完成→`Recall` 返回完整结果；rescan 进行中调用 `Recall` 返回 `degraded=true`，`KnownTags` 阻塞等待 | `go test ./internal/memory/...` |
+| 单元测试 | 索引增量：执行一个改动 frontmatter `tags` 的 rewrite_note plan 后，`memory_tag_index` 与 `memory_known_tags` 变化符合预期；不触及 `tags` 字段的 rewrite 不更新 tag 反向索引 | `go test ./internal/executor/...` |
+| 集成测试 | daemon 启动→tag 反向索引 rescan 完成→`Recall` 返回完整结果；rescan 进行中调用 `Recall` 返回 `degraded=true`，`KnownTags` 阻塞等待；linkindex 未就绪时 Pass 3 跳过且 `degraded=true` | `go test ./internal/memory/...` |
 | 工具测试 | agent 通过 `recall_memory` 工具召回，返回 markdown 列表能被 agent 正确解析并在下一步 `read_vault_note` 中使用 | Phase 6 工具集集成测试扩展 |
 | Demo | 真实 vault：先跑 Phase 7 enrich 至少 30 条 Raw 沉淀 tag，再用 `recall_memory` 在 ask 路径 / `openwhisker memory reindex` 后人工检验召回质量 | 类似 Phase 6/7 demo 形式 |
 | 回归 | Phase 7 enrich 切到 `memory.KnownTags()` 后，原有验收（tag 命中、needs-review、new_tag_candidate 三类样本）通过率不下降 | 复跑 Phase 7 demo |
@@ -268,10 +271,11 @@ v1 不引入时间衰减、不引入个性化、不引入学习排序。规则�
 5. **`TagMode` 默认值 = `any`**：理由：enrich 写入端限制 1–4 个 tag，召回端默认严格交集（`all`）会让多 tag 查询返回空；`any` 召回多噪音高，但有 `Score` 排序兜底，比"空结果"用户体验好。`all` 留给 agent 显式指定。
 6. **`memory_known_tags` 只增不减**：剔除语义留给手动 reindex（清表后从 vault 重建自然达成剔除）。理由：自动剔除策略（如 "N 天未见"）会让 enrich 在跨长时间窗的 Raw 上误判 needs-review；手动 reindex 已经够用。若长期使用后已知词表过大导致 enrich 输入 token 占用问题再开。
 7. **`memory_recalls` trace 永久保留**：v1 不引入滚动清理。理由：没有数据用例之前先保留全量，简单优先；表本身是窄表，单条目极小，长期增长可承受。
+8. **链接图复用 `internal/vault/linkindex`，不新建 `memory_link_index`**：Pass 3 一跳扩散通过 `LinkGraph` 接口消费，daemon 注入既有 linkindex 适配器。理由：Phase 6 已落地 linkindex（内存图 + fsnotify 实时同步 + `resolveTarget` 已覆盖三种 wikilink 形态），新建 sqlite 镜像会引入第二份链接真值源、第二套 wikilink 解析、与 `vault_outlinks/vault_backlinks` 工具的潜在不一致。复用后 memory 模块自身仍不引入 watcher，与"memory 不自带 watcher"的原意一致——watcher 复用而非新增。代价：memory → vault/linkindex 形成单向 import；可接受。
 
 ## PR 边界
 
-**单 PR + 单 commit**，沿用 Phase 7 决议 #11 的同源理由。范围 = `internal/memory/` 全量（含 `wikilink_resolver.go` / `sqlite_store.go` / `KnownTags` / `Recall`）+ 四张表 schema migration + executor Apply hook + `recall_memory` 工具 + enrich 切换 + `openwhisker memory reindex` CLI + 单测 + 文档同步（progress.md / CHANGELOG.md）。中间 commit 都无法独立 demo，端到端跑通才是验收硬要求。
+**单 PR + 单 commit**，沿用 Phase 7 决议 #11 的同源理由。范围 = `internal/memory/` 全量（`sqlite_store.go` / `linkadapter.go` / `KnownTags` / `Recall`，含 tagvocab 迁入）+ 两张新表 schema migration（`memory_tag_index` / `memory_recalls`，`memory_known_tags` 由 Phase 7 已落库）+ executor Apply hook（仅 tag 分支）+ `recall_memory` 工具 + enrich 切换 + `openwhisker memory reindex` CLI + daemon 启动注入 linkindex 作为 `LinkGraph` + 单测 + 文档同步（progress.md / CHANGELOG.md）。中间 commit 都无法独立 demo，端到端跑通才是验收硬要求。
 
 ## Follow-up（不阻塞 Phase 8 落地）
 

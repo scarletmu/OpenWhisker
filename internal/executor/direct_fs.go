@@ -14,13 +14,34 @@ import (
 	"github.com/scarletmu/openwhisker/internal/storage"
 )
 
+// ApplyObserver receives best-effort notifications after a successful
+// per-operation Apply. Implementations must not block; errors are
+// discarded by callers because a side-effect-cache observer must never
+// fail a successfully-applied vault write.
+//
+// Phase 8 wires the memory service in here so memory_tag_index +
+// memory_known_tags stay fresh without re-scanning the vault after every
+// enrich Apply. See docs/phases/phase-8-memory-recall.md.
+type ApplyObserver interface {
+	OnRewriteNote(ctx context.Context, notePath, newContent string)
+}
+
 type DirectFS struct {
-	vaultRoot string
-	store     *storage.Store
+	vaultRoot     string
+	store         *storage.Store
+	applyObserver ApplyObserver
 }
 
 func NewDirectFS(vaultRoot string, store *storage.Store) DirectFS {
 	return DirectFS{vaultRoot: vaultRoot, store: store}
+}
+
+// WithApplyObserver returns a copy of the executor with the supplied
+// observer attached. DirectFS is a value type, so callers store the
+// returned value rather than mutating in place.
+func (e DirectFS) WithApplyObserver(obs ApplyObserver) DirectFS {
+	e.applyObserver = obs
+	return e
 }
 
 func (e DirectFS) Prepare(ctx context.Context, plan model.VaultPlan) (model.VaultPlan, error) {
@@ -68,8 +89,27 @@ func (e DirectFS) Apply(ctx context.Context, plan model.VaultPlan) (model.VaultA
 			return result, err
 		}
 		result.AppliedOperations = append(result.AppliedOperations, applied)
+		e.notifyApplied(ctx, op)
 	}
 	return result, nil
+}
+
+// notifyApplied fans out the applied operation to the observer (if any).
+// Phase 8 memory wiring only cares about rewrite_note for tag-index
+// freshness; other op types are passed through silently so future
+// observers can opt in without changing this dispatcher.
+func (e DirectFS) notifyApplied(ctx context.Context, op model.VaultOperation) {
+	if e.applyObserver == nil {
+		return
+	}
+	if op.Type != model.OperationRewriteNote {
+		return
+	}
+	var payload model.CreateNotePayload
+	if err := json.Unmarshal([]byte(op.PayloadJSON), &payload); err != nil {
+		return
+	}
+	e.applyObserver.OnRewriteNote(ctx, op.TargetPath, payload.Content)
 }
 
 // logRemainingFailed records OperationStatusFailed log rows for the failing

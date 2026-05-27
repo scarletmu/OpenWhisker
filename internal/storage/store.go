@@ -1065,6 +1065,93 @@ func (s *Store) KnownTags(prefix string) ([]string, error) {
 	return out, rows.Err()
 }
 
+// ClearKnownTags wipes the memory_known_tags table. Used by
+// `openwhisker memory reindex` to honour the "rescan after clear" semantics
+// Phase 8 decision #6 documents (reindex is the only way to drop tags that
+// no longer appear in the vault).
+func (s *Store) ClearKnownTags() error {
+	_, err := s.db.Exec(`DELETE FROM memory_known_tags`)
+	return err
+}
+
+// ReplaceTagIndexForNote atomically rewrites the memory_tag_index rows for
+// notePath: drop all rows currently keyed by notePath, then insert one row
+// per tag in newTags. Used both by full rescan (one note at a time) and by
+// the executor Apply hook on rewrite_note.
+func (s *Store) ReplaceTagIndexForNote(notePath string, newTags []string, now time.Time) error {
+	notePath = strings.TrimSpace(notePath)
+	if notePath == "" {
+		return errors.New("note_path is required")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM memory_tag_index WHERE note_path = ?`, notePath); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	ts := formatTime(now.UTC())
+	for _, tag := range newTags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			continue
+		}
+		if _, err := tx.Exec(`
+INSERT OR REPLACE INTO memory_tag_index (tag, note_path, updated_at)
+VALUES (?, ?, ?)`, tag, notePath, ts); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// ClearTagIndex wipes memory_tag_index. Used by reindex CLI.
+func (s *Store) ClearTagIndex() error {
+	_, err := s.db.Exec(`DELETE FROM memory_tag_index`)
+	return err
+}
+
+// NotesForTags returns vault-relative paths of every note carrying any of
+// the supplied tags. Order is by note_path ascending; duplicates collapsed.
+// Empty tags slice returns no rows (caller must validate at least one tag).
+func (s *Store) NotesForTags(tags []string) (map[string][]string, error) {
+	out := map[string][]string{}
+	for _, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			continue
+		}
+		rows, err := s.db.Query(`SELECT note_path FROM memory_tag_index WHERE tag = ? ORDER BY note_path ASC`, tag)
+		if err != nil {
+			return nil, err
+		}
+		var paths []string
+		for rows.Next() {
+			var p string
+			if err := rows.Scan(&p); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			paths = append(paths, p)
+		}
+		rows.Close()
+		out[tag] = paths
+	}
+	return out, nil
+}
+
+// InsertRecallTrace records one Recall invocation for later quality analysis.
+// Spec decision #7: traces are retained permanently; no rolling delete.
+func (s *Store) InsertRecallTrace(id, callerKind, query, tagsCSV, tagMode string, resultCount, latencyMS int, degraded bool, calledAt time.Time) error {
+	_, err := s.db.Exec(`
+INSERT INTO memory_recalls (id, caller_kind, query, tags, tag_mode, result_count, latency_ms, degraded, called_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, callerKind, query, tagsCSV, tagMode, resultCount, latencyMS, boolInt(degraded), formatTime(calledAt.UTC()))
+	return err
+}
+
 func formatTime(t time.Time) string {
 	if t.IsZero() {
 		return ""

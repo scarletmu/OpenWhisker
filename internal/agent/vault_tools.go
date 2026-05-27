@@ -16,8 +16,10 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 	"unicode"
 
+	"github.com/scarletmu/openwhisker/internal/memory"
 	"github.com/scarletmu/openwhisker/internal/sanitize"
 	"github.com/scarletmu/openwhisker/internal/scheduler"
 	"github.com/scarletmu/openwhisker/internal/vault/linkindex"
@@ -67,14 +69,16 @@ type ToolResult struct {
 	ResultSHA256 string
 }
 
-// VaultToolExecutor implements the 5 Phase 6 read-only vault tools. The
-// concrete file paths come from the Skill's vault_scope; LinkIndex is
-// optional but required for vault_outlinks / vault_backlinks.
+// VaultToolExecutor implements the Phase 6 read-only vault tools plus the
+// Phase 8 recall_memory tool. The concrete file paths come from the Skill's
+// vault_scope; LinkIndex is optional but required for vault_outlinks /
+// vault_backlinks; Memory is optional but required for recall_memory.
 type VaultToolExecutor struct {
-	VaultRoot         string
-	Skill             scheduler.ScheduledSkill
-	LinkIndex         *linkindex.Index
-	ReadVaultNoteCap  int // 0 → defaultReadVaultNoteBytes
+	VaultRoot        string
+	Skill            scheduler.ScheduledSkill
+	LinkIndex        *linkindex.Index
+	Memory           *memory.Service
+	ReadVaultNoteCap int // 0 → defaultReadVaultNoteBytes
 }
 
 // Execute dispatches based on the tool name. The engine has already verified
@@ -95,6 +99,8 @@ func (e VaultToolExecutor) Execute(ctx context.Context, inv ToolInvocation) (Too
 		return e.vaultBacklinks(inv.Args)
 	case "vault_text_search":
 		return e.vaultTextSearch(ctx, inv.Args)
+	case "recall_memory":
+		return e.recallMemory(ctx, inv.Args)
 	default:
 		return ToolResult{}, newToolError("unknown_tool", fmt.Sprintf("tool %q is not implemented", inv.Name))
 	}
@@ -441,6 +447,127 @@ func (e VaultToolExecutor) vaultTextSearch(ctx context.Context, rawArgs json.Raw
 	return e.finalize(payload)
 }
 
+// ---- tool: recall_memory ----
+
+const recallMemoryDefaultLimit = 10
+
+type recallMemoryArgs struct {
+	Query     string   `json:"query,omitempty"`
+	Tags      []string `json:"tags,omitempty"`
+	TagMode   string   `json:"tag_mode,omitempty"`
+	Limit     int      `json:"limit,omitempty"`
+	ScopeDirs []string `json:"scope_dirs,omitempty"`
+	Since     string   `json:"since,omitempty"`
+}
+
+func (e VaultToolExecutor) recallMemory(ctx context.Context, rawArgs json.RawMessage) (ToolResult, error) {
+	if e.Memory == nil {
+		return ToolResult{}, newToolError("memory_unavailable", "memory service is not configured for this run")
+	}
+	var args recallMemoryArgs
+	if err := json.Unmarshal(rawArgs, &args); err != nil {
+		return ToolResult{}, newToolError("bad_args", "expected {query?, tags?, tag_mode?, limit?, scope_dirs?, since?}")
+	}
+	if strings.TrimSpace(args.Query) == "" && len(args.Tags) == 0 {
+		return ToolResult{}, newToolError("bad_args", "query or tags is required")
+	}
+	// Per Phase 8 decision #4: tool layer bottom-caps the limit at 10 even
+	// though memory.Recall itself does not default.
+	limit := args.Limit
+	if limit <= 0 {
+		limit = recallMemoryDefaultLimit
+	}
+	// scope_dirs come straight from the LLM; defense in depth is to verify
+	// each one is inside the Skill's vault_scope. Empty list means "use
+	// memory's default (full vault minus Archive/)".
+	scope := make([]string, 0, len(args.ScopeDirs))
+	for _, dir := range args.ScopeDirs {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			continue
+		}
+		cleaned, err := scheduler.CleanRelativeDir(strings.TrimSuffix(dir, "/"))
+		if err != nil || cleaned == "" {
+			return ToolResult{}, newToolError("bad_scope", fmt.Sprintf("invalid scope_dir %q", dir))
+		}
+		if err := e.pathInScope(cleaned); err != nil {
+			return ToolResult{}, newToolError("scope_violation", fmt.Sprintf("%q is not within the Skill's vault_scope", dir))
+		}
+		scope = append(scope, cleaned)
+	}
+	req := memory.RecallRequest{
+		Query:         strings.TrimSpace(args.Query),
+		Tags:          args.Tags,
+		TagMode:       args.TagMode,
+		ScopeDirs:     scope,
+		Limit:         limit,
+		ExpandRelated: true,
+		CallerKind:    "agent",
+	}
+	if strings.TrimSpace(args.Since) != "" {
+		t, err := time.Parse(time.RFC3339, strings.TrimSpace(args.Since))
+		if err != nil {
+			return ToolResult{}, newToolError("bad_args", fmt.Sprintf("since must be RFC3339: %v", err))
+		}
+		req.Since = &t
+	}
+	result, err := e.Memory.Recall(ctx, req)
+	if err != nil {
+		return ToolResult{}, newToolError("recall_error", err.Error())
+	}
+	markdown := renderRecallMarkdown(result, req)
+	payload := map[string]any{
+		"query":            req.Query,
+		"tags":             req.Tags,
+		"tag_mode":         req.TagMode,
+		"degraded":         result.Degraded,
+		"degraded_reasons": result.DegradedReasons,
+		"hits":             len(result.Items),
+		"markdown":         markdown,
+	}
+	return e.finalize(payload)
+}
+
+// renderRecallMarkdown formats RecallResult into the compact markdown list
+// agents consume in subsequent turns. Per spec ("返回结果转成 agent 易消化的
+// 紧凑 markdown 列表"), each item is one line: path, source label, score,
+// optional excerpt.
+func renderRecallMarkdown(result memory.RecallResult, req memory.RecallRequest) string {
+	if len(result.Items) == 0 {
+		if result.Degraded {
+			return fmt.Sprintf("_no results (degraded: %s)_", strings.Join(result.DegradedReasons, ", "))
+		}
+		return "_no results_"
+	}
+	var b strings.Builder
+	if result.Degraded {
+		fmt.Fprintf(&b, "_degraded: %s_\n", strings.Join(result.DegradedReasons, ", "))
+	}
+	for i, item := range result.Items {
+		fmt.Fprintf(&b, "%d. `%s` — %s (%.2f)", i+1, item.Path, item.Source, item.Score)
+		if item.Excerpt != "" {
+			fmt.Fprintf(&b, "\n   > %s", truncateLine(item.Excerpt, 200))
+		}
+		if len(item.MatchedOn) > 0 {
+			fmt.Fprintf(&b, "\n   matched_on: %s", strings.Join(item.MatchedOn, ", "))
+		}
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+func truncateLine(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= n {
+		return s
+	}
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n]) + "…"
+}
+
 // ---- helpers ----
 
 // resolveAndCheckPath cleans a tool-provided path string and verifies it
@@ -644,6 +771,22 @@ func VaultToolDescriptors(names []string) []ChatTool {
 					"properties": map[string]any{
 						"query":        map[string]any{"type": "string"},
 						"scope_subset": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional subset of vault_scope to search within."},
+					},
+				},
+			}})
+		case "recall_memory":
+			out = append(out, ChatTool{Type: "function", Function: ChatToolFunction2{
+				Name:        "recall_memory",
+				Description: "Recall vault notes by tag and/or text query. Returns a compact markdown list of relevant notes (paths + sources + scores + optional excerpts), drawn from the vault's frontmatter `tags` reverse index, literal text search, and one-hop frontmatter `related` diffusion. Pass `tags` (controlled vocabulary like `topic/*` / `skill/*`) and/or `query`; at least one is required. Use this when you need to surface prior notes on a topic rather than reading a known path. Returns a markdown payload in `markdown`; cite paths verbatim if you read them next via read_vault_note.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"query":      map[string]any{"type": "string", "description": "Optional literal text query (≥2 chars)."},
+						"tags":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional tag anchors (e.g. [\"skill/golang\", \"topic/system-design\"])."},
+						"tag_mode":   map[string]any{"type": "string", "enum": []string{"any", "all"}, "description": "any (default) requires at least one tag to match; all requires every tag."},
+						"limit":      map[string]any{"type": "integer", "description": "Max results. Defaults to 10."},
+						"scope_dirs": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional subset of vault_scope to recall from."},
+						"since":      map[string]any{"type": "string", "description": "RFC3339; if set, only notes modified after this timestamp are returned."},
 					},
 				},
 			}})

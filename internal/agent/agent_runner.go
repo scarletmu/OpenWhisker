@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/scarletmu/openwhisker/internal/memory"
 	"github.com/scarletmu/openwhisker/internal/model"
 	"github.com/scarletmu/openwhisker/internal/sanitize"
 	"github.com/scarletmu/openwhisker/internal/scheduler"
@@ -35,7 +36,8 @@ type AgentRunRequest struct {
 	Now          time.Time
 	ExternalInfo []scheduler.ExternalInfoItem
 	LinkIndex    *linkindex.Index
-	DebugWriter  io.Writer // ndjson of full message stream, optional
+	Memory       *memory.Service // Phase 8: backs the recall_memory tool
+	DebugWriter  io.Writer       // ndjson of full message stream, optional
 }
 
 // AgentRunResult is what AgentRunner returns. Status maps onto the standard
@@ -141,6 +143,7 @@ func (r AgentRunner) Run(ctx context.Context, req AgentRunRequest) (AgentRunResu
 		VaultRoot: r.VaultRoot,
 		Skill:     req.Skill,
 		LinkIndex: req.LinkIndex,
+		Memory:    req.Memory,
 	}
 
 	engineCfg := EngineConfig{

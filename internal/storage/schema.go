@@ -197,6 +197,29 @@ CREATE TABLE IF NOT EXISTS memory_known_tags (
   first_seen_at TEXT NOT NULL,
   last_seen_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS memory_tag_index (
+  tag TEXT NOT NULL,
+  note_path TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (tag, note_path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_tag_index_note ON memory_tag_index(note_path);
+
+CREATE TABLE IF NOT EXISTS memory_recalls (
+  id TEXT PRIMARY KEY,
+  caller_kind TEXT NOT NULL,
+  query TEXT NOT NULL DEFAULT '',
+  tags TEXT NOT NULL DEFAULT '',
+  tag_mode TEXT NOT NULL DEFAULT '',
+  result_count INTEGER NOT NULL DEFAULT 0,
+  latency_ms INTEGER NOT NULL DEFAULT 0,
+  degraded INTEGER NOT NULL DEFAULT 0,
+  called_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_recalls_called_at ON memory_recalls(called_at);
 `)
 	if err != nil {
 		return err

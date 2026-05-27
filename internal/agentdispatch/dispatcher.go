@@ -19,6 +19,7 @@ import (
 
 	"github.com/scarletmu/openwhisker/internal/agent"
 	"github.com/scarletmu/openwhisker/internal/core"
+	"github.com/scarletmu/openwhisker/internal/memory"
 	"github.com/scarletmu/openwhisker/internal/model"
 	"github.com/scarletmu/openwhisker/internal/scheduler"
 	"github.com/scarletmu/openwhisker/internal/storage"
@@ -32,6 +33,7 @@ import (
 type Dispatcher struct {
 	Runner    *agent.AgentRunner
 	LinkIndex *linkindex.Index
+	Memory    *memory.Service
 	Store     *storage.Store
 }
 
@@ -48,6 +50,7 @@ func (d Dispatcher) DispatchScheduler(ctx context.Context, req core.AgentDispatc
 		TriggerKind: model.AgentTriggerKindScheduler,
 		Now:         time.Now().UTC(),
 		LinkIndex:   d.LinkIndex,
+		Memory:      d.Memory,
 	})
 	if err != nil {
 		return core.AgentDispatchResult{}, err
@@ -106,6 +109,7 @@ func (d Dispatcher) DispatchAdHoc(ctx context.Context, req core.AgentAdHocReques
 		TriggerKind: req.TriggerKind,
 		Now:         now,
 		LinkIndex:   d.LinkIndex,
+		Memory:      d.Memory,
 		DebugWriter: toIOWriter(req.DebugWriter),
 	})
 	finishedAt := time.Now().UTC()

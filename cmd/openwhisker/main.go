@@ -27,7 +27,7 @@ import (
 	"github.com/scarletmu/openwhisker/internal/profile"
 	schedulerpkg "github.com/scarletmu/openwhisker/internal/scheduler"
 	"github.com/scarletmu/openwhisker/internal/storage"
-	"github.com/scarletmu/openwhisker/internal/tagvocab"
+	"github.com/scarletmu/openwhisker/internal/memory"
 	"github.com/scarletmu/openwhisker/internal/vault/linkindex"
 )
 
@@ -112,6 +112,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runAgentRuns(args[2:], stdout, stderr)
 	case args[0] == "enrich":
 		return runEnrich(args[1:], stdout, stderr)
+	case len(args) >= 2 && args[0] == "memory" && args[1] == "reindex":
+		return runMemoryReindex(args[2:], stdout, stderr)
 	default:
 		printUsage(stderr)
 		return flag.ErrHelp
@@ -551,19 +553,22 @@ func runEnrich(args []string, stdout, stderr io.Writer) error {
 	if err := queue.Reset(rawPath); err != nil {
 		return fmt.Errorf("reset enrich job %s: %w", rawPath, err)
 	}
-	vocab := tagvocab.NewService(store, *vaultRoot, nil, nil)
+	memSvc, err := memory.NewService(memory.Config{Store: store, VaultRoot: *vaultRoot})
+	if err != nil {
+		return fmt.Errorf("memory service: %w", err)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := vocab.RescanAll(ctx); err != nil {
-		return fmt.Errorf("tagvocab rescan: %w", err)
+	if err := memSvc.RescanAll(ctx); err != nil {
+		return fmt.Errorf("memory rescan: %w", err)
 	}
 	svc, err := enrich.NewService(enrich.Config{
 		Store:     store,
 		Queue:     queue,
 		VaultRoot: *vaultRoot,
 		Runner:    runner,
-		Vocab:     vocab,
-		Executor:  executor.NewDirectFS(*vaultRoot, store),
+		Vocab:     memSvc,
+		Executor:  executor.NewDirectFS(*vaultRoot, store).WithApplyObserver(memSvc),
 	})
 	if err != nil {
 		return err
@@ -586,6 +591,45 @@ func runEnrich(args []string, stdout, stderr io.Writer) error {
 		out["error"] = outcome.Err.Error()
 	}
 	return printJSON(stdout, out)
+}
+
+// runMemoryReindex is the Phase 8 escape hatch: wipe memory_tag_index +
+// memory_known_tags, then rescan Knowledge/Interview/Life. Decision #6 names
+// this as the only way to drop tags that no longer appear in the vault. Safe
+// to invoke while the daemon is running (sqlite WAL handles concurrent
+// readers; the live in-memory cache in the daemon process is not affected,
+// it picks up changes on next daemon restart).
+func runMemoryReindex(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("memory reindex", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dbPath := fs.String("db", "data/openwhisker.db", "SQLite database path")
+	vaultRoot := fs.String("vault", "testdata/vault", "target vault root")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: openwhisker memory reindex [--db data/openwhisker.db] [--vault testdata/vault]")
+	}
+	store, err := storage.Open(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	memSvc, err := memory.NewService(memory.Config{Store: store, VaultRoot: *vaultRoot})
+	if err != nil {
+		return fmt.Errorf("memory service: %w", err)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := memSvc.Reindex(ctx); err != nil {
+		return fmt.Errorf("memory reindex: %w", err)
+	}
+	known := memSvc.KnownTags("")
+	return printJSON(stdout, map[string]any{
+		"vault":            *vaultRoot,
+		"known_tags_count": len(known),
+		"known_tags":       known,
+	})
 }
 
 func runSchedulerTick(args []string, stdout, stderr io.Writer) error {
@@ -626,7 +670,20 @@ func runSchedulerTick(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			fmt.Fprintf(stderr, "tool-calling skills disabled: %v\n", err)
 		} else {
-			dispatcher = agentdispatch.Dispatcher{Runner: runner, LinkIndex: idx}
+			memCfg := memory.Config{
+				Store:      store,
+				VaultRoot:  *vaultRoot,
+				LinkGraph:  memory.LinkIndexAdapter{Index: idx},
+				TextSearch: memory.NewFSTextSearcher(*vaultRoot, nil),
+			}
+			memSvc, memErr := memory.NewService(memCfg)
+			if memErr != nil {
+				fmt.Fprintf(stderr, "memory service init failed: %v\n", memErr)
+			} else if rescanErr := memSvc.RescanAll(context.Background()); rescanErr != nil {
+				fmt.Fprintf(stderr, "memory rescan failed: %v\n", rescanErr)
+				memSvc = nil
+			}
+			dispatcher = agentdispatch.Dispatcher{Runner: runner, LinkIndex: idx, Memory: memSvc}
 		}
 	}
 	result, err := core.NewSchedulerServiceWithOptions(store, *vaultRoot, core.SchedulerServiceOptions{
@@ -1052,24 +1109,55 @@ func runDaemon(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	// Phase 6: daemon-side AgentRunner. The link index is built async so the
-	// daemon's poll loops are not blocked; vault_outlinks / vault_backlinks
-	// return link_index_not_ready until the build settles.
-	var daemonDispatcher core.AgentDispatcher
+	// Phase 6: daemon-side AgentRunner + link index. linkIdx is built async
+	// so the daemon's poll loops are not blocked; vault_outlinks /
+	// vault_backlinks return link_index_not_ready until the build settles.
+	// The same linkIdx backs Phase 8 memory.Recall as its LinkGraph
+	// implementation (decision #8) — no second link cache.
+	var linkIdx *linkindex.Index
 	agentRunner := buildAgentRunner(*vaultRoot, *llmModel)
 	if agentRunner != nil {
-		idx := linkindex.New(*vaultRoot, vaultProfile.Scheduler.ReadOnlyVaultRoots)
-		idx.BuildAsync(context.Background(), func(stats linkindex.Stats, elapsed time.Duration, err error) {
+		linkIdx = linkindex.New(*vaultRoot, vaultProfile.Scheduler.ReadOnlyVaultRoots)
+		linkIdx.BuildAsync(context.Background(), func(stats linkindex.Stats, elapsed time.Duration, err error) {
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "link_index initial build error: %v\n", err)
 				return
 			}
 			fmt.Fprintf(os.Stderr, "link_index ready: %d notes, %d out-edges, elapsed %s\n", stats.Notes, stats.OutEdges, elapsed)
-			if watchErr := idx.Watch(context.Background()); watchErr != nil {
+			if watchErr := linkIdx.Watch(context.Background()); watchErr != nil {
 				fmt.Fprintf(os.Stderr, "link_index watcher error: %v\n", watchErr)
 			}
 		})
-		daemonDispatcher = agentdispatch.Dispatcher{Runner: agentRunner, LinkIndex: idx, Store: store}
+	}
+	// Phase 8: memory recall service. Constructed unconditionally so the
+	// reverse tag index keeps building even when no LLM is configured;
+	// LinkGraph stays nil without an agent runner, in which case Pass 3
+	// returns degraded results.
+	memCfg := memory.Config{
+		Store:      store,
+		VaultRoot:  *vaultRoot,
+		TextSearch: memory.NewFSTextSearcher(*vaultRoot, nil),
+	}
+	if linkIdx != nil {
+		memCfg.LinkGraph = memory.LinkIndexAdapter{Index: linkIdx}
+	}
+	memSvc, err := memory.NewService(memCfg)
+	if err != nil {
+		return fmt.Errorf("memory service: %w", err)
+	}
+	go func() {
+		if err := memSvc.RescanAll(context.Background()); err != nil {
+			fmt.Fprintf(os.Stderr, "memory initial rescan error: %v\n", err)
+		}
+	}()
+	var daemonDispatcher core.AgentDispatcher
+	if agentRunner != nil {
+		daemonDispatcher = agentdispatch.Dispatcher{
+			Runner:    agentRunner,
+			LinkIndex: linkIdx,
+			Memory:    memSvc,
+			Store:     store,
+		}
 	}
 	// Phase 7: enrich pipeline. Vocab rescans the vault in the background;
 	// HasTag / KnownTags block until the first scan completes. Enrich service
@@ -1078,19 +1166,13 @@ func runDaemon(args []string, stdout, stderr io.Writer) error {
 	enrichQueue := enrich.NewQueue(store)
 	var enrichService *enrich.Service
 	if agentRunner != nil {
-		vocab := tagvocab.NewService(store, *vaultRoot, nil, nil)
-		go func() {
-			if err := vocab.RescanAll(context.Background()); err != nil {
-				fmt.Fprintf(os.Stderr, "tagvocab initial rescan error: %v\n", err)
-			}
-		}()
 		svc, err := enrich.NewService(enrich.Config{
 			Store:     store,
 			Queue:     enrichQueue,
 			VaultRoot: *vaultRoot,
 			Runner:    agentRunner,
-			Vocab:     vocab,
-			Executor:  executor.NewDirectFS(*vaultRoot, store),
+			Vocab:     memSvc,
+			Executor:  executor.NewDirectFS(*vaultRoot, store).WithApplyObserver(memSvc),
 		})
 		if err != nil {
 			return fmt.Errorf("enrich service: %w", err)

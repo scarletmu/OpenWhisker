@@ -1,5 +1,46 @@
 # Changelog
 
+## 2026-05-27 - Phase 8 落地：Memory Recall Service v1
+
+按 `docs/phases/phase-8-memory-recall.md` 决议端到端实现 Memory Recall Service v1，沿用 Phase 7 单 PR + 单 commit 模式。`go test ./...` 全包绿。
+
+模块边界：
+
+- `internal/memory/`：从 `internal/tagvocab/` 演化而来的共享 memory 包。包含 `Service`（known tags only-grow + 反向 tag_index）、`Recall` 三 pass（`tag_match=1.0` / `text_match=0.6` / `related_link=0.4`，related 邻居经一跳衰减 `*0.7`，重叠项取最高分并合并 sources）、`LinkGraph` 接口及 `LinkIndexAdapter`（决议 #8：复用 Phase 6 `internal/vault/linkindex/`，仅透出 `SourceKindFrontmatterRelated` 边）、`fsTextSearcher`（默认走 `Knowledge/Interview/Life/Raw`，遍历时跳 `Archive/` 和点开头目录）、frontmatter tag 解析（block + flow 两种 YAML 风格）。`Service.Reindex` 是 only-grow 语义的 escape hatch（先 clear 再 RescanAll）。
+- `internal/tagvocab/` 整目录删除；`internal/enrich/`、`internal/agent/`、`internal/agentdispatch/`、`cmd/openwhisker/` 全部切到 `memory.Service`。
+
+SQLite schema（仅新增、幂等）：
+
+- `memory_tag_index(tag, note_path, updated_at)`，主键 `(tag, note_path)` + `idx_memory_tag_index_note_path`：反向 tag→notes 索引。`ReplaceTagIndexForNote(note, newTags, now)` 走 DELETE+INSERT，rewrite_note 上无需 diff 即可保证幂等。
+- `memory_known_tags`：沿用 Phase 7 表，only-grow 语义不变；`ClearKnownTags` 仅由 `Reindex` 调用。
+- `memory_recalls(id, caller_kind, query, tags, tag_mode, result_count, latency_ms, degraded, called_at)` + `idx_memory_recalls_called_at`：召回调用 trace，每次 `Recall` 末尾 best-effort 写一行。
+
+执行路径：
+
+- `internal/executor/direct_fs.go`：新增 `ApplyObserver` 接口与 `WithApplyObserver(obs)`，每次成功 `applyOperation` 后只对 `OperationRewriteNote` 调用 `obs.OnRewriteNote(ctx, path, newContent)`。daemon 与 enrich 都通过这个 hook 让 memory tag_index 实时跟随 vault 写入。
+- `memory.Service.OnRewriteNote` 解析新 content 的 frontmatter tags 后调用 `RecordForNote`，同时刷反向索引与 only-grow known tags。
+
+Agent / Phase 6 工具集：
+
+- `internal/agent/vault_tools.go`：闭集工具新增 `recall_memory`，参数 `query` / `tags` / `tag_mode (any|all)` / `scope_dirs` / `since (RFC3339)` / `expand_related` / `limit`（默认 10）。`query` 与 `tags` 全空时显式拒绝；返回 markdown 包含每条 hit 的 path / source / score / excerpt（截到 200 字符）。
+- `internal/agent/agent_runner.go`、`internal/agentdispatch/dispatcher.go`：`AgentRunRequest`、`Dispatcher` 透传 `Memory *memory.Service`，scheduler / ad-hoc 两条路径都注入。
+
+CLI / daemon 接线：
+
+- `openwhisker memory reindex`：clear `memory_tag_index` + `memory_known_tags` 后同步全量重扫 `Knowledge/Interview/Life`，受控前缀为 `topic/` / `skill/`。
+- `openwhisker daemon`：启动顺序固定为 `linkindex.New` → `memory.NewService` → daemon dispatcher 注入 LinkGraph + Memory → enrich executor `WithApplyObserver(memSvc)`。
+
+测试：`internal/memory/service_test.go` 9 例（frontmatter parse 双风格 / RescanAll 构建 / RescanAll 只增不减 / Reindex 清后重建 / RecordForNote / OnRewriteNote ApplyObserver 行为 / `Ready` + `WaitReady` 生命周期 / `tag_index_not_ready` degraded 路径）；`internal/memory/recall_test.go` 8 例（query/tags 空入参拒绝 / tags-only / TagMode any vs all / query-only stub TextSearcher / ExpandRelated 双向 stub LinkGraph / ExpandRelated 关闭 / link graph 未就绪 degraded 路径 / ScopeDirs + Archive 默认排除）；`internal/memory/linkadapter_test.go` 1 例（真实 linkindex 上验证 body wikilink 不进 related diffusion，只透出 frontmatter `related:`）；`internal/executor/direct_fs_test.go` 新增 `TestDirectFSApplyObserverFiresOnlyOnRewriteNote`（rewrite_note 触发 observer 且 payload 内容正确 / create_note 不触发）；`internal/agent/vault_tools_recall_test.go` 4 例（Memory 未配置时 `memory_unavailable` / query 与 tags 全空 `bad_args` / 正常路径 markdown payload 含 path + `tag_match` 标签 / `scope_dirs` 越界 `scope_violation`）。`memory_known_tags` only-grow 与 `Reindex` 清重建语义都有 dedicated case。
+
+文档：
+
+- 本 CHANGELOG 条目；`docs/progress.md` 当前阶段、验证状态表、下一步优先级同步更新。Phase 8 设计稿在前一日（commit `3be8a43`）已升级为"待实现"并加入决议 #8（复用 linkindex 而非新建 `memory_link_index` SQLite 表）。
+
+未做 / 留下：
+
+- 真实 vault `recall_memory` 召回质量人工评估（tag-only / query+tags / related 扩散三类场景），归入"验证队列"。
+- Phase 7 enrich 在新 `memory.Service` 接线下的真实 vault 复跑（确认 tag vocab 行为未回归），同上。
+
 ## 2026-05-26 - OPEN-1 demo 通过：Phase 6 解封合并门槛
 
 针对 `docs/phases/phase-6-scheduler-skill-creator.md` §OPEN-1 列出的「合并 `deploy/main` 前必须 ≥9/10 deepseek-chat 多轮稳定性 demo」硬门槛，在真实本地 Obsidian vault (`~/Documents/KnowLedge`) + DeepSeek `deepseek-chat` provider 上跑了两轮独立 demo，合计 20 runs。

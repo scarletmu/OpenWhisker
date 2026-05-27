@@ -6,10 +6,10 @@
 
 ## 当前阶段
 
-主线已从 Phase 6 推进到 **Phase 7 Inbox Enrichment v1 已合并 main**（commit `2558928`，2026-05-27）；**Phase 8 Memory Recall Service 设计稿评审结束，已升级为"待实现"**。下一步是 Phase 8 端到端实现。
+主线已推进到 **Phase 8 Memory Recall Service v1 已落地（待 commit）**（2026-05-27）；Phase 7 已合并 main（commit `2558928`）。下一步是单 PR + 单 commit 上 main，再排真实 vault 复跑反馈。
 
-- **Phase 8** Memory Recall Service：设计稿已收尾（`docs/phases/phase-8-memory-recall.md`），7 条原待决问题于 2026-05-27 全部转为决议，PR 边界沿用 Phase 7 模式（单 PR + 单 commit）。代码未落地。计划范围：`internal/memory/`（KnownTags / Recall / wikilink_resolver / sqlite_store）+ 四张派生 cache 表（`memory_tag_index` / `memory_link_index` / `memory_known_tags` / `memory_recalls`）+ executor Apply hook + Phase 6 工具集 `recall_memory` +1 + 把 Phase 7 `internal/tagvocab/` 迁入 + `openwhisker memory reindex` CLI。
-- **Phase 7** Inbox Enrichment v1 已落地 main（2026-05-27，commit `2558928`）。代码层包含 `internal/enrich/`（enrich 编排 + worker + scan + queue DAO）、`internal/tagvocab/`（派生自 vault frontmatter 的已知 tag 词表，Phase 8 落地时迁入 `internal/memory/`）、`enrich_jobs` SQLite 表（状态机 pending / running / done / skipped_concurrent_edit / failed / attempts_exhausted）、policy 三 guard（path / field / body）扩展、`JobTypeEnrichRaw` + `model.frontmatter` 常量、IngestRaw 末尾入队 hook、daemon scan tick（5 分钟周期 + mtime 10 分钟静默期 + attempts 5 次熔断）、enrich worker goroutine 串行消费、内置 enrich skill prompt、CLI `openwhisker enrich <rawJobID>`（手动重跑，重置 attempts，绕过静默期）、Matrix `/no-enrich`（一次性开关）。enrich 复用 Phase 6 `AgentRunner` 与 5 + 1 read-only 工具，独立 budget（`max_tool_calls=8 / wall_clock=20s` 硬编码）。enrich 写回走主线 `VaultPlan → Policy → Executor`，唯一允许的 op 是 `rewrite_note` 且 target_path 严格限定为本次 enrich 对应的 inbox 文件；frontmatter 仅允许追加 `topic/*` / `skill/*`（必须命中已知词表）/ `status/needs-review` / `raw/*`，禁止删除已有项；body sha256 由 body_guard 钉死，Raw Text 永不被改。失败 / 超时 / policy reject 一律静默丢弃 + debug outbox，不进 approval 队列。testdata 烟测全绿；真实 vault demo 放在验证队列（不挂顶部 priority）。
+- **Phase 8** Memory Recall Service v1：按 `docs/phases/phase-8-memory-recall.md` 决议（含决议 #8 复用既有 `internal/vault/linkindex/`）端到端实现。代码层包含 `internal/memory/`（Service / Recall 三 pass / LinkGraph 接口 + linkindex 适配器 / FS text searcher / frontmatter tag 解析）、三张派生 cache 表（`memory_tag_index` / `memory_known_tags`（Phase 7 已有，沿用）/ `memory_recalls` 轨迹）、`executor.ApplyObserver` hook（仅在 `rewrite_note` 后触发，刷 tag_index + known_tags）、Phase 6 工具集新增 `recall_memory`（query / tags / tag_mode / scope_dirs / since / expand_related / limit；默认 limit=10，自动排除 `Archive/`）、把 Phase 7 `internal/tagvocab/` 迁入 `internal/memory/`、`openwhisker memory reindex` CLI（clear 然后 RescanAll）、daemon 启动时构建 memory.Service + 注入 enrich 的 `WithApplyObserver`。Three-pass Recall 评分：`tag_match=1.0` / `text_match=0.6` / `related_link=0.4`，related 经一跳衰减 `*0.7`，重叠取最高分。降级路径覆盖 `tag_index_not_ready` / `link_graph_not_ready` 两种。`go test ./...` 全包绿（含 7 个 service_test + 8 个 recall_test，注入 fake `LinkGraph` / `TextSearcher` 跑 query-only / tags-only / TagMode any vs all / ExpandRelated 双向 / ScopeDirs / Archive 默认排除 / linkindex 未就绪 degraded 等场景）。
+- **Phase 7** Inbox Enrichment v1 已落地 main（2026-05-27，commit `2558928`）。代码层包含 `internal/enrich/`（enrich 编排 + worker + scan + queue DAO）、`internal/tagvocab/`（派生自 vault frontmatter 的已知 tag 词表；Phase 8 v1 已迁入 `internal/memory/`）、`enrich_jobs` SQLite 表（状态机 pending / running / done / skipped_concurrent_edit / failed / attempts_exhausted）、policy 三 guard（path / field / body）扩展、`JobTypeEnrichRaw` + `model.frontmatter` 常量、IngestRaw 末尾入队 hook、daemon scan tick（5 分钟周期 + mtime 10 分钟静默期 + attempts 5 次熔断）、enrich worker goroutine 串行消费、内置 enrich skill prompt、CLI `openwhisker enrich <rawJobID>`（手动重跑，重置 attempts，绕过静默期）、Matrix `/no-enrich`（一次性开关）。enrich 复用 Phase 6 `AgentRunner` 与 5 + 1 read-only 工具，独立 budget（`max_tool_calls=8 / wall_clock=20s` 硬编码）。enrich 写回走主线 `VaultPlan → Policy → Executor`，唯一允许的 op 是 `rewrite_note` 且 target_path 严格限定为本次 enrich 对应的 inbox 文件；frontmatter 仅允许追加 `topic/*` / `skill/*`（必须命中已知词表）/ `status/needs-review` / `raw/*`，禁止删除已有项；body sha256 由 body_guard 钉死，Raw Text 永不被改。失败 / 超时 / policy reject 一律静默丢弃 + debug outbox，不进 approval 队列。testdata 烟测全绿；真实 vault demo 放在验证队列（不挂顶部 priority）。
 - **Phase 4B** 已闭环：Matrix 私聊入口 + Raw Organizer approve/diff/reject + 人类审批页 diff 渲染。2026-05-20 在 `testdata/vault` 跑通 Matrix daemon + DeepSeek 的 organize → `/diff` → `/approve` 全链路，Knowledge draft 与 Raw/Processed 追加段均匹配新 schema。
 - **Phase 4B.5** IM Intent Router 已落地为 partial implementation：rules / hybrid / off 三模式、source-scoped binding、capture bucket、pending clarification 状态机、OpenAI-compatible classifier、intent audit jsonl 均已接入；真实 Matrix + 真实 intent 小模型 smoke 已在 2026-05-18 跑通。
 - **Phase 4C.1** high-risk proposal-only policy 已闭环，含 proposal note schema / 渲染 / 多路径 diff 合成 / `proposal_written` 终态。
@@ -41,7 +41,8 @@
 | Phase 6 | vault 内 `Agent/Skills/skill-creator/SKILL.md` 创作 | 未做 | 留给用户写在自己 vault |
 | Phase 7 | tagvocab / enrich / policy 三 guard / enrich_jobs DAO / IngestRaw hook 单元测试与 testdata 烟测 | `go test ./...`, 2026-05-27 | 已通 |
 | Phase 7 | 真实 vault Demo（明显归属 / needs-review / new_tag_candidate 三类样本各若干条） | 未做 | 验证队列，不挂顶部 priority |
-| Phase 8 | 待实现 | — | 未做 |
+| Phase 8 | memory service / Recall 三 pass / linkindex 适配器 / executor ApplyObserver / `recall_memory` 工具 / tagvocab 迁入 / `memory reindex` CLI 单元测试 | `go test ./...`, 2026-05-27 | 已通 |
+| Phase 8 | 真实 vault Recall 召回质量人工检验（tag-only / query+tags / related 扩散三类场景） | 未做 | 验证队列，不挂顶部 priority |
 
 `GOCACHE=/private/tmp/openwhisker-go-cache go test ./...` 2026-05-23 全包绿。
 
@@ -80,7 +81,7 @@ testdata 已通的能力默认视为验证充分；真实 vault apply 只是 nic
 
 ## 下一步优先级
 
-1. **Phase 8 Memory Recall Service 端到端实现**（当前主线焦点）：按 `docs/phases/phase-8-memory-recall.md` "决议"小节执行，单 PR + 单 commit；同 PR 内完成 `internal/tagvocab/` → `internal/memory/` 迁移与 enrich 切换。验收以 Phase 7 enrich 复跑通过 + 真实 vault `recall_memory` 召回质量人工检验为门槛。
+1. **Phase 8 v1 真实 vault 复跑反馈**：单 PR + 单 commit 上 main 后，触发 `openwhisker memory reindex` 在真实 `~/Documents/KnowLedge` 上跑一遍，再用 `recall_memory` 工具（tag-only / query+tags / related 扩散三类场景）人工评估召回质量；Phase 7 enrich 在新 memory service 接线下复跑一次确认 tag vocab 行为未回归。
 2. 根据真实使用反馈扩展 rules-only 短句词表与 clarification 回复词表（基于真实未命中样本，避免盲扩）。
 3. Phase 4C 主干已收束，没有预排的 4C.3 / 4C.4；后续推进改为真实使用驱动。新增能力（多模态 bucket 输入、clarification 回复 `additional_payload_text` 抽取等）按"关键已知遗留"里的实际需求单独立项。
 4. Phase 5 下一步进入真实运行反馈：用 launchd 或 systemd 跑 `openwhisker daemon`，结合 `daemon status`、`scheduler status`、`scheduler runs` 和 `scheduler schedules list|enable|disable` 观察真实 RSSHub / RSS scheduled Skill 输出质量。RSSHub / Folo 仍只作为上游 feed 来源，不进入 Scheduler Core 概念，adapter 只返回信息快照，不提供外部写操作。

@@ -396,3 +396,89 @@ func TestDirectFSWriteFileMode(t *testing.T) {
 		t.Errorf("created file mode = %o, want 0600", perm)
 	}
 }
+
+type recordingObserver struct {
+	rewrites []recordedRewrite
+}
+
+type recordedRewrite struct {
+	notePath string
+	content  string
+}
+
+func (r *recordingObserver) OnRewriteNote(_ context.Context, notePath, newContent string) {
+	r.rewrites = append(r.rewrites, recordedRewrite{notePath: notePath, content: newContent})
+}
+
+// Phase 8 memory wiring expects the executor to call ApplyObserver.OnRewriteNote
+// exactly once per successful rewrite_note operation, with the new payload
+// content. Other op types (create_note, move_note, append_note) must NOT
+// invoke the observer — memory tag-index freshness only cares about
+// in-place rewrites where frontmatter `tags` may have changed.
+func TestDirectFSApplyObserverFiresOnlyOnRewriteNote(t *testing.T) {
+	dir := t.TempDir()
+	vaultRoot := filepath.Join(dir, "vault")
+	if err := os.MkdirAll(filepath.Join(vaultRoot, "Raw", "Inbox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Seed a note we can rewrite.
+	existing := "---\ntags: []\n---\nbody\n"
+	targetPath := filepath.Join(vaultRoot, "Raw", "Inbox", "x.md")
+	if err := os.WriteFile(targetPath, []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.Open(filepath.Join(dir, "openwhisker.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	if err := store.CreateJob(model.WikiJob{
+		ID: "job_obs", Type: model.JobTypeIngestRaw, Status: model.JobStatusApplying,
+		Source: "test", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Op 1: create_note (must NOT trigger observer).
+	createPayload, _ := json.Marshal(model.CreateNotePayload{Content: "fresh\n"})
+	// Op 2: rewrite_note targeting x.md with new tags (MUST trigger observer).
+	rewriteContent := "---\ntags:\n  - topic/observed\n---\nbody\n"
+	rewritePayload, _ := json.Marshal(model.CreateNotePayload{Content: rewriteContent})
+
+	plan := model.VaultPlan{
+		ID: "plan_obs", JobID: "job_obs",
+		TargetPaths: []string{"Raw/Inbox/new.md", "Raw/Inbox/x.md"},
+		Operations: []model.VaultOperation{
+			{ID: "op_create", Type: model.OperationCreateNote,
+				TargetPath: "Raw/Inbox/new.md", PayloadJSON: string(createPayload)},
+			{ID: "op_rewrite", Type: model.OperationRewriteNote,
+				TargetPath: "Raw/Inbox/x.md", PayloadJSON: string(rewritePayload)},
+		},
+		CreatedAt: now,
+	}
+	if err := store.SavePlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	// Prepare to fill BeforeHash on op_rewrite.
+	prepared, err := NewDirectFS(vaultRoot, store).Prepare(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	obs := &recordingObserver{}
+	executor := NewDirectFS(vaultRoot, store).WithApplyObserver(obs)
+	if _, err := executor.Apply(context.Background(), prepared); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(obs.rewrites) != 1 {
+		t.Fatalf("observer fired %d times, want exactly 1 (only rewrite_note): %+v", len(obs.rewrites), obs.rewrites)
+	}
+	got := obs.rewrites[0]
+	if got.notePath != "Raw/Inbox/x.md" {
+		t.Errorf("observer notePath = %q, want Raw/Inbox/x.md", got.notePath)
+	}
+	if got.content != rewriteContent {
+		t.Errorf("observer content mismatch:\n got: %q\nwant: %q", got.content, rewriteContent)
+	}
+}

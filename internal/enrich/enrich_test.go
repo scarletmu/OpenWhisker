@@ -13,10 +13,10 @@ import (
 
 	"github.com/scarletmu/openwhisker/internal/agent"
 	"github.com/scarletmu/openwhisker/internal/executor"
+	"github.com/scarletmu/openwhisker/internal/memory"
 	"github.com/scarletmu/openwhisker/internal/model"
 	"github.com/scarletmu/openwhisker/internal/policy"
 	"github.com/scarletmu/openwhisker/internal/storage"
-	"github.com/scarletmu/openwhisker/internal/tagvocab"
 )
 
 // fakeRunner implements the AgentRunner interface for tests.
@@ -74,7 +74,7 @@ type harness struct {
 	vault    string
 	store    *storage.Store
 	queue    *Queue
-	vocab    *tagvocab.Service
+	vocab    *memory.Service
 	runner   *fakeRunner
 	svc      *Service
 	now      time.Time
@@ -102,7 +102,10 @@ func newHarness(t *testing.T) *harness {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
-	vocab := tagvocab.NewService(store, tempVault, nil, nil)
+	vocab, err := memory.NewService(memory.Config{Store: store, VaultRoot: tempVault})
+	if err != nil {
+		t.Fatalf("new memory service: %v", err)
+	}
 	if err := vocab.RescanAll(context.Background()); err != nil {
 		t.Fatalf("rescan vocab: %v", err)
 	}
