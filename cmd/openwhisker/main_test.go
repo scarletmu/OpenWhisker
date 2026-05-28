@@ -149,7 +149,7 @@ func TestEffectivePlanSyncModeDefaultsOffForTestVault(t *testing.T) {
 		t.Fatalf("mode = %q, want off", mode)
 	}
 
-	mode, err = effectivePlanSyncMode(model.SyncModeAuto, "/Users/wang/Documents/KnowLedge")
+	mode, err = effectivePlanSyncMode(model.SyncModeAuto, "~/Documents/KnowLedge")
 	if err != nil {
 		t.Fatal(err)
 	}

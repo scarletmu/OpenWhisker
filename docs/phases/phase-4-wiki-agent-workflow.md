@@ -55,7 +55,7 @@ Phase 4 代码闭环已经进入真实环境验证。当前已完成真实 Matri
 真实环境验证顺序保持保守：
 
 1. **真实 Matrix + test vault**：先运行 `matrix daemon --vault testdata/vault --organizer=deterministic`，验证 IM 收发、event 去重、outbox 投递、`/organize last`、`/diff`、`/approve` 和 `since` token 持久化，不污染真实 vault。
-2. **真实 vault + deterministic organizer**：再切到 `/Users/wang/Documents/KnowLedge`，验证 `Raw/Inbox`、`Raw/Processed`、`Knowledge/Drafts`、approval apply 和 Headless Sync 行为，保持输出稳定可控。真实 vault 验证应使用独立本地 SQLite，例如 `OPENWHISKER_DEBUG_DB=data/openwhisker-real.db`，避免和 test vault 的 job / plan / operation log 混在一起。
+2. **真实 vault + deterministic organizer**：再切到 `~/Documents/KnowLedge`，验证 `Raw/Inbox`、`Raw/Processed`、`Knowledge/Drafts`、approval apply 和 Headless Sync 行为，保持输出稳定可控。真实 vault 验证应使用独立本地 SQLite，例如 `OPENWHISKER_DEBUG_DB=data/openwhisker-real.db`，避免和 test vault 的 job / plan / operation log 混在一起。
 3. **真实 vault + OpenAI-compatible LLM**：diff/reject 已验证。2026-05-19 完成 approve/apply 闭环（CLI 路径，DeepSeek `deepseek-v4-flash`，`--sync=off`，独立 `data/openwhisker-real-llm-approve.db`），覆盖 `direct_fs_executor` 真实写入、`move_note` Raw/Processed processing note、`vault_operation_logs` 两条 `applied`、`move_note.before_hash` 命中 ingest 时记录的 raw hash。这次验证暴露 Raw Organizer 仍在用 `response_format: json_schema`，与 DeepSeek 不兼容；按 intent classifier 已有的迁移路径切到 `json_object` + 客户端 `validateRawOrganizerOutput` 硬校验，并补单次空 content 重试。中风险 plan 仍必须走 diff、approval、hash guard 和 `VaultExecutor`，不直接写正式 Knowledge note。
 
 本地 ignored debug 脚本可用于这三步验证：
@@ -64,7 +64,7 @@ Phase 4 代码闭环已经进入真实环境验证。当前已完成真实 Matri
 scripts/local/matrix-debug.sh status
 scripts/local/matrix-debug.sh daemon
 
-OPENWHISKER_DEBUG_VAULT=/Users/wang/Documents/KnowLedge \
+OPENWHISKER_DEBUG_VAULT=~/Documents/KnowLedge \
 OPENWHISKER_DEBUG_DB=data/openwhisker-real.db \
 scripts/local/matrix-debug.sh daemon
 ```
@@ -78,13 +78,13 @@ scripts/local/matrix-debug.sh daemon
 ```sh
 go run ./cmd/openwhisker organize preview-context \
   --db data/openwhisker-real.db \
-  --vault /Users/wang/Documents/KnowLedge \
+  --vault ~/Documents/KnowLedge \
   --vault-profile knowledge-vault
 ```
 
 该命令只读本地 SQLite 和 vault，不调用 LLM、不生成 plan、不写 vault。
 
-Phase 4 默认不把完整 vault 规则全文发送给外部 LLM。OpenWhisker 只固定执行安全契约：source trace、plan-before-write、risk、approval、path safety 和 deterministic executor。具体 vault 的 raw inbox、processed raw、草稿区、tag 清单等属于 `VaultProfile`，并通过任务 `VaultSkill` 进入 LLM 上下文，不能硬编码成所有 vault 的通用 schema。当前 `knowledge-vault` profile 只是 `/Users/wang/Documents/KnowLedge` 的本地范式；默认 `generic` profile 保持更少假设。其他 vault 可以通过 `OPENWHISKER_RAW_INBOX_DIR`、`OPENWHISKER_RAW_PROCESSED_DIR`、`OPENWHISKER_KNOWLEDGE_DIR`、`OPENWHISKER_KNOWLEDGE_DRAFT_DIR` 和 `OPENWHISKER_REQUIRED_DRAFT_TAGS` 覆盖本地约定。
+Phase 4 默认不把完整 vault 规则全文发送给外部 LLM。OpenWhisker 只固定执行安全契约：source trace、plan-before-write、risk、approval、path safety 和 deterministic executor。具体 vault 的 raw inbox、processed raw、草稿区、tag 清单等属于 `VaultProfile`，并通过任务 `VaultSkill` 进入 LLM 上下文，不能硬编码成所有 vault 的通用 schema。当前 `knowledge-vault` profile 只是 `~/Documents/KnowLedge` 的本地范式；默认 `generic` profile 保持更少假设。其他 vault 可以通过 `OPENWHISKER_RAW_INBOX_DIR`、`OPENWHISKER_RAW_PROCESSED_DIR`、`OPENWHISKER_KNOWLEDGE_DIR`、`OPENWHISKER_KNOWLEDGE_DRAFT_DIR` 和 `OPENWHISKER_REQUIRED_DRAFT_TAGS` 覆盖本地约定。
 
 真实 vault + LLM 的规划链路已通。Knowledge Expander 与 high-risk proposal policy 已分别在 4C.2 / 4C.1 落地；剩余的真实 vault apply 复核为可选 follow-up，明细见 [`docs/progress.md`](../progress.md) 的"验证队列"。
 
