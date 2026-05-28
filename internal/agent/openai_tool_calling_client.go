@@ -19,12 +19,22 @@ import (
 // "system" / "user" / "assistant" / "tool". When the assistant emits a
 // tool_call, the next request must include a matching {Role: "tool",
 // ToolCallID: ..., Content: <stringified result>} message.
+//
+// ReasoningContent carries a thinking-mode model's chain-of-thought, returned
+// at the same level as Content. DeepSeek thinking mode (deepseek-v4 / v3.2+)
+// requires that the reasoning_content of an assistant turn which performed a
+// tool_call be passed back in all subsequent requests, or it returns 400; for
+// non-tool turns it is ignored if present. We therefore round-trip it verbatim
+// (the engine re-appends the whole assistant message), which is safe in
+// thinking mode. See https://api-docs.deepseek.com/guides/thinking_mode and
+// internal/agent/CLAUDE.md.
 type ChatMessage struct {
-	Role       string         `json:"role"`
-	Content    string         `json:"content,omitempty"`
-	Name       string         `json:"name,omitempty"`
-	ToolCallID string         `json:"tool_call_id,omitempty"`
-	ToolCalls  []ChatToolCall `json:"tool_calls,omitempty"`
+	Role             string         `json:"role"`
+	Content          string         `json:"content,omitempty"`
+	ReasoningContent string         `json:"reasoning_content,omitempty"`
+	Name             string         `json:"name,omitempty"`
+	ToolCallID       string         `json:"tool_call_id,omitempty"`
+	ToolCalls        []ChatToolCall `json:"tool_calls,omitempty"`
 }
 
 // ChatToolCall describes one function invocation requested by the model.

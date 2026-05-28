@@ -53,6 +53,85 @@ func toolCallResponse(tool, argsJSON string) ChatCompletionResponse {
 	}
 }
 
+// capturingClient records every request it receives, then returns scripted
+// responses in order. Used to assert what the engine actually sends back.
+type capturingClient struct {
+	steps    []scriptedStep
+	idx      int
+	requests []ChatCompletionRequest
+}
+
+func (c *capturingClient) CreateChatCompletion(_ context.Context, req ChatCompletionRequest) (ChatCompletionResponse, error) {
+	c.requests = append(c.requests, req)
+	if c.idx >= len(c.steps) {
+		return ChatCompletionResponse{}, errors.New("capturing client exhausted")
+	}
+	step := c.steps[c.idx]
+	c.idx++
+	return step.resp, step.err
+}
+
+// toolCallResponseWithReasoning is toolCallResponse plus a thinking-mode
+// reasoning_content on the assistant turn.
+func toolCallResponseWithReasoning(tool, argsJSON, reasoning string) ChatCompletionResponse {
+	resp := toolCallResponse(tool, argsJSON)
+	resp.Choices[0].Message.ReasoningContent = reasoning
+	return resp
+}
+
+// DeepSeek thinking mode requires the reasoning_content of a tool-calling
+// assistant turn to be passed back in all subsequent requests, or the API
+// returns 400. The engine re-appends the whole assistant message, so the field
+// must survive into the next request body. See ChatMessage docs +
+// internal/agent/CLAUDE.md.
+func TestEngine_RoundTripsReasoningContentOnToolCallTurns(t *testing.T) {
+	root := t.TempDir()
+	writeVaultFile(t, root, "Knowledge/a.md", "# A\nThe answer is 42.")
+
+	const reasoning = "The user asks for the answer; I should read Knowledge/a.md first."
+	client := &capturingClient{steps: []scriptedStep{
+		{resp: toolCallResponseWithReasoning("read_vault_note", `{"path":"Knowledge/a.md"}`, reasoning)},
+		{resp: toolCallResponse(SubmitResultToolName, `{"title":"Done","summary":"Read note A.","payload":{"answer":42}}`)},
+	}}
+
+	runner := AgentRunner{
+		VaultRoot:  root,
+		ChatClient: client,
+		Engine:     ToolCallingEngine{},
+	}
+	if _, err := runner.Run(context.Background(), AgentRunRequest{
+		Skill:       testSkill([]string{"Knowledge/"}, []string{"read_vault_note"}),
+		Query:       "What is the answer?",
+		TriggerKind: model.AgentTriggerKindAdhocCLI,
+		Now:         time.Now(),
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(client.requests) < 2 {
+		t.Fatalf("expected at least 2 requests, got %d", len(client.requests))
+	}
+	second := client.requests[1]
+	var found bool
+	for _, m := range second.Messages {
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			found = true
+			if m.ReasoningContent != reasoning {
+				t.Errorf("tool-call assistant reasoning_content = %q, want %q", m.ReasoningContent, reasoning)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("second request did not replay the tool-call assistant message")
+	}
+	body, err := json.Marshal(second)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	if !strings.Contains(string(body), `"reasoning_content"`) {
+		t.Error("serialized request body missing reasoning_content field")
+	}
+}
+
 func writeVaultFile(t *testing.T, root, rel, content string) {
 	t.Helper()
 	abs := filepath.Join(root, filepath.FromSlash(rel))

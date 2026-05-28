@@ -1,12 +1,12 @@
 # OpenWhisker 当前进度与交接说明
 
-更新时间：2026-05-27
+更新时间：2026-05-28
 
 本文用于在不同机器之间切换开发时快速恢复上下文。长期架构以 `docs/architecture/` 和 `docs/phases/` 为准；本文只记录**当前实施进度、验证状态和下一步优先级**。各模块的设计 / 行为细节不在此重复，按"关键文档"指针进入对应 schema / contract。
 
 ## 当前阶段
 
-主线已推进到 **Phase 8 Memory Recall Service v1 已落地（待 commit）**（2026-05-27）；Phase 7 已合并 main（commit `2558928`）。下一步是单 PR + 单 commit 上 main，再排真实 vault 复跑反馈。
+主线已推进到 **Phase 8 Memory Recall Service v1 已落地 main**（2026-05-27，commit `858698b`）；Phase 7 已合并 main（commit `2558928`）。两者代码层已收敛、推送（`origin/main` == `HEAD`），`go test ./...` 全包绿。下一步只剩真实 vault 复跑反馈（验证队列，不挂顶部 priority）。
 
 - **Phase 8** Memory Recall Service v1：按 `docs/phases/phase-8-memory-recall.md` 决议（含决议 #8 复用既有 `internal/vault/linkindex/`）端到端实现。代码层包含 `internal/memory/`（Service / Recall 三 pass / LinkGraph 接口 + linkindex 适配器 / FS text searcher / frontmatter tag 解析）、三张派生 cache 表（`memory_tag_index` / `memory_known_tags`（Phase 7 已有，沿用）/ `memory_recalls` 轨迹）、`executor.ApplyObserver` hook（仅在 `rewrite_note` 后触发，刷 tag_index + known_tags）、Phase 6 工具集新增 `recall_memory`（query / tags / tag_mode / scope_dirs / since / expand_related / limit；默认 limit=10，自动排除 `Archive/`）、把 Phase 7 `internal/tagvocab/` 迁入 `internal/memory/`、`openwhisker memory reindex` CLI（clear 然后 RescanAll）、daemon 启动时构建 memory.Service + 注入 enrich 的 `WithApplyObserver`。Three-pass Recall 评分：`tag_match=1.0` / `text_match=0.6` / `related_link=0.4`，related 经一跳衰减 `*0.7`，重叠取最高分。降级路径覆盖 `tag_index_not_ready` / `link_graph_not_ready` 两种。`go test ./...` 全包绿（含 7 个 service_test + 8 个 recall_test，注入 fake `LinkGraph` / `TextSearcher` 跑 query-only / tags-only / TagMode any vs all / ExpandRelated 双向 / ScopeDirs / Archive 默认排除 / linkindex 未就绪 degraded 等场景）。
 - **Phase 7** Inbox Enrichment v1 已落地 main（2026-05-27，commit `2558928`）。代码层包含 `internal/enrich/`（enrich 编排 + worker + scan + queue DAO）、`internal/tagvocab/`（派生自 vault frontmatter 的已知 tag 词表；Phase 8 v1 已迁入 `internal/memory/`）、`enrich_jobs` SQLite 表（状态机 pending / running / done / skipped_concurrent_edit / failed / attempts_exhausted）、policy 三 guard（path / field / body）扩展、`JobTypeEnrichRaw` + `model.frontmatter` 常量、IngestRaw 末尾入队 hook、daemon scan tick（5 分钟周期 + mtime 10 分钟静默期 + attempts 5 次熔断）、enrich worker goroutine 串行消费、内置 enrich skill prompt、CLI `openwhisker enrich <rawJobID>`（手动重跑，重置 attempts，绕过静默期）、Matrix `/no-enrich`（一次性开关）。enrich 复用 Phase 6 `AgentRunner` 与 5 + 1 read-only 工具，独立 budget（`max_tool_calls=8 / wall_clock=20s` 硬编码）。enrich 写回走主线 `VaultPlan → Policy → Executor`，唯一允许的 op 是 `rewrite_note` 且 target_path 严格限定为本次 enrich 对应的 inbox 文件；frontmatter 仅允许追加 `topic/*` / `skill/*`（必须命中已知词表）/ `status/needs-review` / `raw/*`，禁止删除已有项；body sha256 由 body_guard 钉死，Raw Text 永不被改。失败 / 超时 / policy reject 一律静默丢弃 + debug outbox，不进 approval 队列。testdata 烟测全绿；真实 vault demo 放在验证队列（不挂顶部 priority）。
@@ -42,7 +42,7 @@
 | Phase 7 | tagvocab / enrich / policy 三 guard / enrich_jobs DAO / IngestRaw hook 单元测试与 testdata 烟测 | `go test ./...`, 2026-05-27 | 已通 |
 | Phase 7 | 真实 vault Demo（明显归属 / needs-review / new_tag_candidate 三类样本各若干条） | 未做 | 验证队列，不挂顶部 priority |
 | Phase 8 | memory service / Recall 三 pass / linkindex 适配器 / executor ApplyObserver / `recall_memory` 工具 / tagvocab 迁入 / `memory reindex` CLI 单元测试 | `go test ./...`, 2026-05-27 | 已通 |
-| Phase 8 | 真实 vault Recall 召回质量人工检验（tag-only / query+tags / related 扩散三类场景） | 未做 | 验证队列，不挂顶部 priority |
+| Phase 8 | 真实 vault Recall 召回质量人工检验（tag-only / query+tags / related 扩散三类场景） | `memory reindex` 真实 `~/Documents/KnowLedge`：57 tag（24 skill/* + 33 topic/*）/ 132 note / 268 映射，<1s 无报错；直接驱动 `Recall()`（绕过 LLM）跑 5 场景全部非降级，tag_match（TagMode any/all 正确）与 related 一跳扩散（0.4×0.7=0.28 衰减正确）召回质量好。2026-05-28 | 已通（含一处观察） |
 
 `GOCACHE=/private/tmp/openwhisker-go-cache go test ./...` 2026-05-23 全包绿。
 
@@ -81,13 +81,13 @@ testdata 已通的能力默认视为验证充分；真实 vault apply 只是 nic
 
 ## 下一步优先级
 
-1. **Phase 8 v1 真实 vault 复跑反馈**：单 PR + 单 commit 上 main 后，触发 `openwhisker memory reindex` 在真实 `~/Documents/KnowLedge` 上跑一遍，再用 `recall_memory` 工具（tag-only / query+tags / related 扩散三类场景）人工评估召回质量；Phase 7 enrich 在新 memory service 接线下复跑一次确认 tag vocab 行为未回归。
+1. ~~**Phase 8 v1 真实 vault 复跑反馈**~~（2026-05-28 已完成）：`memory reindex` 真实 vault 57 tag / 132 note / 268 映射;直接驱动 `Recall()` 5 场景全非降级、召回质量好;Phase 7 enrich 真实 `ingest raw → enrich` 两条样本（Go+K8s、Redis 锁）端到端跑通、tag 全 in-vocab、related 无幻觉,**新 memory.Service 接线下无回归**。复跑顺带修了 thinking 模型多轮 `reasoning_content` 往返 400（见 CHANGELOG 2026-05-28）。遗留：enrich 对 optional `route_suggestion` 偶发字符串硬失败（重试即过,健壮性可改进,非阻塞）。
 2. 根据真实使用反馈扩展 rules-only 短句词表与 clarification 回复词表（基于真实未命中样本，避免盲扩）。
 3. Phase 4C 主干已收束，没有预排的 4C.3 / 4C.4；后续推进改为真实使用驱动。新增能力（多模态 bucket 输入、clarification 回复 `additional_payload_text` 抽取等）按"关键已知遗留"里的实际需求单独立项。
 4. Phase 5 下一步进入真实运行反馈：用 launchd 或 systemd 跑 `openwhisker daemon`，结合 `daemon status`、`scheduler status`、`scheduler runs` 和 `scheduler schedules list|enable|disable` 观察真实 RSSHub / RSS scheduled Skill 输出质量。RSSHub / Folo 仍只作为上游 feed 来源，不进入 Scheduler Core 概念，adapter 只返回信息快照，不提供外部写操作。
 5. Phase 6 follow-up（OPEN-1 后续，不阻塞合并）：
    - **scheduler trigger 工具上限收紧**：当 `AgentRunRequest.Query == ""` 时把 `max_tool_calls` 砍半（≤4）并写 trace，降低 scheduler 无 query 时 LLM 发散探索导致 `call_count_exceeded` partial 的概率；当前实测 partial 率约 10%。
    - **CLI usage 字符串补齐**：`cmd/openwhisker/main.go` 顶部 usage 漏列 `ask` / `agent runs` / `skill lint` 三个 Phase 6 命令，命令本身可用，只是 `--help` 不见。
-   - **LLM 多模型对齐**：`.env.local` 若仍指向 reasoner-style 模型（如 `deepseek-v4-flash` 要求把 `reasoning_content` 回传），需要给 `OpenAIClient` 加 reasoning-history 透传或在文档里强约束使用非 reasoner 模型；当前 OPEN-1 demo 显式用 `--llm-model deepseek-chat` 覆盖。
+   - ~~**LLM 多模型对齐**~~（2026-05-28 已修）：thinking 模型（`deepseek-v4-flash`）多轮工具调用要求回传 tool-call 轮的 `reasoning_content`。已给 `ChatMessage` 加 `ReasoningContent` 字段,引擎整条回传 assistant 消息时自动带回（thinking 模式下安全,非 thinking 模型零影响）。契约见 `internal/agent/AGENTS.md` 与官方文档,真实 `deepseek-v4-flash` 已复跑通过,不再需要 `--llm-model deepseek-chat` 覆盖。
 6. Phase 6 vault skill-creator：在 `~/Documents/KnowLedge/Agent/Skills/skill-creator/SKILL.md` 写 prompt（vault 内容；本仓库不动）；可通过 `openwhisker ask --skill skill-creator "..."` 触发新 Skill 创建流，输出 VaultPlan 走 medium-risk approval。
 7. Phase 7 真实 vault demo：覆盖明显归属命中 / `status/needs-review` 触发 / `new_tag_candidate` 触发三类样本各若干条，人工评估 tag 选择是否合理（不挂顶部 priority，按需触发）。

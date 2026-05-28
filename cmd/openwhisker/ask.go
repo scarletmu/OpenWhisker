@@ -13,6 +13,7 @@ import (
 
 	"github.com/scarletmu/openwhisker/internal/agentdispatch"
 	"github.com/scarletmu/openwhisker/internal/core"
+	"github.com/scarletmu/openwhisker/internal/memory"
 	"github.com/scarletmu/openwhisker/internal/model"
 	"github.com/scarletmu/openwhisker/internal/profile"
 	"github.com/scarletmu/openwhisker/internal/storage"
@@ -66,7 +67,27 @@ func runAsk(args []string, _ io.Reader, stdout, stderr io.Writer) error {
 		return err
 	}
 
-	dispatcher := agentdispatch.Dispatcher{Runner: runner, LinkIndex: idx, Store: store}
+	// Phase 8: wire the memory recall service so the recall_memory tool is
+	// reachable from the synchronous CLI. Unlike the daemon (async rescan),
+	// a one-shot ask must rescan synchronously before dispatch, otherwise the
+	// first recall_memory call returns degraded (tag_index_not_ready).
+	memCfg := memory.Config{
+		Store:      store,
+		VaultRoot:  *vaultRoot,
+		TextSearch: memory.NewFSTextSearcher(*vaultRoot, nil),
+	}
+	if idx != nil {
+		memCfg.LinkGraph = memory.LinkIndexAdapter{Index: idx}
+	}
+	memSvc, err := memory.NewService(memCfg)
+	if err != nil {
+		return fmt.Errorf("memory service: %w", err)
+	}
+	if err := memSvc.RescanAll(context.Background()); err != nil {
+		fmt.Fprintf(stderr, "memory rescan failed (recall_memory will be degraded): %v\n", err)
+	}
+
+	dispatcher := agentdispatch.Dispatcher{Runner: runner, LinkIndex: idx, Store: store, Memory: memSvc}
 	lookup := newRegistrySkillLookup(*vaultRoot, vaultProfile)
 	skill, err := lookup.Find(*skillID)
 	if err != nil {

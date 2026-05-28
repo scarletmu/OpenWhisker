@@ -1,5 +1,36 @@
 # Changelog
 
+## 2026-05-28 - Phase 8 验证：真实 vault 召回质量 + `ask` CLI 接线修复 + thinking 模型多轮修复
+
+Phase 8 落地后的真实 vault 复跑（原列在 2026-05-27 条目的"验证队列"）与一处接线修复。
+
+召回质量验证（免 LLM，直接驱动 `memory.Service.Recall`）：
+
+- `openwhisker memory reindex --vault ~/Documents/KnowLedge`：57 个 known tag（24 `skill/*` + 33 `topic/*`）/ 132 note / 268 条 tag→note 映射，<1s 无报错。
+- 直接构造 `memory.Service`（真实 linkindex + fsTextSearcher）跑 5 个场景全部**非降级**：tag-only `topic/database`（10 命中全 1.00）、AND 模式 `skill/kubernetes`+`topic/cloud-native`（每条同时命中两 tag，TagMode=all 语义正确）、query+tags `index`+`skill/mysql`（tag 命中占顶、text 命中排其后）、related 扩散 `topic/observability`（Pass 1 命中 1.00 后经 frontmatter `related:` 一跳扩散到 9 个邻居，衰减 `0.4×0.7=0.28` 正确）。
+- 观察（已接受，仅记录）：query-only（无 tag 锚点）时文本召回会把 `AGENTS.md` / 索引类文件排在实质笔记之前——主路径（tag）不受影响，纯文本是次要路径，暂不调整。
+
+接线修复：
+
+- `cmd/openwhisker/ask.go`：此前 `Dispatcher` 未注入 `Memory`，导致 `recall_memory` 经 `openwhisker ask` 一律返回 `memory_unavailable`，只有 daemon 路径可用。现在 `ask` 同步构造 `memory.Service`（复用已建的 CLI link index 作 LinkGraph）并在 dispatch 前同步 `RescanAll`（一次性 CLI 不能像 daemon 那样异步，否则首次 recall 会 `tag_index_not_ready` 降级），再注入 dispatcher。`go test ./...` 全包绿。
+
+Phase 7 enrich 真实 vault 复跑（确认新 `memory.Service` 接线下 tag vocab 未回归）：
+
+- 真实 vault `ingest raw → enrich`（Go+K8s、Redis 分布式锁两条样本），enrich 端到端跑通并写入：tag 全部命中已知 vocab（`skill/go` `skill/kubernetes` `topic/cloud-native` `topic/daemon-lifecycle` / `skill/redis` `topic/distributed-system` `topic/database`），related wikilink 路径真实存在、无幻觉，`openwhisker_enrich_*` metadata 正确盖戳，body 未动。**无回归。**
+
+thinking 模型多轮工具调用修复（`reasoning_content` 往返）：
+
+- 复跑时发现：配置模型已从 OPEN-1 的 `deepseek-chat`（非 thinking）改为 `deepseek-v4-flash`（thinking）。thinking 模型在多轮工具调用时,产生 `tool_calls` 的 assistant 轮的 `reasoning_content` 必须在后续请求回传,否则 DeepSeek 返回 400（`"The reasoning_content in the thinking mode must be passed back to the API."`）。契约已对照官方文档核实（https://api-docs.deepseek.com/guides/thinking_mode ）。
+- 根因：`internal/agent/openai_tool_calling_client.go` 的 `ChatMessage` 缺 `reasoning_content` 字段,解析响应时被静默丢弃,引擎 `messages = append(messages, assistant)` 回传的 assistant 消息缺该字段 → 第二轮 400。属于"把 provider 响应解析进强类型结构、丢掉未建模字段"的有损往返。
+- 修复：`ChatMessage` 新增 `ReasoningContent string \`json:"reasoning_content,omitempty"\``。引擎本就整条回传 assistant 消息,加字段后自动随之回传——引擎逻辑零改动,与官方 `messages.append(response.choices[0].message)` 一致。thinking 模式下"永远回传"安全（tool 轮要求、非 tool 轮被忽略）；非 thinking 模型不产该字段,`omitempty` 下零影响。`deepseek-reasoner`(R1) 规则相反（禁止回传）但不支持工具调用,多轮引擎不会与其往返。
+- 验证：新增 `TestEngine_RoundTripsReasoningContentOnToolCallTurns`（捕获式 client 断言第二轮请求体带回 tool-call 轮的 reasoning_content）;`go test ./...` 全包绿;真实 `deepseek-v4-flash` 复跑 enrich,400 消失,3/3 `done`/`applied`。
+- 契约文档落点：`internal/agent/AGENTS.md` 新增 "Provider protocol notes" 段（json_object + reasoning_content 往返 + 有损往返戒律），并在 `ChatMessage` 字段处加注释链到官方文档。
+
+已知遗留（非阻塞）：
+
+- enrich 偶发 `agent payload decode: cannot unmarshal string into ... route_suggestion`：模型偶尔把 optional 的 `route_suggestion` 输出成字符串而非对象,导致整条 enrich 硬失败（重试即过,enrich 有 attempts 机制兜底）。健壮性可改进（对 optional 字段宽容解析），暂记不修。
+- enrich 要求输入笔记已有 frontmatter（契约内：只处理 `ingest raw` 产出的笔记）;手工丢进 inbox 的无 frontmatter 笔记会报 `enrich render: input has no frontmatter`。
+
 ## 2026-05-27 - Phase 8 落地：Memory Recall Service v1
 
 按 `docs/phases/phase-8-memory-recall.md` 决议端到端实现 Memory Recall Service v1，沿用 Phase 7 单 PR + 单 commit 模式。`go test ./...` 全包绿。
