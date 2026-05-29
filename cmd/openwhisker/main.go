@@ -1786,6 +1786,12 @@ func printUsage(stderr io.Writer) {
   openwhisker vault sync-status [--sync=off|on] [--ob-bin ob] [--db data/openwhisker.db] [--vault testdata/vault]
   openwhisker vault sync [--sync=off|on] [--ob-bin ob] [--db data/openwhisker.db] [--vault testdata/vault]
   openwhisker jobs show [--db data/openwhisker.db] <job_id>
+  openwhisker ask --skill <id> [--db data/openwhisker.db] [--vault testdata/vault] [--vault-profile generic|knowledge-vault] [--llm-model MODEL] [--json] [--debug] [--force-build-index] "<query>"
+  openwhisker skill lint [--strict] <path>
+  openwhisker agent runs list [--db data/openwhisker.db] [--limit 20] [--trigger-kind scheduler|adhoc_matrix|adhoc_cli]
+  openwhisker agent runs <run_id> [--db data/openwhisker.db] [--trace]
+  openwhisker enrich [--db data/openwhisker.db] [--vault testdata/vault] [--llm-model MODEL] (<rawJobID> | --path Raw/Inbox/...)
+  openwhisker memory reindex [--db data/openwhisker.db] [--vault testdata/vault]
   openwhisker scheduler tick [--db data/openwhisker.db] [--vault testdata/vault] [--vault-profile generic|knowledge-vault] [--engine static|openai-compatible] [--llm-model MODEL]
   openwhisker scheduler status [--db data/openwhisker.db] [--vault testdata/vault] [--vault-profile generic|knowledge-vault] [--limit 10]
   openwhisker scheduler runs [--db data/openwhisker.db] [--limit 20]

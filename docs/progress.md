@@ -81,13 +81,13 @@ testdata 已通的能力默认视为验证充分；真实 vault apply 只是 nic
 
 ## 下一步优先级
 
-1. ~~**Phase 8 v1 真实 vault 复跑反馈**~~（2026-05-28 已完成）：`memory reindex` 真实 vault 57 tag / 132 note / 268 映射;直接驱动 `Recall()` 5 场景全非降级、召回质量好;Phase 7 enrich 真实 `ingest raw → enrich` 两条样本（Go+K8s、Redis 锁）端到端跑通、tag 全 in-vocab、related 无幻觉,**新 memory.Service 接线下无回归**。复跑顺带修了 thinking 模型多轮 `reasoning_content` 往返 400（见 CHANGELOG 2026-05-28）。遗留：enrich 对 optional `route_suggestion` 偶发字符串硬失败（重试即过,健壮性可改进,非阻塞）。
+1. ~~**Phase 8 v1 真实 vault 复跑反馈**~~（2026-05-28 已完成）：`memory reindex` 真实 vault 57 tag / 132 note / 268 映射;直接驱动 `Recall()` 5 场景全非降级、召回质量好;Phase 7 enrich 真实 `ingest raw → enrich` 两条样本（Go+K8s、Redis 锁）端到端跑通、tag 全 in-vocab、related 无幻觉,**新 memory.Service 接线下无回归**。复跑顺带修了 thinking 模型多轮 `reasoning_content` 往返 400（见 CHANGELOG 2026-05-28）。~~遗留：enrich 对 optional `route_suggestion` 偶发字符串硬失败~~（2026-05-29 已修：`RouteSuggestion.UnmarshalJSON` 宽容裸字符串，存入 Reason、confidence 留 0 故不写 frontmatter；见 CHANGELOG 2026-05-29）。
 2. 根据真实使用反馈扩展 rules-only 短句词表与 clarification 回复词表（基于真实未命中样本，避免盲扩）。
 3. Phase 4C 主干已收束，没有预排的 4C.3 / 4C.4；后续推进改为真实使用驱动。新增能力（多模态 bucket 输入、clarification 回复 `additional_payload_text` 抽取等）按"关键已知遗留"里的实际需求单独立项。
 4. Phase 5 下一步进入真实运行反馈：用 launchd 或 systemd 跑 `openwhisker daemon`，结合 `daemon status`、`scheduler status`、`scheduler runs` 和 `scheduler schedules list|enable|disable` 观察真实 RSSHub / RSS scheduled Skill 输出质量。RSSHub / Folo 仍只作为上游 feed 来源，不进入 Scheduler Core 概念，adapter 只返回信息快照，不提供外部写操作。
 5. Phase 6 follow-up（OPEN-1 后续，不阻塞合并）：
-   - **scheduler trigger 工具上限收紧**：当 `AgentRunRequest.Query == ""` 时把 `max_tool_calls` 砍半（≤4）并写 trace，降低 scheduler 无 query 时 LLM 发散探索导致 `call_count_exceeded` partial 的概率；当前实测 partial 率约 10%。
-   - **CLI usage 字符串补齐**：`cmd/openwhisker/main.go` 顶部 usage 漏列 `ask` / `agent runs` / `skill lint` 三个 Phase 6 命令，命令本身可用，只是 `--help` 不见。
+   - ~~**scheduler trigger 工具上限收紧**~~（2026-05-29 已修）：`agent_runner.tightenSchedulerBudget` 在 `TriggerKind == scheduler` 且 `Query == ""` 时把 `max_tool_calls` 砍半（floor 1 / cap 4），并把调整记入 `AgentTrace.budget_note`（落 `agent_runs.tool_trace_json`）。见 CHANGELOG 2026-05-29。
+   - ~~**CLI usage 字符串补齐**~~（2026-05-29 已修）：`printUsage` 补上 `ask` / `skill lint` / `agent runs list` / `agent runs <run_id>` / `enrich` / `memory reindex`，`--help` 现与实际命令面一致。
    - ~~**LLM 多模型对齐**~~（2026-05-28 已修）：thinking 模型（`deepseek-v4-flash`）多轮工具调用要求回传 tool-call 轮的 `reasoning_content`。已给 `ChatMessage` 加 `ReasoningContent` 字段,引擎整条回传 assistant 消息时自动带回（thinking 模式下安全,非 thinking 模型零影响）。契约见 `internal/agent/AGENTS.md` 与官方文档,真实 `deepseek-v4-flash` 已复跑通过,不再需要 `--llm-model deepseek-chat` 覆盖。
 6. Phase 6 vault skill-creator：在 `~/Documents/KnowLedge/Agent/Skills/skill-creator/SKILL.md` 写 prompt（vault 内容；本仓库不动）；可通过 `openwhisker ask --skill skill-creator "..."` 触发新 Skill 创建流，输出 VaultPlan 走 medium-risk approval。
 7. Phase 7 真实 vault demo：覆盖明显归属命中 / `status/needs-review` 触发 / `new_tag_candidate` 触发三类样本各若干条，人工评估 tag 选择是否合理（不挂顶部 priority，按需触发）。

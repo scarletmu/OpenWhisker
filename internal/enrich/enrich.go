@@ -1,6 +1,7 @@
 package enrich
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -81,6 +82,37 @@ type RouteSuggestion struct {
 	TargetDir  string  `json:"target_dir"`
 	Confidence float64 `json:"confidence"`
 	Reason     string  `json:"reason"`
+}
+
+// UnmarshalJSON tolerates models that emit route_suggestion as a bare string
+// instead of the {target_dir, confidence, reason} object the schema asks for.
+// The prompt marks the field optional ("only fill when confident"), and some
+// providers (e.g. deepseek-chat) simplify it to a scalar. A string form carries
+// no confidence, so we keep it as Reason and leave Confidence at 0 — below
+// EnrichRouteSuggestionMinConfidence — so it is never written to frontmatter.
+// This stops a stray string from hard-failing the entire EnrichResult decode
+// and silently dropping the tags/related the run did produce.
+func (r *RouteSuggestion) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return nil
+	}
+	if trimmed[0] == '"' {
+		var s string
+		if err := json.Unmarshal(trimmed, &s); err != nil {
+			return err
+		}
+		r.Reason = strings.TrimSpace(s)
+		return nil
+	}
+	// Object form: decode via an alias type so we don't recurse into this method.
+	type routeAlias RouteSuggestion
+	var a routeAlias
+	if err := json.Unmarshal(trimmed, &a); err != nil {
+		return err
+	}
+	*r = RouteSuggestion(a)
+	return nil
 }
 
 // NewTagCand carries a tag the agent thought should exist but did not find

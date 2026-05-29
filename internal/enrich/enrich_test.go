@@ -145,6 +145,20 @@ func newHarness(t *testing.T) *harness {
 	}
 }
 
+// newScanner builds a scanner whose clock is anchored to real wall time rather
+// than the harness's frozen logical clock (h.now). Fixture files are written by
+// t.TempDir with real OS mtimes, so a frozen past clock would put every fixture
+// "in the future" relative to the quiet-window cutoff and the scanner would skip
+// them all — a time bomb that went off once wall-clock time passed h.now. With a
+// real-time cutoff one hour ahead, fixtures written moments ago always satisfy
+// the Before(cutoff) check. WithQuietWindow(0) keeps the cutoff at the clock.
+func (h *harness) newScanner() *Scanner {
+	scanCutoffClock := time.Now().UTC().Add(time.Hour)
+	return NewScanner(h.queue, h.vault, policy.DefaultConventions()).
+		WithQuietWindow(0).
+		WithClock(func() time.Time { return scanCutoffClock })
+}
+
 func (h *harness) claimAndRun(t *testing.T) RunOutcome {
 	t.Helper()
 	job, ok, err := h.queue.Claim()
@@ -378,11 +392,49 @@ func TestEnrichAttemptsCeilingTransitions(t *testing.T) {
 	}
 }
 
+func TestEnrichResultToleratesStringRouteSuggestion(t *testing.T) {
+	// Some providers (e.g. deepseek-chat) emit route_suggestion as a bare
+	// string instead of the {target_dir, confidence, reason} object. That must
+	// not hard-fail the whole decode and silently drop the tags/related the run
+	// produced.
+	raw := []byte(`{"tags":["topic/concurrency"],"related":["[[X]]"],"route_suggestion":"Knowledge/Systems"}`)
+	var er EnrichResult
+	if err := json.Unmarshal(raw, &er); err != nil {
+		t.Fatalf("string route_suggestion should decode leniently, got: %v", err)
+	}
+	if len(er.Tags) != 1 || er.Tags[0] != "topic/concurrency" {
+		t.Errorf("tags lost: %+v", er.Tags)
+	}
+	if er.RouteSuggestion == nil {
+		t.Fatal("route_suggestion should be non-nil")
+	}
+	// A string carries no confidence, so it stays at 0 — below the persist
+	// threshold — and is never written to frontmatter.
+	if er.RouteSuggestion.Confidence != 0 {
+		t.Errorf("string form must carry zero confidence, got %v", er.RouteSuggestion.Confidence)
+	}
+	if er.RouteSuggestion.Reason != "Knowledge/Systems" {
+		t.Errorf("reason = %q, want the raw string", er.RouteSuggestion.Reason)
+	}
+}
+
+func TestEnrichResultStillDecodesObjectRouteSuggestion(t *testing.T) {
+	raw := []byte(`{"route_suggestion":{"target_dir":"Knowledge/Systems","confidence":0.9,"reason":"clearly systems"}}`)
+	var er EnrichResult
+	if err := json.Unmarshal(raw, &er); err != nil {
+		t.Fatalf("object route_suggestion: %v", err)
+	}
+	if er.RouteSuggestion == nil {
+		t.Fatal("route_suggestion should be non-nil")
+	}
+	if er.RouteSuggestion.TargetDir != "Knowledge/Systems" || er.RouteSuggestion.Confidence != 0.9 {
+		t.Errorf("object form decoded wrong: %+v", er.RouteSuggestion)
+	}
+}
+
 func TestEnrichScanEnqueuesEligibleFiles(t *testing.T) {
 	h := newHarness(t)
-	scanner := NewScanner(h.queue, h.vault, policy.DefaultConventions()).
-		WithQuietWindow(0).
-		WithClock(func() time.Time { return h.now })
+	scanner := h.newScanner()
 	if err := scanner.Tick(context.Background()); err != nil {
 		t.Fatalf("tick: %v", err)
 	}
@@ -409,9 +461,7 @@ func TestEnrichScanSkipsBucketAndEnriched(t *testing.T) {
 	if err := os.WriteFile(enrichedPath, []byte("---\nopenwhisker_enriched_at: 2026-05-27T00:00:00Z\n---\nbody\n"), 0o644); err != nil {
 		t.Fatalf("enriched: %v", err)
 	}
-	scanner := NewScanner(h.queue, h.vault, policy.DefaultConventions()).
-		WithQuietWindow(0).
-		WithClock(func() time.Time { return h.now })
+	scanner := h.newScanner()
 	if err := scanner.Tick(context.Background()); err != nil {
 		t.Fatalf("tick: %v", err)
 	}

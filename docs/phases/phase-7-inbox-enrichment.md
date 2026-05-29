@@ -196,7 +196,7 @@ agent 可用 `read_vault_note(raw_path)` 拿完整内容、用 `vault_text_searc
 
 - `tags`：1–4 个，必须全部命中 `known_topic_tags ∪ known_skill_tags`，否则 reject；
 - `related`：可选；零到若干 wikilink，指向具体 Knowledge 笔记，作为辅助线索（不作为主信号）；
-- `route_suggestion`：可选；只在 enrich 判断该 Raw 应归 Interview/Life/ 而非保留 Inbox 时填，confidence ≥ 0.7 才写入 frontmatter；
+- `route_suggestion`：可选；只在 enrich 判断该 Raw 应归 Interview/Life/ 而非保留 Inbox 时填，confidence ≥ 0.7 才写入 frontmatter。**宽容解析**（2026-05-29）：部分 provider 偶发把该 optional 字段输出成裸字符串而非对象，`RouteSuggestion.UnmarshalJSON` 对字符串形态退化处理——存入 `reason`、`confidence` 留 0（低于 0.7 阈值故不写 frontmatter），不再让一个 optional 字段的格式偏差硬失败整条 `EnrichResult`；
 - `new_tag_candidates`：可选；当 enrich 觉得"该有这个 tag 但词表里没有"时填，**不**进入 `tags` 字段；
 - `needs_review`：当 `tags` 找不到合适项 或 `new_tag_candidates` 非空 或 LLM 自己拿不准时填 `true`，policy 据此向 `tags` 追加 `status/needs-review`；
 - 全部字段允许为空，空对象表示"无可写出信号"，也是合法收口，policy 仍写入 `_enriched_at` / `_enrich_run_id` 留痕。

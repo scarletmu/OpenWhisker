@@ -454,6 +454,8 @@ allowed (新增):
 
 让 LLM 自主决定何时收尾。撞 call 数或 bytes 上限时进入 force finalize：禁止再发普通 tool_call（`submit_result` 仍允许），system message 追加 "you must call submit_result now"，LLM 收尾后结果标记 `status=partial`，trace 记录终止原因。
 
+**scheduler 无 query 时的预算收紧**（2026-05-29 follow-up）：scheduler tick 触发的 run `Query == ""`，模型无具体目标，OPEN-1 demo 实测约 10% 因发散探索撞 call 上限退化为 partial。`AgentRunner.tightenSchedulerBudget` 在 `TriggerKind == scheduler` 且 query 为空时把该 run 的 `max_tool_calls` 砍半（floor 1 / cap 4），仅作用于本次 `req` 副本，不改 registry 缓存的 Skill 声明值；ad-hoc Matrix/CLI 及带 query 的 scheduler run 保持声明预算。收紧动作记入 `AgentTrace.budget_note`（落 `agent_runs.tool_trace_json`，`agent runs` 可见）。
+
 撞 wall clock 时走 hard fail：AgentRunner 通过 `context.Deadline` 在工具执行和 LLM 调用两侧同时强制 cancel，run 结果标记 `status=failed`，输出通道（outbox / matrix reply / stdout）报错。Wall clock 检查发生在 (a) 每轮 LLM 调用前、(b) 每次工具执行 ctx 内、(c) HTTP client timeout 三处。
 
 **Run status 枚举**（全局口径）：
@@ -492,6 +494,7 @@ ALTER TABLE agent_runs ADD COLUMN trigger_kind TEXT NOT NULL DEFAULT 'scheduler'
 {
   "termination": "natural | call_count_exceeded | bytes_exceeded | wall_clock_exceeded | protocol_failed | error",
   "link_index_version": "monotonic generation counter (int64, incremented on every index mutation event)",
+  "budget_note": "optional; set when AgentRunner adjusted the declared budget, e.g. 'scheduler tick without query: max_tool_calls tightened 8→4'",
   "calls": [
     {
       "seq": 1,

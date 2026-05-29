@@ -58,6 +58,10 @@ type AgentTrace struct {
 	LinkIndexVersion int64                 `json:"link_index_version,omitempty"`
 	Calls            []AgentToolCallRecord `json:"calls,omitempty"`
 	LLMTotalTokens   int                   `json:"llm_total_tokens,omitempty"`
+	// BudgetNote records any run-time adjustment AgentRunner made to the
+	// Skill's declared budget (e.g. tightening max_tool_calls for a scheduler
+	// tick with no query). Empty when the declared budget was used as-is.
+	BudgetNote string `json:"budget_note,omitempty"`
 }
 
 // AgentToolCallRecord is one row of the tool call timeline.
@@ -119,6 +123,14 @@ func (r AgentRunner) Run(ctx context.Context, req AgentRunRequest) (AgentRunResu
 		r.MaxToolCallRetriesOnProtocolError = 2
 	}
 
+	// Scheduler ticks fire with no user query, so the model has no concrete
+	// target and historically spent the full tool-call budget on divergent
+	// exploration before force-finalize kicked in (~10% call_count_exceeded
+	// partials in the OPEN-1 demo). Halve the budget (floor 1, cap 4) for these
+	// runs. req is by value and Budget is a plain value type, so this only
+	// mutates the local copy, never the registry-cached Skill.
+	budgetNote := tightenSchedulerBudget(&req)
+
 	// Pre-fetch external info sources (Phase 5 behavior). Fail soft — surface
 	// the error in the trace but let the engine still attempt the run.
 	externalInfo := req.ExternalInfo
@@ -164,7 +176,32 @@ func (r AgentRunner) Run(ctx context.Context, req AgentRunRequest) (AgentRunResu
 	if result.Trace.LinkIndexVersion == 0 && req.LinkIndex != nil {
 		result.Trace.LinkIndexVersion = req.LinkIndex.Generation()
 	}
+	if budgetNote != "" {
+		result.Trace.BudgetNote = budgetNote
+	}
 	return result, nil
+}
+
+// tightenSchedulerBudget halves req.Skill.Budget.MaxToolCalls (floor 1, cap 4)
+// when the run is a scheduler tick with no user query. It mutates the caller's
+// req in place and returns a human-readable note for the trace, or "" when no
+// adjustment was made. Ad-hoc Matrix/CLI runs and scheduler runs that carry a
+// query keep their declared budget untouched.
+func tightenSchedulerBudget(req *AgentRunRequest) string {
+	if req.TriggerKind != model.AgentTriggerKindScheduler || strings.TrimSpace(req.Query) != "" {
+		return ""
+	}
+	full := req.Skill.Budget.MaxToolCalls
+	if full <= 1 {
+		return ""
+	}
+	// full >= 2 here, so full/2 >= 1 — no separate floor needed.
+	tightened := min(full/2, 4)
+	if tightened >= full {
+		return ""
+	}
+	req.Skill.Budget.MaxToolCalls = tightened
+	return fmt.Sprintf("scheduler tick without query: max_tool_calls tightened %d→%d", full, tightened)
 }
 
 // readExternalInfoForRun mirrors StaticSkillRunner.readExternalInfo so the

@@ -1,5 +1,31 @@
 # Changelog
 
+## 2026-05-29 - 长期使用阶段健壮性收尾：enrich 测试时间炸弹 + scheduler 无 query 预算收紧 + route_suggestion 宽容解析 + CLI usage 补齐
+
+里程碑后的三项健壮性/可维护性修复，均非阻塞主线。`go test ./...` 全包绿。
+
+enrich 扫描测试时间炸弹（test-only，生产 `scan.go` 逻辑确认正确）：
+
+- 根因：`internal/enrich/enrich_test.go` 的 harness 用硬编码冻结时钟 `h.now = 2026-05-27T12:00Z`，而 `t.TempDir` 写入的 fixture 带真实 OS mtime。scan 的 quiet-window cutoff = `now - quietWindow`，用冻结的过去时钟会让每个真实 mtime 的 fixture 都"晚于 cutoff"被跳过——一旦真实墙钟越过 `h.now` 该测试就永久变红。
+- 修复：新增 `harness.newScanner()`，scan 用例的时钟锚定到真实墙钟 +1h（`time.Now().UTC().Add(time.Hour)`），配合 `WithQuietWindow(0)` 让 cutoff 始终在未来，刚写入的 fixture 永远满足 `Before(cutoff)`。`TestEnrichScanEnqueuesEligibleFiles` / `TestEnrichScanSkipsBucketAndEnriched` 改用该 helper。生产代码未动。
+
+scheduler 无 query 时收紧 `max_tool_calls`（Phase 6 follow-up，降 `call_count_exceeded` partial 率）：
+
+- 背景：scheduler tick 触发的 run `Query == ""`，模型无具体目标，OPEN-1 demo 实测约 10% 因发散探索撞 call 上限退化为 partial。
+- 修复：`internal/agent/agent_runner.go` 新增 `tightenSchedulerBudget`，当 `TriggerKind == scheduler` 且 query 为空时把 `max_tool_calls` 砍半（floor 1，cap 4），仅改本地 `req` 副本（`Budget` 是值类型，registry 缓存的 Skill 不受影响）。ad-hoc Matrix/CLI 及带 query 的 scheduler run 保持声明预算不变。
+- 可观测：`AgentTrace` 新增 `budget_note`（omitempty），记录如 `scheduler tick without query: max_tool_calls tightened 8→4`，落入 `agent_runs.tool_trace_json`，`agent runs` 可见。
+- 验证：新增 `TestTightenSchedulerBudget` 表测覆盖 halve/cap/floor/带 query 不动/非 scheduler 不动等分支。
+
+route_suggestion 宽容解析（修上一条 2026-05-28「已知遗留」）：
+
+- 背景：`route_suggestion` 是 optional 的 `{target_dir, confidence, reason}` 对象，但 `deepseek-chat` 等偶发输出成裸字符串，导致整个 `EnrichResult` unmarshal 硬失败、连带丢掉本轮已产出的 tags/related。
+- 修复：`RouteSuggestion` 实现 `UnmarshalJSON`，遇字符串形态时存入 `Reason`、`Confidence` 留 0（低于 `EnrichRouteSuggestionMinConfidence=0.7`，故永不写入 frontmatter），对象形态行为不变。
+- 验证：新增 `TestEnrichResultToleratesStringRouteSuggestion` / `TestEnrichResultStillDecodesObjectRouteSuggestion`。
+
+CLI usage 补齐：
+
+- `cmd/openwhisker/main.go` 的 `printUsage` 此前漏列若干已可用命令；补上 `ask` / `skill lint` / `agent runs list` / `agent runs <run_id>` / `enrich` / `memory reindex`，`--help` 现与实际命令面一致。
+
 ## 2026-05-28 - Phase 8 验证：真实 vault 召回质量 + `ask` CLI 接线修复 + thinking 模型多轮修复
 
 Phase 8 落地后的真实 vault 复跑（原列在 2026-05-27 条目的"验证队列"）与一处接线修复。
