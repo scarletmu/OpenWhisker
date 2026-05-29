@@ -1092,14 +1092,19 @@ func (s *Store) ReplaceTagIndexForNote(notePath string, newTags []string, now ti
 		return err
 	}
 	ts := formatTime(now.UTC())
+	placeholders := make([]string, 0, len(newTags))
+	args := make([]any, 0, len(newTags)*3)
 	for _, tag := range newTags {
 		tag = strings.TrimSpace(tag)
 		if tag == "" {
 			continue
 		}
-		if _, err := tx.Exec(`
-INSERT OR REPLACE INTO memory_tag_index (tag, note_path, updated_at)
-VALUES (?, ?, ?)`, tag, notePath, ts); err != nil {
+		placeholders = append(placeholders, "(?, ?, ?)")
+		args = append(args, tag, notePath, ts)
+	}
+	if len(placeholders) > 0 {
+		if _, err := tx.Exec(`INSERT OR REPLACE INTO memory_tag_index (tag, note_path, updated_at) VALUES `+
+			strings.Join(placeholders, ", "), args...); err != nil {
 			_ = tx.Rollback()
 			return err
 		}
@@ -1118,26 +1123,39 @@ func (s *Store) ClearTagIndex() error {
 // Empty tags slice returns no rows (caller must validate at least one tag).
 func (s *Store) NotesForTags(tags []string) (map[string][]string, error) {
 	out := map[string][]string{}
+	placeholders := make([]string, 0, len(tags))
+	args := make([]any, 0, len(tags))
 	for _, tag := range tags {
 		tag = strings.TrimSpace(tag)
 		if tag == "" {
 			continue
 		}
-		rows, err := s.db.Query(`SELECT note_path FROM memory_tag_index WHERE tag = ? ORDER BY note_path ASC`, tag)
-		if err != nil {
+		// Preserve the original contract: every supplied tag gets a map key,
+		// even when it carries no notes (caller may rely on key presence).
+		if _, seen := out[tag]; !seen {
+			out[tag] = nil
+			placeholders = append(placeholders, "?")
+			args = append(args, tag)
+		}
+	}
+	if len(placeholders) == 0 {
+		return out, nil
+	}
+	rows, err := s.db.Query(`SELECT tag, note_path FROM memory_tag_index WHERE tag IN (`+
+		strings.Join(placeholders, ", ")+`) ORDER BY tag ASC, note_path ASC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var tag, p string
+		if err := rows.Scan(&tag, &p); err != nil {
 			return nil, err
 		}
-		var paths []string
-		for rows.Next() {
-			var p string
-			if err := rows.Scan(&p); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			paths = append(paths, p)
-		}
-		rows.Close()
-		out[tag] = paths
+		out[tag] = append(out[tag], p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

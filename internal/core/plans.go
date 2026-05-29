@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/scarletmu/openwhisker/internal/executor"
+	"github.com/scarletmu/openwhisker/internal/markdown"
 	"github.com/scarletmu/openwhisker/internal/model"
 	"github.com/scarletmu/openwhisker/internal/policy"
 	"github.com/scarletmu/openwhisker/internal/profile"
@@ -969,16 +970,11 @@ func (s PlanService) previewLatestRawContext(ctx context.Context) (RawOrganizerC
 // Knowledge note aggregating several raw sources still resolves its source
 // trace. The returned slice preserves declaration order and is deduplicated.
 func parseExpanderSourceTracePaths(content string) []string {
-	content = strings.TrimLeft(content, "\ufeff")
-	if !strings.HasPrefix(content, "---\n") {
+	block, _, found := markdown.SplitFrontmatter(content)
+	if !found {
 		return nil
 	}
-	end := strings.Index(content[len("---\n"):], "\n---")
-	if end < 0 {
-		return nil
-	}
-	frontmatter := content[len("---\n") : len("---\n")+end]
-	lines := strings.Split(frontmatter, "\n")
+	lines := strings.Split(block, "\n")
 	inOpenwhisker := false
 	openwhiskerIndent := -1
 	var (

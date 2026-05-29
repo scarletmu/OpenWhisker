@@ -135,6 +135,24 @@ func TestCheckerUsesProfileRequiredDraftTags(t *testing.T) {
 	}
 }
 
+func TestCheckerRequiredTagMustBeUnderTags(t *testing.T) {
+	// Regression guard for the key-scoped tag check introduced with the
+	// internal/markdown unification: a required draft tag that appears only
+	// under `related` (not `tags`) must NOT satisfy the requirement. The
+	// pre-unification check matched any "- value" line regardless of key, so a
+	// tag misplaced under related would have wrongly passed.
+	plan := mediumRiskRawOrganizerPlan(t)
+	content := strings.Replace(validKnowledgeDraft(), "  - status/needs-review\n", "", 1)
+	content = strings.Replace(content,
+		"related:\n  - \"[[Raw/Processed/job_test]]\"\n",
+		"related:\n  - \"[[Raw/Processed/job_test]]\"\n  - status/needs-review\n", 1)
+	plan.Operations[0].PayloadJSON = mustJSON(t, model.CreateNotePayload{Content: content})
+	err := NewCheckerWithConventions(KnowledgeVaultConventions()).CheckForApproval(plan)
+	if err == nil || !strings.Contains(err.Error(), "status/needs-review") {
+		t.Fatalf("CheckForApproval() error = %v, want required-tag error (tag under related must not count)", err)
+	}
+}
+
 func TestConventionsCarryProfileIdentity(t *testing.T) {
 	generic := DefaultConventions().Normalize()
 	if generic.ProfileID != "generic" {

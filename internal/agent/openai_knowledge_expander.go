@@ -60,21 +60,7 @@ func (o OpenAIKnowledgeExpander) ExpandKnowledge(ctx context.Context, req core.K
 }
 
 func (o OpenAIKnowledgeExpander) createWithRetry(ctx context.Context, req openAIResponseRequest) (string, error) {
-	out, err := o.Client.CreateResponse(ctx, req)
-	if err != nil {
-		return "", err
-	}
-	if strings.TrimSpace(out) != "" {
-		return out, nil
-	}
-	out, err = o.Client.CreateResponse(ctx, req)
-	if err != nil {
-		return "", fmt.Errorf("knowledge expander retry after empty content failed: %w", err)
-	}
-	if strings.TrimSpace(out) == "" {
-		return "", errors.New("knowledge expander returned empty content after one retry")
-	}
-	return out, nil
+	return createResponseWithRetry(ctx, o.Client, req, "knowledge expander")
 }
 
 func knowledgeExpanderInstructions() string {

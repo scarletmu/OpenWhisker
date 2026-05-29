@@ -33,6 +33,7 @@ docs/
     knowledge-draft-schema.md
     knowledge-expander-model-contract.md
     proposal-note-schema.md
+    frontmatter-parsing.md
     cubesandbox-runtime-sandbox-evaluation.md
   phases/
     phase-1-minimal-slice.md

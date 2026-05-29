@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/scarletmu/openwhisker/internal/markdown"
 )
 
 // ErrNotReady is returned by Outlinks / Backlinks when the index has not
@@ -531,62 +532,21 @@ func parseNoteLinks(absPath string) ([]ResolvedLink, error) {
 }
 
 // splitFrontmatter returns the YAML frontmatter block (without the --- fences)
-// and the body. If the file has no frontmatter, frontmatter is empty.
+// and the body. If the file has no frontmatter, frontmatter is empty. The
+// boundary rule lives in internal/markdown, the single source of truth.
 func splitFrontmatter(content string) (string, string) {
-	content = strings.ReplaceAll(content, "\r\n", "\n")
-	if !strings.HasPrefix(content, "---\n") {
-		return "", content
-	}
-	lines := strings.Split(content, "\n")
-	for i := 1; i < len(lines); i++ {
-		if strings.TrimSpace(lines[i]) == "---" {
-			return strings.Join(lines[1:i], "\n"), strings.Join(lines[i+1:], "\n")
-		}
-	}
-	return "", content
+	block, body, _ := markdown.SplitFrontmatter(content)
+	return block, body
 }
 
-// extractFrontmatterRelated scans frontmatter for the "related:" key and
-// returns its values (inline list or indented "- item" form). Strips
-// surrounding [[...]] and "*.md" to match wikilink-text format.
+// extractFrontmatterRelated returns the values under the frontmatter "related:"
+// key (inline or block list), with surrounding [[...]] and quotes stripped to
+// match wikilink-text format.
 func extractFrontmatterRelated(frontmatter string) []string {
-	if frontmatter == "" {
-		return nil
-	}
-	lines := strings.Split(frontmatter, "\n")
 	var out []string
-	for i := 0; i < len(lines); i++ {
-		line := strings.TrimRight(lines[i], " \t")
-		trim := strings.TrimSpace(line)
-		if trim == "" || strings.HasPrefix(trim, "#") {
-			continue
-		}
-		if !strings.HasPrefix(line, "related:") && !strings.HasPrefix(line, "related :") {
-			continue
-		}
-		_, raw, _ := strings.Cut(line, ":")
-		raw = strings.TrimSpace(raw)
-		if raw != "" {
-			for _, item := range splitInlineList(raw) {
-				if cleaned := cleanRelatedTarget(item); cleaned != "" {
-					out = append(out, cleaned)
-				}
-			}
-			continue
-		}
-		// Indented list block follows.
-		for j := i + 1; j < len(lines); j++ {
-			cont := strings.TrimRight(lines[j], " \t")
-			if strings.TrimSpace(cont) == "" {
-				continue
-			}
-			if !strings.HasPrefix(cont, " ") && !strings.HasPrefix(cont, "\t") {
-				break
-			}
-			item := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(cont), "-"))
-			if cleaned := cleanRelatedTarget(item); cleaned != "" {
-				out = append(out, cleaned)
-			}
+	for _, item := range markdown.Parse(frontmatter).List("related") {
+		if cleaned := cleanRelatedTarget(item); cleaned != "" {
+			out = append(out, cleaned)
 		}
 	}
 	return out
@@ -607,20 +567,6 @@ func cleanRelatedTarget(value string) string {
 	value = strings.TrimPrefix(value, "[[")
 	value = strings.TrimSuffix(value, "]]")
 	return strings.TrimSpace(value)
-}
-
-func splitInlineList(value string) []string {
-	value = strings.TrimSpace(value)
-	value = strings.TrimPrefix(value, "[")
-	value = strings.TrimSuffix(value, "]")
-	parts := strings.Split(value, ",")
-	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if p := strings.TrimSpace(part); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
 }
 
 // resolveTarget resolves a wikilink text to a vault-relative path. Strategy:

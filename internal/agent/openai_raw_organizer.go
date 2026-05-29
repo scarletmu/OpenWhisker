@@ -132,19 +132,27 @@ func (o OpenAIRawOrganizer) OrganizeRaw(ctx context.Context, req core.RawOrganiz
 }
 
 func (o OpenAIRawOrganizer) createWithRetry(ctx context.Context, req openAIResponseRequest) (string, error) {
-	out, err := o.Client.CreateResponse(ctx, req)
+	return createResponseWithRetry(ctx, o.Client, req, "raw organizer")
+}
+
+// createResponseWithRetry issues a single empty-content retry shared by all
+// OpenAI-compatible providers: an empty (whitespace-only) first response is
+// retried once, and any transport error is returned immediately. label names
+// the calling provider for error messages. See internal/agent/CLAUDE.md.
+func createResponseWithRetry(ctx context.Context, client OpenAICompatibleClient, req openAIResponseRequest, label string) (string, error) {
+	out, err := client.CreateResponse(ctx, req)
 	if err != nil {
 		return "", err
 	}
 	if strings.TrimSpace(out) != "" {
 		return out, nil
 	}
-	out, err = o.Client.CreateResponse(ctx, req)
+	out, err = client.CreateResponse(ctx, req)
 	if err != nil {
-		return "", fmt.Errorf("raw organizer retry after empty content failed: %w", err)
+		return "", fmt.Errorf("%s retry after empty content failed: %w", label, err)
 	}
 	if strings.TrimSpace(out) == "" {
-		return "", errors.New("raw organizer returned empty content after one retry")
+		return "", fmt.Errorf("%s returned empty content after one retry", label)
 	}
 	return out, nil
 }

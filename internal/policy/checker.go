@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/scarletmu/openwhisker/internal/markdown"
 	"github.com/scarletmu/openwhisker/internal/model"
 )
 
@@ -535,10 +536,11 @@ func validateKnowledgeDraftPayload(op model.VaultOperation, payload model.Create
 	if content == "" {
 		return fmt.Errorf("create_note payload content is required for %s", op.ID)
 	}
-	frontmatter, body, ok := markdownFrontmatter(content)
+	block, body, ok := markdownFrontmatter(content)
 	if !ok {
 		return fmt.Errorf("create_note payload for %s must start with YAML frontmatter", op.ID)
 	}
+	doc := markdown.Parse(block)
 	for _, key := range []string{
 		"title",
 		"tags",
@@ -548,11 +550,11 @@ func validateKnowledgeDraftPayload(op model.VaultOperation, payload model.Create
 		"raw_job_id",
 		"processed_path",
 	} {
-		if !frontmatterHasKey(frontmatter, key) {
+		if !doc.Has(key) {
 			return fmt.Errorf("create_note payload for %s frontmatter missing %s", op.ID, key)
 		}
 	}
-	processedPath := frontmatterValue(frontmatter, "processed_path")
+	processedPath := doc.Scalar("processed_path")
 	if err := validateRelativeVaultPath(processedPath); err != nil {
 		return fmt.Errorf("create_note payload for %s processed_path: %w", op.ID, err)
 	}
@@ -560,7 +562,7 @@ func validateKnowledgeDraftPayload(op model.VaultOperation, payload model.Create
 		return fmt.Errorf("create_note payload for %s processed_path %q is outside %s", op.ID, processedPath, conventions.RawProcessedDir)
 	}
 	for _, tag := range conventions.RequiredDraftTags {
-		if !frontmatterHasListValue(frontmatter, tag) {
+		if !doc.HasListValue("tags", tag) {
 			return fmt.Errorf("create_note payload for %s tags must include %s", op.ID, tag)
 		}
 	}
@@ -595,49 +597,12 @@ func pathReferencedInNote(note, path string) bool {
 	return strings.Contains(note, wikilink)
 }
 
+// markdownFrontmatter splits a note's frontmatter from its body. The boundary
+// rule lives in internal/markdown, the single source of truth; this keeps a
+// policy-local name for the (block, body, ok) shape both checker.go and
+// enrich.go consume.
 func markdownFrontmatter(content string) (string, string, bool) {
-	content = strings.TrimLeft(content, "\ufeff")
-	if !strings.HasPrefix(content, "---\n") {
-		return "", "", false
-	}
-	end := strings.Index(content[len("---\n"):], "\n---")
-	if end < 0 {
-		return "", "", false
-	}
-	frontmatterEnd := len("---\n") + end
-	bodyStart := frontmatterEnd + len("\n---")
-	return content[len("---\n"):frontmatterEnd], content[bodyStart:], true
-}
-
-func frontmatterHasKey(frontmatter, key string) bool {
-	prefix := key + ":"
-	for _, line := range strings.Split(frontmatter, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-func frontmatterValue(frontmatter, key string) string {
-	prefix := key + ":"
-	for _, line := range strings.Split(frontmatter, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, prefix) {
-			return strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, prefix)), `"'`)
-		}
-	}
-	return ""
-}
-
-func frontmatterHasListValue(frontmatter, value string) bool {
-	want := "- " + value
-	for _, line := range strings.Split(frontmatter, "\n") {
-		if strings.TrimSpace(line) == want {
-			return true
-		}
-	}
-	return false
+	return markdown.SplitFrontmatter(content)
 }
 
 func cleanRelativeDir(path string) string {

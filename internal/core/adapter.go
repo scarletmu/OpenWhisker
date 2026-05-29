@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/scarletmu/openwhisker/internal/markdown"
 	"github.com/scarletmu/openwhisker/internal/model"
 	"github.com/scarletmu/openwhisker/internal/profile"
 	"github.com/scarletmu/openwhisker/internal/storage"
@@ -730,39 +731,16 @@ type markdownDocumentSummary struct {
 	ReviewItems []string
 }
 
-func summarizeMarkdownDocument(markdown, fallbackPath string) markdownDocumentSummary {
-	frontmatter, body := splitFrontmatter(markdown)
+func summarizeMarkdownDocument(content, fallbackPath string) markdownDocumentSummary {
+	block, body, _ := markdown.SplitFrontmatter(content)
 	bodyLines := visibleMarkdownLines(body)
 	return markdownDocumentSummary{
 		Title:       firstMarkdownTitle(bodyLines, fallbackTitle(fallbackPath)),
-		Tags:        extractFrontmatterTags(frontmatter),
+		Tags:        markdown.Parse(block).List("tags"),
 		Source:      firstSourceLine(bodyLines),
 		BodyPreview: markdownPreview(bodyLines, 10),
 		ReviewItems: reviewItems(bodyLines),
 	}
-}
-
-func splitFrontmatter(markdown string) (map[string]string, string) {
-	lines := strings.Split(strings.ReplaceAll(markdown, "\r\n", "\n"), "\n")
-	frontmatter := map[string]string{}
-	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
-		return frontmatter, markdown
-	}
-	end := -1
-	for i := 1; i < len(lines); i++ {
-		if strings.TrimSpace(lines[i]) == "---" {
-			end = i
-			break
-		}
-		line := strings.TrimSpace(lines[i])
-		if key, value, ok := strings.Cut(line, ":"); ok {
-			frontmatter[strings.TrimSpace(key)] = strings.TrimSpace(value)
-		}
-	}
-	if end == -1 {
-		return frontmatter, markdown
-	}
-	return frontmatter, strings.Join(lines[end+1:], "\n")
 }
 
 func visibleMarkdownLines(markdown string) []string {
@@ -808,25 +786,6 @@ func fallbackTitle(path string) string {
 		name = name[i+1:]
 	}
 	return strings.TrimSuffix(name, ".md")
-}
-
-func extractFrontmatterTags(frontmatter map[string]string) []string {
-	raw := strings.TrimSpace(frontmatter["tags"])
-	if raw == "" {
-		return nil
-	}
-	raw = strings.Trim(raw, "[]")
-	parts := strings.FieldsFunc(raw, func(r rune) bool {
-		return r == ',' || r == ' ' || r == '\t'
-	})
-	var tags []string
-	for _, part := range parts {
-		tag := strings.Trim(strings.TrimSpace(part), `"'`)
-		if tag != "" {
-			tags = append(tags, tag)
-		}
-	}
-	return tags
 }
 
 func firstSourceLine(lines []string) string {

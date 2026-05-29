@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/scarletmu/openwhisker/internal/markdown"
 	"github.com/scarletmu/openwhisker/internal/profile"
 )
 
@@ -1009,16 +1010,19 @@ func parseScheduleMarkdown(content string, defaultDelivery []string) (ScheduledS
 	return schedule, nil
 }
 
+// splitFrontmatter is the scheduler's strict wrapper over the shared
+// internal/markdown boundary rule: SCHEDULE.md must carry frontmatter, so the
+// scheduler turns a missing block into an error instead of tolerating it. The
+// two distinct messages stay as authoring diagnostics; the boundary logic
+// itself lives in internal/markdown, the single source of truth.
 func splitFrontmatter(content string) (string, string, error) {
-	content = strings.ReplaceAll(content, "\r\n", "\n")
-	if !strings.HasPrefix(content, "---\n") {
-		return "", "", errors.New("frontmatter is required")
+	block, body, found := markdown.SplitFrontmatter(content)
+	if found {
+		return block, body, nil
 	}
-	lines := strings.Split(content, "\n")
-	for i := 1; i < len(lines); i++ {
-		if strings.TrimSpace(lines[i]) == "---" {
-			return strings.Join(lines[1:i], "\n"), strings.Join(lines[i+1:], "\n"), nil
-		}
+	normalized := strings.TrimPrefix(strings.ReplaceAll(content, "\r\n", "\n"), "\ufeff")
+	if !strings.HasPrefix(normalized, "---\n") {
+		return "", "", errors.New("frontmatter is required")
 	}
 	return "", "", errors.New("frontmatter closing marker is required")
 }

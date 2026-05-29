@@ -55,21 +55,7 @@ func (e OpenAISchedulerEngine) RunSkill(ctx context.Context, req scheduler.Skill
 }
 
 func (e OpenAISchedulerEngine) createWithRetry(ctx context.Context, req openAIResponseRequest) (string, error) {
-	out, err := e.Client.CreateResponse(ctx, req)
-	if err != nil {
-		return "", err
-	}
-	if strings.TrimSpace(out) != "" {
-		return out, nil
-	}
-	out, err = e.Client.CreateResponse(ctx, req)
-	if err != nil {
-		return "", fmt.Errorf("scheduler engine retry after empty content failed: %w", err)
-	}
-	if strings.TrimSpace(out) == "" {
-		return "", errors.New("scheduler engine returned empty content after one retry")
-	}
-	return out, nil
+	return createResponseWithRetry(ctx, e.Client, req, "scheduler engine")
 }
 
 func schedulerEngineInstructions() string {

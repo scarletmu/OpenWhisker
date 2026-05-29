@@ -247,3 +247,15 @@ func TestRenderAdapterDiffPrependsHighRiskWarning(t *testing.T) {
 		}
 	}
 }
+
+func TestSummarizeMarkdownDocumentExtractsBlockTags(t *testing.T) {
+	// Regression guard for the internal/markdown unification: the created-note
+	// preview previously read tags via a scalar-map split that returned nothing
+	// for block-style `tags:` (the only style real vault notes use), so the
+	// "标签" preview line was silently empty. It must now extract block tags.
+	content := "---\ntitle: \"X\"\ntags:\n  - topic/database\n  - skill/golang\n---\n# X\n\nbody\n"
+	doc := summarizeMarkdownDocument(content, "Knowledge/x.md")
+	if len(doc.Tags) != 2 || doc.Tags[0] != "topic/database" || doc.Tags[1] != "skill/golang" {
+		t.Fatalf("summarizeMarkdownDocument Tags = %v, want [topic/database skill/golang]", doc.Tags)
+	}
+}
