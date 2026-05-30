@@ -170,9 +170,6 @@ CREATE TABLE IF NOT EXISTS agent_runs (
 CREATE INDEX IF NOT EXISTS idx_agent_runs_schedule_status
 ON agent_runs(schedule_id, status, started_at);
 
-CREATE INDEX IF NOT EXISTS idx_agent_runs_trigger_kind
-ON agent_runs(trigger_kind, started_at);
-
 CREATE TABLE IF NOT EXISTS scheduler_overrides (
   schedule_id TEXT PRIMARY KEY,
   enabled_override INTEGER NOT NULL,
@@ -248,6 +245,18 @@ CREATE INDEX IF NOT EXISTS idx_memory_recalls_called_at ON memory_recalls(called
 		if err := s.addColumnIfMissing(column.table, column.name, column.def); err != nil {
 			return err
 		}
+	}
+	// Index on agent_runs.trigger_kind is created only after the column is
+	// guaranteed to exist. On an upgraded database the CREATE TABLE IF NOT
+	// EXISTS above is a no-op, so trigger_kind is supplied by the
+	// addColumnIfMissing loop, not the table definition — creating this index
+	// inline with the other DDL would reference a not-yet-added column and
+	// fail the whole migration.
+	if _, err := s.db.Exec(`
+CREATE INDEX IF NOT EXISTS idx_agent_runs_trigger_kind
+ON agent_runs(trigger_kind, started_at);
+`); err != nil {
+		return err
 	}
 	return nil
 }
