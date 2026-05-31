@@ -2,8 +2,6 @@ package executor
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -67,7 +65,7 @@ func (e DirectFS) Prepare(ctx context.Context, plan model.VaultPlan) (model.Vaul
 
 func (e DirectFS) Apply(ctx context.Context, plan model.VaultPlan) (model.VaultApplyResult, error) {
 	var result model.VaultApplyResult
-	if err := e.store.AcquireLocks(uniquePaths(plan.TargetPaths), plan.ID, time.Now().UTC()); err != nil {
+	if err := e.store.AcquireLocks(uniqueStrings(plan.TargetPaths), plan.ID, time.Now().UTC()); err != nil {
 		return result, err
 	}
 	defer e.store.ReleaseLocks(plan.ID)
@@ -232,7 +230,7 @@ func (e DirectFS) prepareCreate(op model.VaultOperation) (model.DiffEntry, model
 		Type:        op.Type,
 		TargetPath:  op.TargetPath,
 		BeforeHash:  "",
-		AfterHash:   sha256Hex([]byte(payload.Content)),
+		AfterHash:   model.ContentHash([]byte(payload.Content)),
 		Summary:     "create note",
 		Preview:     preview(payload.Content),
 	}, op, nil
@@ -254,14 +252,14 @@ func (e DirectFS) prepareAppend(op model.VaultOperation) (model.DiffEntry, model
 	if payload.Content == "" {
 		return model.DiffEntry{}, model.VaultOperation{}, fmt.Errorf("append_note payload content is required")
 	}
-	op.BeforeHash = sha256Hex(current)
+	op.BeforeHash = model.ContentHash(current)
 	next := append(append([]byte{}, current...), []byte(payload.Content)...)
 	return model.DiffEntry{
 		OperationID: op.ID,
 		Type:        op.Type,
 		TargetPath:  op.TargetPath,
 		BeforeHash:  op.BeforeHash,
-		AfterHash:   sha256Hex(next),
+		AfterHash:   model.ContentHash(next),
 		Summary:     "append note",
 		Preview:     preview(payload.Content),
 	}, op, nil
@@ -283,14 +281,14 @@ func (e DirectFS) prepareRewrite(op model.VaultOperation) (model.DiffEntry, mode
 	if payload.Content == "" {
 		return model.DiffEntry{}, model.VaultOperation{}, fmt.Errorf("rewrite_note payload content is required")
 	}
-	op.BeforeHash = sha256Hex(current)
+	op.BeforeHash = model.ContentHash(current)
 	next := []byte(payload.Content)
 	return model.DiffEntry{
 		OperationID: op.ID,
 		Type:        op.Type,
 		TargetPath:  op.TargetPath,
 		BeforeHash:  op.BeforeHash,
-		AfterHash:   sha256Hex(next),
+		AfterHash:   model.ContentHash(next),
 		Summary:     "rewrite note",
 		Preview:     preview(payload.Content),
 	}, op, nil
@@ -318,14 +316,14 @@ func (e DirectFS) prepareMove(op model.VaultOperation) (model.DiffEntry, model.V
 	} else if !os.IsNotExist(err) {
 		return model.DiffEntry{}, model.VaultOperation{}, err
 	}
-	op.BeforeHash = sha256Hex(current)
+	op.BeforeHash = model.ContentHash(current)
 	next := movedContent(current, payload.ProcessingNote)
 	return model.DiffEntry{
 		OperationID: op.ID,
 		Type:        op.Type,
 		TargetPath:  op.TargetPath,
 		BeforeHash:  op.BeforeHash,
-		AfterHash:   sha256Hex(next),
+		AfterHash:   model.ContentHash(next),
 		Summary:     "move note to " + payload.DestinationPath,
 		Preview:     preview(op.TargetPath + " -> " + payload.DestinationPath + "\n" + payload.ProcessingNote),
 	}, op, nil
@@ -351,7 +349,7 @@ func (e DirectFS) createNote(plan model.VaultPlan, op model.VaultOperation) (mod
 	if err := safeCreateAtomic(fullPath, []byte(payload.Content)); err != nil {
 		return model.AppliedOperation{}, err
 	}
-	afterHash := sha256Hex([]byte(payload.Content))
+	afterHash := model.ContentHash([]byte(payload.Content))
 	applied := model.AppliedOperation{
 		OperationID: op.ID,
 		TargetPath:  op.TargetPath,
@@ -397,7 +395,7 @@ func (e DirectFS) appendNote(plan model.VaultPlan, op model.VaultOperation) (mod
 	if err := safeWriteReplace(fullPath, next, guardInfo); err != nil {
 		return model.AppliedOperation{}, err
 	}
-	return e.recordApplied(plan, op, sha256Hex(next))
+	return e.recordApplied(plan, op, model.ContentHash(next))
 }
 
 func (e DirectFS) rewriteNote(plan model.VaultPlan, op model.VaultOperation) (model.AppliedOperation, error) {
@@ -417,7 +415,7 @@ func (e DirectFS) rewriteNote(plan model.VaultPlan, op model.VaultOperation) (mo
 	if err := safeWriteReplace(fullPath, next, guardInfo); err != nil {
 		return model.AppliedOperation{}, err
 	}
-	return e.recordApplied(plan, op, sha256Hex(next))
+	return e.recordApplied(plan, op, model.ContentHash(next))
 }
 
 // moveNote moves the source note to the destination atomically and then, if
@@ -462,7 +460,7 @@ func (e DirectFS) moveNote(plan model.VaultPlan, op model.VaultOperation) (model
 		}
 		finalContent = next
 	}
-	return e.recordApplied(plan, op, sha256Hex(finalContent))
+	return e.recordApplied(plan, op, model.ContentHash(finalContent))
 }
 
 // readGuardedFile opens fullPath with O_NOFOLLOW (rejecting symlink swaps at
@@ -474,7 +472,7 @@ func readGuardedFile(fullPath, targetPath, beforeHash string) ([]byte, os.FileIn
 	if err != nil {
 		return nil, nil, err
 	}
-	if got := sha256Hex(current); got != beforeHash {
+	if got := model.ContentHash(current); got != beforeHash {
 		return nil, nil, conflictError("hash conflict for %s: plan %s current %s", targetPath, beforeHash, got)
 	}
 	return current, info, nil
@@ -520,11 +518,6 @@ func (e DirectFS) recordApplied(plan model.VaultPlan, op model.VaultOperation, a
 	return applied, nil
 }
 
-func sha256Hex(content []byte) string {
-	sum := sha256.Sum256(content)
-	return hex.EncodeToString(sum[:])
-}
-
 func preview(content string) string {
 	content = strings.TrimSpace(content)
 	if len(content) <= 500 {
@@ -543,17 +536,4 @@ func movedContent(current []byte, processingNote string) []byte {
 	}
 	next = append(next, []byte(processingNote)...)
 	return next
-}
-
-func uniquePaths(paths []string) []string {
-	seen := make(map[string]bool, len(paths))
-	var out []string
-	for _, path := range paths {
-		if path == "" || seen[path] {
-			continue
-		}
-		seen[path] = true
-		out = append(out, path)
-	}
-	return out
 }

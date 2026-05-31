@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/scarletmu/openwhisker/internal/sanitize"
@@ -119,17 +120,31 @@ func (a RSSExternalInfoAdapter) ReadInfo(ctx context.Context, req ExternalInfoRe
 		client = newSafeRSSClient()
 	}
 	payload := rssPayload{}
-	for i, feedURL := range cfg.FeedURLs {
-		if i >= rssMaxFeeds {
-			payload.Truncated = true
-			break
+	n := len(cfg.FeedURLs)
+	if n > rssMaxFeeds {
+		n = rssMaxFeeds
+		payload.Truncated = true
+	}
+	// The feeds are independent network round-trips, so fetch them concurrently
+	// (wall clock = slowest feed, not the sum) and collect into per-index slots
+	// to keep the output order aligned with cfg.FeedURLs.
+	feeds := make([]rssFeedSnapshot, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			feeds[i], errs[i] = fetchRSSFeed(ctx, client, cfg.FeedURLs[i], cfg.ItemLimit)
+		}(i)
+	}
+	wg.Wait()
+	for i := 0; i < n; i++ {
+		if errs[i] != nil {
+			return ExternalInfoItem{}, fmt.Errorf("feed %d: %w", i+1, errs[i])
 		}
-		feed, err := fetchRSSFeed(ctx, client, feedURL, cfg.ItemLimit)
-		if err != nil {
-			return ExternalInfoItem{}, fmt.Errorf("feed %d: %w", i+1, err)
-		}
-		payload.ItemCount += len(feed.Items)
-		payload.Feeds = append(payload.Feeds, feed)
+		payload.ItemCount += len(feeds[i].Items)
+		payload.Feeds = append(payload.Feeds, feeds[i])
 	}
 	payload.FeedCount = len(payload.Feeds)
 	encoded, err := json.Marshal(payload)

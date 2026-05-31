@@ -76,7 +76,7 @@ func (e DirectFS) ApplyAsProposal(ctx context.Context, plan model.VaultPlan, con
 	if err := safeCreateAtomic(fullPath, []byte(content)); err != nil {
 		return model.AppliedOperation{}, err
 	}
-	afterHash := sha256Hex([]byte(content))
+	afterHash := model.ContentHash([]byte(content))
 	applied := model.AppliedOperation{
 		OperationID: plan.ID,
 		TargetPath:  targetPath,

@@ -1,8 +1,6 @@
 package scheduler
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/scarletmu/openwhisker/internal/markdown"
+	"github.com/scarletmu/openwhisker/internal/model"
 	"github.com/scarletmu/openwhisker/internal/profile"
 )
 
@@ -399,9 +398,8 @@ func loadLegacyScheduleSkills(
 			if body, err := os.ReadFile(skillAbs); err == nil {
 				schedule.Body = strings.TrimSpace(string(body))
 			}
-			hash := sha256.Sum256(data)
 			schedule.RegistryPath = rel
-			schedule.RegistryHash = hex.EncodeToString(hash[:])
+			schedule.RegistryHash = model.ContentHash(data)
 			schedule.SkillDir = skillDir
 			schedule.SkillPath = skillPath
 			schedule.HasSchedule = true
@@ -498,9 +496,8 @@ func loadAgentSkills(
 				return nil, fmt.Errorf("%s budget: %w", rel, err)
 			}
 
-			hash := sha256.Sum256(data)
 			schedule.RegistryPath = rel
-			schedule.RegistryHash = hex.EncodeToString(hash[:])
+			schedule.RegistryHash = model.ContentHash(data)
 			schedule.SkillDir = skillDir
 			schedule.SkillPath = rel
 

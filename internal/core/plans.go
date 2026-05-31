@@ -399,7 +399,7 @@ func (s PlanService) currentVaultFileHash(rawPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return sha256String(string(data)), nil
+	return model.ContentHash(data), nil
 }
 
 func (s PlanService) ExpandKnowledge(ctx context.Context, knowledgePath string) (OrganizeRawResult, error) {
@@ -1086,32 +1086,41 @@ func buildKnowledgeExpanderContext(ctx context.Context, vaultRoot, targetPath, c
 	if normalizeContextMode(contextMode) == ContextModeMinimal {
 		return context, nil
 	}
-	for _, relPath := range []string{
+	docs, err := appendVaultContextDocs(ctx, vaultRoot, []string{
 		"AGENTS.md",
 		"Meta/README.md",
 		"Meta/Tagging.md",
 		"Knowledge/AGENTS.md",
-	} {
+	}, context.Documents)
+	if err != nil {
+		return KnowledgeExpanderContext{}, err
+	}
+	context.Documents = docs
+	return context, nil
+}
+
+// appendVaultContextDocs reads each relPath under vaultRoot and appends it to
+// dst as a VaultContextDocument, skipping files that don't exist. It honors
+// ctx cancellation between reads.
+func appendVaultContextDocs(ctx context.Context, vaultRoot string, relPaths []string, dst []VaultContextDocument) ([]VaultContextDocument, error) {
+	for _, relPath := range relPaths {
 		if err := ctx.Err(); err != nil {
-			return KnowledgeExpanderContext{}, err
+			return dst, err
 		}
 		fullPath, err := executor.ResolveVaultPath(vaultRoot, relPath)
 		if err != nil {
-			return KnowledgeExpanderContext{}, err
+			return dst, err
 		}
 		content, err := os.ReadFile(fullPath)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			return KnowledgeExpanderContext{}, fmt.Errorf("read vault context %s: %w", relPath, err)
+			return dst, fmt.Errorf("read vault context %s: %w", relPath, err)
 		}
-		context.Documents = append(context.Documents, VaultContextDocument{
-			Path:    relPath,
-			Content: string(content),
-		})
+		dst = append(dst, VaultContextDocument{Path: relPath, Content: string(content)})
 	}
-	return context, nil
+	return dst, nil
 }
 
 func buildRawOrganizerContext(ctx context.Context, vaultRoot, rawPath, contextMode string, conventions policy.Conventions) (RawOrganizerContext, error) {
@@ -1139,32 +1148,17 @@ func buildRawOrganizerContext(ctx context.Context, vaultRoot, rawPath, contextMo
 	if normalizeContextMode(contextMode) == ContextModeMinimal {
 		return context, nil
 	}
-	for _, relPath := range []string{
+	docs, err := appendVaultContextDocs(ctx, vaultRoot, []string{
 		"AGENTS.md",
 		"Meta/README.md",
 		"Meta/Tagging.md",
 		"Raw/AGENTS.md",
 		"Knowledge/AGENTS.md",
-	} {
-		if err := ctx.Err(); err != nil {
-			return RawOrganizerContext{}, err
-		}
-		fullPath, err := executor.ResolveVaultPath(vaultRoot, relPath)
-		if err != nil {
-			return RawOrganizerContext{}, err
-		}
-		content, err := os.ReadFile(fullPath)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return RawOrganizerContext{}, fmt.Errorf("read vault context %s: %w", relPath, err)
-		}
-		context.Documents = append(context.Documents, VaultContextDocument{
-			Path:    relPath,
-			Content: string(content),
-		})
+	}, context.Documents)
+	if err != nil {
+		return RawOrganizerContext{}, err
 	}
+	context.Documents = docs
 	return context, nil
 }
 

@@ -9,10 +9,11 @@
 3. [项目决策](project-decisions.md)：跨阶段仍然有效的架构决策。
 4. [v1 设计回顾](architecture/openwhisker-v1-review.md)：Phase 1–4 完整设计弧线的收官回顾，动机、取舍与教训。
 5. [设计哲学](architecture/design-philosophy.md)：完整 VaultPlan / VaultExecutor 方向。
-6. Phase 文档：[1 最小切片](phases/phase-1-minimal-slice.md) · [2 审批与 Diff](phases/phase-2-approval-diff.md) · [3 Sync-Aware Approval Execution](phases/phase-3-headless-sync-executor.md) · [4 Wiki Agent Workflow](phases/phase-4-wiki-agent-workflow.md) · [4B.5 IM Intent Router](phases/phase-4-im-intent-router.md) · [5 Read-only Skill Scheduler](phases/phase-5-read-only-skill-scheduler.md) · [6 Scheduler Skill Creator](phases/phase-6-scheduler-skill-creator.md) · [7 Inbox Enrichment](phases/phase-7-inbox-enrichment.md)（草稿）。
-7. Schema / Contract：[Proposal Note](architecture/proposal-note-schema.md) · [Knowledge Draft](architecture/knowledge-draft-schema.md) · [Knowledge Expander 模型](architecture/knowledge-expander-model-contract.md) · [Intent Router 模型](architecture/intent-router-model-contract.md) · [IM Intent Router](architecture/im-intent-router.md) · [Capture Bucket](architecture/capture-bucket.md)。
-8. 适配与外部对接：[Matrix Private IM](adapters/matrix-private-im.md) · [Vault Profile Analyzer Skill](skills/vault-profile-analyzer/SKILL.md)。
-9. 部署：[部署指南](deployment/README.md)，OpenWhisker daemon 的构建、配置与原生服务运行。
+6. [工具驱动的捕获](architecture/tool-driven-capture.md)：让捕获/输入环节具备现状与记忆感知的设计稿（走法 A，未落代码）。
+7. Phase 文档：[1 最小切片](phases/phase-1-minimal-slice.md) · [2 审批与 Diff](phases/phase-2-approval-diff.md) · [3 Sync-Aware Approval Execution](phases/phase-3-headless-sync-executor.md) · [4 Wiki Agent Workflow](phases/phase-4-wiki-agent-workflow.md) · [4B.5 IM Intent Router](phases/phase-4-im-intent-router.md) · [5 Read-only Skill Scheduler](phases/phase-5-read-only-skill-scheduler.md) · [6 Scheduler Skill Creator](phases/phase-6-scheduler-skill-creator.md) · [7 Inbox Enrichment](phases/phase-7-inbox-enrichment.md) · [8 Memory Recall](phases/phase-8-memory-recall.md)。
+8. Schema / Contract：[Proposal Note](architecture/proposal-note-schema.md) · [Knowledge Draft](architecture/knowledge-draft-schema.md) · [Knowledge Expander 模型](architecture/knowledge-expander-model-contract.md) · [Intent Router 模型](architecture/intent-router-model-contract.md) · [IM Intent Router](architecture/im-intent-router.md) · [Capture Bucket](architecture/capture-bucket.md) · [Frontmatter 解析](architecture/frontmatter-parsing.md)。
+9. 适配与外部对接：[Matrix Private IM](adapters/matrix-private-im.md) · [Vault Profile Analyzer Skill](skills/vault-profile-analyzer/SKILL.md)。
+10. 部署：[部署指南](deployment/README.md)，OpenWhisker daemon 的构建、配置与原生服务运行。
 
 延后议题：[CubeSandbox 运行沙箱评估](architecture/cubesandbox-runtime-sandbox-evaluation.md) 仅在 sandbox 课题恢复时阅读，不在主线路径上。
 
@@ -27,6 +28,7 @@ docs/
     overview.md
     openwhisker-v1-review.md
     design-philosophy.md
+    tool-driven-capture.md
     im-intent-router.md
     capture-bucket.md
     intent-router-model-contract.md
@@ -45,6 +47,7 @@ docs/
     phase-5-read-only-skill-scheduler.md
     phase-6-scheduler-skill-creator.md
     phase-7-inbox-enrichment.md
+    phase-8-memory-recall.md
   adapters/
     matrix-private-im.md
   deployment/

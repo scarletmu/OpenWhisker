@@ -2,8 +2,6 @@ package core
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -273,7 +271,7 @@ func (s IngestService) AppendRawBucket(ctx context.Context, req AppendRawBucketR
 	if err != nil {
 		return model.CaptureBucket{}, IngestRawResult{}, err
 	}
-	if currentHash := sha256String(current); currentHash != bucket.RawHashAfterLastAppend {
+	if currentHash := model.ContentHash([]byte(current)); currentHash != bucket.RawHashAfterLastAppend {
 		bucket.Status = model.CaptureBucketStatusHashMismatch
 		bucket.UpdatedAt = now
 		closedAt := now
@@ -590,11 +588,6 @@ func truncateCaptureRunes(text string, max int) string {
 		return text
 	}
 	return string(runes[:max])
-}
-
-func sha256String(text string) string {
-	sum := sha256.Sum256([]byte(text))
-	return hex.EncodeToString(sum[:])
 }
 
 func markdownFence(text string) string {

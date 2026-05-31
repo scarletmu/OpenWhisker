@@ -130,7 +130,7 @@ func TestDirectFSAppendDetectsConcurrentMutation(t *testing.T) {
 			// Use the prepared hash (set below) — we cheat by setting it to
 			// the hash of the original content so the read passes, then
 			// mutate the file before the executor renames.
-			BeforeHash:  sha256Hex([]byte("initial\n")),
+			BeforeHash:  model.ContentHash([]byte("initial\n")),
 			PayloadJSON: string(payload),
 		}},
 		CreatedAt: now,

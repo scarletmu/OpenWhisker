@@ -440,22 +440,112 @@ func matrixHTML(body string) string {
 				out = append(out, "<ul>")
 				inList = true
 			}
-			out = append(out, "<li>"+html.EscapeString(strings.TrimSpace(strings.TrimPrefix(trimmed, "- ")))+"</li>")
+			out = append(out, "<li>"+renderInline(strings.TrimSpace(strings.TrimPrefix(trimmed, "- ")))+"</li>")
 			continue
 		}
 		closeList()
 		switch {
 		case strings.HasPrefix(trimmed, "### "):
-			out = append(out, "<strong>"+html.EscapeString(strings.TrimSpace(strings.TrimPrefix(trimmed, "### ")))+"</strong>")
+			out = append(out, "<strong>"+renderInline(strings.TrimSpace(strings.TrimPrefix(trimmed, "### ")))+"</strong>")
 		case strings.HasPrefix(trimmed, "## "):
-			out = append(out, "<strong>"+html.EscapeString(strings.TrimSpace(strings.TrimPrefix(trimmed, "## ")))+"</strong>")
+			out = append(out, "<strong>"+renderInline(strings.TrimSpace(strings.TrimPrefix(trimmed, "## ")))+"</strong>")
 		case strings.HasPrefix(trimmed, "# "):
-			out = append(out, "<strong>"+html.EscapeString(strings.TrimSpace(strings.TrimPrefix(trimmed, "# ")))+"</strong>")
+			out = append(out, "<strong>"+renderInline(strings.TrimSpace(strings.TrimPrefix(trimmed, "# ")))+"</strong>")
 		default:
-			out = append(out, html.EscapeString(trimmed))
+			out = append(out, renderInline(trimmed))
 		}
 	}
 	closeCode()
 	closeList()
 	return strings.Join(out, "<br>")
+}
+
+// renderInline converts the inline Markdown subset that scheduled Skill output
+// uses — **bold**, `code`, and [[wikilink]] / [[target|alias]] — into Matrix
+// custom HTML. All literal text is HTML-escaped. An unterminated marker is
+// treated as a literal character so malformed input degrades to plain text
+// rather than swallowing the rest of the line.
+func renderInline(s string) string {
+	runes := []rune(s)
+	var b strings.Builder
+	for i := 0; i < len(runes); {
+		// [[wikilink]] / [[target|alias]] / [[target#heading]]
+		if runes[i] == '[' && i+1 < len(runes) && runes[i+1] == '[' {
+			if end := indexSeq(runes, i+2, ']', ']'); end >= 0 {
+				b.WriteString(html.EscapeString(wikilinkDisplay(string(runes[i+2 : end]))))
+				i = end + 2
+				continue
+			}
+		}
+		// `inline code`
+		if runes[i] == '`' {
+			if end := indexRune(runes, i+1, '`'); end >= 0 {
+				b.WriteString("<code>")
+				b.WriteString(html.EscapeString(string(runes[i+1 : end])))
+				b.WriteString("</code>")
+				i = end + 1
+				continue
+			}
+		}
+		// **bold**
+		if runes[i] == '*' && i+1 < len(runes) && runes[i+1] == '*' {
+			if end := indexSeq(runes, i+2, '*', '*'); end >= 0 {
+				b.WriteString("<strong>")
+				b.WriteString(renderInline(string(runes[i+2 : end])))
+				b.WriteString("</strong>")
+				i = end + 2
+				continue
+			}
+		}
+		b.WriteString(html.EscapeString(string(runes[i])))
+		i++
+	}
+	return b.String()
+}
+
+// wikilinkDisplay returns the human-facing text for an Obsidian wikilink body:
+// the alias after "|" when present, otherwise the target with any "#heading"
+// anchor dropped. Matrix cannot resolve vault links, so the briefing renders
+// readable text instead of a dead hyperlink.
+func wikilinkDisplay(inner string) string {
+	inner = strings.TrimSpace(inner)
+	if pipe := strings.LastIndex(inner, "|"); pipe >= 0 {
+		if alias := strings.TrimSpace(inner[pipe+1:]); alias != "" {
+			return alias
+		}
+		inner = strings.TrimSpace(inner[:pipe])
+	}
+	if hash := strings.Index(inner, "#"); hash > 0 {
+		return strings.TrimSpace(inner[:hash])
+	}
+	return inner
+}
+
+// indexSeq returns the index of the first occurrence of the rune sequence seq
+// in runes at or after start, or -1. seq must be non-empty.
+func indexSeq(runes []rune, start int, seq ...rune) int {
+	for i := start; i+len(seq) <= len(runes); i++ {
+		match := true
+		for j, r := range seq {
+			if runes[i+j] != r {
+				match = false
+				break
+			}
+		}
+		if match {
+			return i
+		}
+	}
+	return -1
+}
+
+// indexRune returns the index of the first occurrence of r in runes at or after
+// start, or -1.
+func indexRune(runes []rune, start int, r rune) int {
+	for i := start; i < len(runes); i++ {
+		if runes[i] == r {
+			return i
+		}
+	}
+	return -1
 }

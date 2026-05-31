@@ -214,9 +214,7 @@ func buildKnowledgeRestructurePlan(req core.KnowledgeExpanderRequest, out knowle
 		err        error
 	)
 	switch out.Restructure.ProposalKind {
-	case model.ProposalKindRename:
-		op, err = buildKnowledgeRestructureRenameOp(req, out)
-	case model.ProposalKindSplit, model.ProposalKindMerge:
+	case model.ProposalKindRename, model.ProposalKindSplit, model.ProposalKindMerge:
 		// split / merge are represented as a rename of the target note plus
 		// affected_paths; first version models them as a single rename op
 		// so policy.ClassifyProposalKind can route them to proposal output.

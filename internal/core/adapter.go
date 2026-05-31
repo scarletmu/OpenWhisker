@@ -670,7 +670,7 @@ func renderRawMovePreview(operations []model.VaultOperation) string {
 		lines = append(lines,
 			"## 将移动的 Raw",
 			"",
-			fmt.Sprintf("%s", op.TargetPath),
+			op.TargetPath,
 			fmt.Sprintf("-> %s", payload.DestinationPath),
 		)
 		if note := summarizeProcessingNote(payload.ProcessingNote); note != "" {

@@ -700,11 +700,7 @@ func shouldIgnoreEvent(ev fsnotify.Event) bool {
 	if ev.Op == fsnotify.Chmod {
 		return true
 	}
-	base := filepath.Base(ev.Name)
-	if base == ".DS_Store" {
-		return true
-	}
-	return false
+	return filepath.Base(ev.Name) == ".DS_Store"
 }
 
 func normalizeRoots(roots []string) []string {

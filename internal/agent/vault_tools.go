@@ -6,8 +6,6 @@ package agent
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +18,7 @@ import (
 	"unicode"
 
 	"github.com/scarletmu/openwhisker/internal/memory"
+	"github.com/scarletmu/openwhisker/internal/model"
 	"github.com/scarletmu/openwhisker/internal/sanitize"
 	"github.com/scarletmu/openwhisker/internal/scheduler"
 	"github.com/scarletmu/openwhisker/internal/vault/linkindex"
@@ -630,13 +629,12 @@ func (e VaultToolExecutor) finalize(payload map[string]any) (ToolResult, error) 
 	if err != nil {
 		return ToolResult{}, newToolError("encode", err.Error())
 	}
-	sum := sha256.Sum256(content)
 	return ToolResult{
 		Content:      string(content),
 		Bytes:        len(content),
 		Truncated:    asBool(payload["truncated"]),
 		SafeSummary:  buildTraceSafeSummary(payload),
-		ResultSHA256: hex.EncodeToString(sum[:]),
+		ResultSHA256: model.ContentHash(content),
 	}, nil
 }
 

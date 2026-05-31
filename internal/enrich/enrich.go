@@ -3,8 +3,6 @@ package enrich
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -208,7 +206,7 @@ func (s *Service) RunOne(ctx context.Context, job storage.EnrichJob) RunOutcome 
 		_ = s.cfg.Store.UpdateJobStatus(wikiJob.ID, model.JobStatusFailed, "", err.Error())
 		return s.finish(job.RawPath, StateFailed, fmt.Errorf("read raw: %w", err), EnrichResult{}, "")
 	}
-	preHash := sha256Hex(beforeContent)
+	preHash := model.ContentHash([]byte(beforeContent))
 
 	// 3. Don't double-enrich. If the file already has openwhisker_enriched_at
 	// (eg. queued by both event and scan paths), treat as done.
@@ -257,7 +255,7 @@ func (s *Service) RunOne(ctx context.Context, job storage.EnrichJob) RunOutcome 
 		_ = s.cfg.Store.UpdateJobStatus(wikiJob.ID, model.JobStatusFailed, "", err.Error())
 		return s.finish(job.RawPath, StateFailed, fmt.Errorf("re-read raw: %w", err), er, agentResult.SkillID)
 	}
-	if sha256Hex(curContent) != preHash {
+	if model.ContentHash([]byte(curContent)) != preHash {
 		_ = s.cfg.Store.UpdateJobStatus(wikiJob.ID, model.JobStatusFailed, "", "concurrent edit")
 		return s.finish(job.RawPath, StateSkippedConcEdit, errors.New("hash mismatch: concurrent edit"), er, agentResult.SkillID)
 	}
@@ -539,11 +537,6 @@ func hasFrontmatterKey(content, key string) bool {
 		}
 	}
 	return false
-}
-
-func sha256Hex(s string) string {
-	sum := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(sum[:])
 }
 
 func sanitizeStrings(in []string) []string {

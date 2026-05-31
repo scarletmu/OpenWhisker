@@ -1191,7 +1191,7 @@ func runDaemon(args []string, stdout, stderr io.Writer) error {
 	})
 	matrixEnabled := daemonMatrixEnabled(mode, *homeserver, *roomID, *accessToken, *password, *userID)
 	if mode == "on" && !matrixEnabled {
-		return fmt.Errorf("Matrix configuration is incomplete")
+		return errors.New("incomplete Matrix configuration")
 	}
 	var matrixAdapter *matrix.Adapter
 	if matrixEnabled {
@@ -1918,6 +1918,20 @@ func splitCommaList(value string) []string {
 	return out
 }
 
+// newLLMClient builds the shared OpenAI-compatible client used by the raw
+// organizer, knowledge expander, scheduler engine, and tool-calling chat path.
+// All four resolve auth/base URL/org/project identically; keeping the
+// construction in one place means LLM auth changes touch exactly one site.
+func newLLMClient(apiKey, llmModel string) agent.OpenAIClient {
+	return agent.OpenAIClient{
+		APIKey:       apiKey,
+		BaseURL:      llmBaseURL(),
+		Model:        llmModel,
+		Organization: coalesce(os.Getenv("OPENWHISKER_LLM_ORG_ID"), os.Getenv("OPENAI_ORG_ID")),
+		Project:      coalesce(os.Getenv("OPENWHISKER_LLM_PROJECT_ID"), os.Getenv("OPENAI_PROJECT_ID")),
+	}
+}
+
 func rawOrganizerForName(name, openAIModel string) (core.RawOrganizer, error) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "", "deterministic":
@@ -1927,15 +1941,7 @@ func rawOrganizerForName(name, openAIModel string) (core.RawOrganizer, error) {
 		if apiKey == "" {
 			return nil, fmt.Errorf("OPENWHISKER_LLM_API_KEY is required for --organizer=openai-compatible")
 		}
-		return agent.OpenAIRawOrganizer{
-			Client: agent.OpenAIClient{
-				APIKey:       apiKey,
-				BaseURL:      llmBaseURL(),
-				Model:        openAIModel,
-				Organization: coalesce(os.Getenv("OPENWHISKER_LLM_ORG_ID"), os.Getenv("OPENAI_ORG_ID")),
-				Project:      coalesce(os.Getenv("OPENWHISKER_LLM_PROJECT_ID"), os.Getenv("OPENAI_PROJECT_ID")),
-			},
-		}, nil
+		return agent.OpenAIRawOrganizer{Client: newLLMClient(apiKey, openAIModel)}, nil
 	default:
 		return nil, fmt.Errorf("unsupported organizer %q; want deterministic or openai-compatible", name)
 	}
@@ -1950,15 +1956,7 @@ func knowledgeExpanderForName(name, llmModel string) (core.KnowledgeExpander, er
 		if apiKey == "" {
 			return nil, fmt.Errorf("OPENWHISKER_LLM_API_KEY is required for --organizer=openai-compatible")
 		}
-		return agent.OpenAIKnowledgeExpander{
-			Client: agent.OpenAIClient{
-				APIKey:       apiKey,
-				BaseURL:      llmBaseURL(),
-				Model:        llmModel,
-				Organization: coalesce(os.Getenv("OPENWHISKER_LLM_ORG_ID"), os.Getenv("OPENAI_ORG_ID")),
-				Project:      coalesce(os.Getenv("OPENWHISKER_LLM_PROJECT_ID"), os.Getenv("OPENAI_PROJECT_ID")),
-			},
-		}, nil
+		return agent.OpenAIKnowledgeExpander{Client: newLLMClient(apiKey, llmModel)}, nil
 	default:
 		return nil, fmt.Errorf("unsupported expander %q; want deterministic or openai-compatible", name)
 	}
@@ -1973,15 +1971,7 @@ func schedulerEngineForName(name, llmModel string) (schedulerpkg.SkillEngine, er
 		if apiKey == "" {
 			return nil, fmt.Errorf("OPENWHISKER_LLM_API_KEY is required for --engine=openai-compatible")
 		}
-		return agent.OpenAISchedulerEngine{
-			Client: agent.OpenAIClient{
-				APIKey:       apiKey,
-				BaseURL:      llmBaseURL(),
-				Model:        llmModel,
-				Organization: coalesce(os.Getenv("OPENWHISKER_LLM_ORG_ID"), os.Getenv("OPENAI_ORG_ID")),
-				Project:      coalesce(os.Getenv("OPENWHISKER_LLM_PROJECT_ID"), os.Getenv("OPENAI_PROJECT_ID")),
-			},
-		}, nil
+		return agent.OpenAISchedulerEngine{Client: newLLMClient(apiKey, llmModel)}, nil
 	default:
 		return nil, fmt.Errorf("unsupported scheduler engine %q; want static or openai-compatible", name)
 	}
@@ -2002,13 +1992,7 @@ func llmChatClient(llmModel string) agent.ChatCompletionClient {
 	if apiKey == "" {
 		return nil
 	}
-	return agent.OpenAIClient{
-		APIKey:       apiKey,
-		BaseURL:      llmBaseURL(),
-		Model:        llmModel,
-		Organization: coalesce(os.Getenv("OPENWHISKER_LLM_ORG_ID"), os.Getenv("OPENAI_ORG_ID")),
-		Project:      coalesce(os.Getenv("OPENWHISKER_LLM_PROJECT_ID"), os.Getenv("OPENAI_PROJECT_ID")),
-	}
+	return newLLMClient(apiKey, llmModel)
 }
 
 // buildAgentRunner constructs an AgentRunner from CLI options. Returns nil

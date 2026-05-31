@@ -5,8 +5,6 @@
 package policy
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -87,7 +85,7 @@ func CheckEnrichPlan(plan model.VaultPlan, expectedTargetPath, beforeContent str
 		return errors.New("enrich body_guard: after content has no frontmatter")
 	}
 
-	if sha256Hex(beforeBody) != sha256Hex(afterBody) {
+	if model.ContentHash([]byte(beforeBody)) != model.ContentHash([]byte(afterBody)) {
 		return errors.New("enrich body_guard: Raw Text body changed")
 	}
 
@@ -426,9 +424,4 @@ func setDiff(after, before []string) []string {
 		added = append(added, v)
 	}
 	return added
-}
-
-func sha256Hex(s string) string {
-	sum := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(sum[:])
 }
