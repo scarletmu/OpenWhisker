@@ -28,7 +28,7 @@ Phase 1 到 Phase 3 都采用保守执行默认值：
 - 不默认写真实 Obsidian vault；真实 vault 需要用户显式传入 `--vault`。
 - 不先实现 HTTP API、IM adapter、LLM-backed planner 或 Obsidian plugin。
 
-这条决策来自原 `ADR 0002`。现在已并入 [Phase 1 最小切片](phases/phase-1-minimal-slice.md)、[Phase 2 审批与 Diff](phases/phase-2-approval-diff.md) 和 [Phase 3 Sync-Aware Approval Execution](phases/phase-3-headless-sync-executor.md)。
+这条决策来自原 `ADR 0002`，对应 Phase 1–3 的早期执行默认值（逐阶段文档已归档至 `docs-archive` 分支）。当前实现边界见[架构概览](architecture/overview.md)。
 
 ### 3. Knowledge 写入先进入 Draft
 

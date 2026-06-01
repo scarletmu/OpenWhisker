@@ -33,7 +33,7 @@ max_output_tokens = 4096（与 Raw Organizer 默认对齐）
 
 不使用 OpenAI 的 strict `json_schema`，以兼容 DeepSeek 等只支持 `json_object` 的 OpenAI-compatible 端点。schema 约束以英文规则 + JSON 示例的形式写在 system prompt 里，由客户端 `validateKnowledgeExpanderOutput` 做硬校验。
 
-空 content 在共享 `createWithRetry` helper 中做一次同请求体重试（无指数退避），两次都空则返回 `empty content after one retry` 错误。该实现与 Raw Organizer 同源（见 [`docs/phases/phase-4-wiki-agent-workflow.md`](../phases/phase-4-wiki-agent-workflow.md) 中的 Phase 4B 备注）。
+空 content 在共享 `createWithRetry` helper 中做一次同请求体重试（无指数退避），两次都空则返回 `empty content after one retry` 错误。该实现与 Raw Organizer 同源，共用 `createResponseWithRetry`。
 
 ## 输入上下文
 

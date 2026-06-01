@@ -179,10 +179,10 @@ go test ./...
 - [IM Intent Router 架构规格](docs/architecture/im-intent-router.md)
 - [Capture Bucket 规格](docs/architecture/capture-bucket.md)
 - [Intent Router 小模型 Contract](docs/architecture/intent-router-model-contract.md)
-- [只读定时 Skill 调度](docs/phases/phase-5-read-only-skill-scheduler.md)：scheduler、cron、外部信息源适配器。
-- [Agent 工具调用](docs/phases/phase-6-scheduler-skill-creator.md)：`ask` / `@skill` 多轮工具循环与 budget 守卫。
-- [收件箱自动打标签](docs/phases/phase-7-inbox-enrichment.md)：enrich 编排与三道 policy guard。
-- [记忆召回](docs/phases/phase-8-memory-recall.md)：tag / text / link 三 pass 召回。
+- [只读定时 Skill 调度](docs/architecture/scheduler.md)：scheduler、cron、外部信息源适配器。
+- [Agent 工具调用](docs/architecture/agent-tooling.md)：`ask` / `@skill` 多轮工具循环与 budget 守卫。
+- [收件箱自动打标签](docs/architecture/inbox-enrichment.md)：enrich 编排与三道 policy guard。
+- [记忆召回](docs/architecture/memory-recall.md)：tag / text / link 三 pass 召回。
 - [Matrix Adapter 实践](docs/adapters/matrix-private-im.md)
 - [Changelog](CHANGELOG.md)
 

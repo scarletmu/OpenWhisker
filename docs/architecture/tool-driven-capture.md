@@ -132,7 +132,7 @@ vocab / 现状就绪
 ## 参考
 
 - 写入主链路与风险分级：[设计哲学](design-philosophy.md)
-- 已实现的走法-A 对照基线：[Phase 7 Inbox Enrichment](../phases/phase-7-inbox-enrichment.md)
-- ReAct 引擎与工具：[Phase 6 Scheduler Skill Creator](../phases/phase-6-scheduler-skill-creator.md)
-- 受控记忆与召回：[Phase 8 Memory Recall](../phases/phase-8-memory-recall.md)
+- 已实现的走法-A 对照基线：[收件箱自动 enrich](inbox-enrichment.md)
+- ReAct 引擎与工具：[Agent 工具调用](agent-tooling.md)
+- 受控记忆与召回：[记忆召回](memory-recall.md)
 - frontmatter 解析契约：[Frontmatter 解析](frontmatter-parsing.md)
