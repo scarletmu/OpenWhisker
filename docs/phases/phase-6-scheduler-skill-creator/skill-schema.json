@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://openwhisker.local/schemas/phase-6/skill.json",
+  "title": "OpenWhisker Phase 6 SKILL.md frontmatter",
+  "description": "Schema for the YAML frontmatter of an agent SKILL.md file. The body of the markdown file is the LLM-facing task description and is not constrained by this schema.",
+  "type": "object",
+  "required": ["id"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Globally unique skill identifier. Recommended style: lowercase letters, digits, and hyphens."
+    },
+    "name": {
+      "type": "string",
+      "description": "Human-facing display name. Defaults to id when omitted."
+    },
+    "description": {
+      "type": "string",
+      "description": "Short purpose statement; surfaced in user-facing skill listings."
+    },
+    "engine": {
+      "type": "string",
+      "enum": ["static", "openai-compatible", "tool-calling"],
+      "description": "Optional. When omitted, registry loader infers tool-calling iff vault_tools is non-empty, else static. Conflict (e.g. static + vault_tools) is rejected."
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "vault_read",
+          "external_info_read",
+          "scheduler_run_log_write",
+          "outbox_notify",
+          "vault_link_graph_read",
+          "vault_text_search",
+          "agent_run_log_write"
+        ]
+      },
+      "uniqueItems": true,
+      "description": "Allowed capability set for this Skill. Disabled values (vault_write, arbitrary_shell, …) are rejected at registry load time."
+    },
+    "vault_tools": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "list_vault_dir",
+          "read_vault_note",
+          "vault_outlinks",
+          "vault_backlinks",
+          "vault_text_search"
+        ]
+      },
+      "uniqueItems": true,
+      "description": "Subset of the Phase 6 read-only tool catalog exposed to the LLM. Required and non-empty when engine=tool-calling."
+    },
+    "vault_scope": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[^/].*"
+      },
+      "uniqueItems": true,
+      "description": "Vault-relative root paths the agent may access. Each entry must fall inside VaultProfile.scheduler.read_only_vault_roots and must NOT begin with .obsidian/, .git/, .trash/, .DS_Store."
+    },
+    "external_info_sources": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Pre-fetched external sources injected into the initial prompt (Phase 5 compat). Subset of VaultProfile.scheduler.external_info_sources."
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_tool_calls": {"type": "integer", "minimum": 1},
+        "max_total_bytes": {"type": "integer", "minimum": 1},
+        "max_wall_clock_seconds": {"type": "integer", "minimum": 1}
+      },
+      "description": "Per-Skill agent runtime budget. Each value must be > 0 and not exceed the corresponding profile cap; zero/missing field falls back to profile/global default."
+    },
+    "delivery": {
+      "type": "array",
+      "items": {"type": "string", "enum": ["outbox", "matrix"]},
+      "description": "Output channels (cron-trigger only; ad-hoc paths ignore this)."
+    },
+    "skill_config": {
+      "type": "object",
+      "additionalProperties": {"type": "string"},
+      "description": "Free-form key/value pairs the Skill body may reference (e.g. RSS feed URLs)."
+    }
+  }
+}
