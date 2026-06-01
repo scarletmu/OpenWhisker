@@ -1,8 +1,8 @@
 # OpenWhisker 🦭
 
-OpenWhisker 是一个住在你本机上的 Obsidian 知识库助手。
+OpenWhisker 是一个自托管的 Obsidian 知识库助手：它常驻在你自己常开的设备上（家用 Mac / Linux NUC），数据和进程都在你手里，但你从手机或任何地方通过 IM 就能用它。IM 入口走可插拔的 adapter，目前实现了 Matrix。
 
-你在微信式的 IM 里随手扔一段话，它帮你记进 Obsidian 并自动补上标签；你说一句"整理一下"，它把零碎输入整理成一篇 Knowledge 草稿，并先把改动摆给你看，你点头它才写；你也可以直接问它问题，它读你自己的库来回答；还能挂几个只读的定时任务，帮你盯 RSS、定期提醒。
+你在 IM 里随手扔一段话，它帮你记进 Obsidian 并自动补上标签；你说一句"整理一下"，它把零碎输入整理成一篇 Knowledge 草稿，并先把改动摆给你看，你点头它才写；你也可以直接问它问题，它读你自己的库来回答；还能挂几个只读的定时任务，帮你盯 RSS、定期提醒。
 
 它的核心立场是：**让 agent 帮你动笔，但不许它越过你写字**。
 
@@ -69,9 +69,9 @@ OpenWhisker 会读这一组 raw 输入，调 LLM 生成一份 Knowledge 草稿�
 
 ### 6. 真实 vault 不会被偷偷写
 
-- 默认只写本机 test vault (`testdata/vault`)，不会碰你真实的 Obsidian vault。
-- 真实 vault 必须显式 `--vault <path>` 才会被写入，并且默认会在 apply 前后调用 Obsidian Headless Sync 做一次 one-shot 同步，避免和手机端冲突。
-- 每个被改写的文件都带 `before_hash` 校验，并发改动会被拒绝而不是覆盖。
+- 它只写你用 `--vault <path>` 显式指定的那个 vault，且写入被严格限制在 vault root 内——绝对路径、`..` 穿越、symlink 逃逸、`.obsidian/` / `.git/` 等隐藏目录一律拒绝。（没配 `--vault` 时只会动仓库自带的 `testdata/vault` 示例，碰不到你的真实库。）
+- 用 CLI `plan approve` 在真实 vault 上 apply 时，默认（`--sync=auto`）会在前后各做一次 Obsidian Headless Sync，避免和手机端并发冲突；常驻 `daemon` 不自己做同步，跨设备同步交给同机的桌面 Obsidian Sync（详见[部署指南](docs/deployment/README.md)）。
+- 每个被改写的文件都带 `before_hash` 校验，并发或手动改动会被拒绝而不是覆盖。
 
 ### 7. 不想用 IM 也可以纯 CLI
 
@@ -108,7 +108,10 @@ cp .env.local.example .env.local
 按需填 LLM 和 Matrix 配置（`.env.local` 已被 git ignore，CLI 启动自动加载）：
 
 ```sh
-# 用来生成 Knowledge 草稿的 LLM（OpenAI-compatible，DeepSeek 等都可以）
+# 用来生成 Knowledge 草稿的 LLM —— 只要是 OpenAI-compatible 端点都行：
+#   云端 DeepSeek (https://api.deepseek.com)、OpenAI (https://api.openai.com/v1)，
+#   或本地 Ollama (http://localhost:11434/v1)。BASE_URL 指哪它就用哪。
+# 接本地 Ollama 时连模型也留在本机，整套就是完全自包含的（API key 随便填）。
 OPENWHISKER_LLM_API_KEY=
 OPENWHISKER_LLM_BASE_URL=
 OPENWHISKER_LLM_MODEL=

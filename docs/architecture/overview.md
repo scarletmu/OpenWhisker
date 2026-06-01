@@ -27,7 +27,7 @@ IM 入口已实现 Matrix Adapter MVP、长期 Matrix daemon、Core Adapter API�
 
 ## 系统定位
 
-OpenWhisker 是面向个人 Obsidian 知识库的本地优先 workflow host。
+OpenWhisker 是面向个人 Obsidian 知识库的自托管 workflow host：常驻在你自己的设备上，数据落在本地磁盘，通过 IM 远程可用。
 
 它负责：
 
