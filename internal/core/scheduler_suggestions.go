@@ -130,7 +130,7 @@ func parseSuggestedRawCaptureItem(raw json.RawMessage) (suggestedRawCaptureItem,
 		if text == "" {
 			return suggestedRawCaptureItem{}, errors.New("suggested raw capture text is empty")
 		}
-		return suggestedRawCaptureItem{Text: limitRunes(text, maxSuggestedRawCaptureTextRunes), Raw: raw}, nil
+		return suggestedRawCaptureItem{Text: truncateCaptureRunes(text, maxSuggestedRawCaptureTextRunes), Raw: raw}, nil
 	}
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
@@ -142,7 +142,7 @@ func parseSuggestedRawCaptureItem(raw json.RawMessage) (suggestedRawCaptureItem,
 		return suggestedRawCaptureItem{}, errors.New("suggested raw capture item has no text/content/raw_text/body/summary field")
 	}
 	return suggestedRawCaptureItem{
-		Text:  limitRunes(strings.TrimSpace(text), maxSuggestedRawCaptureTextRunes),
+		Text:  truncateCaptureRunes(strings.TrimSpace(text), maxSuggestedRawCaptureTextRunes),
 		Title: strings.TrimSpace(title),
 		Raw:   raw,
 	}, nil
@@ -173,12 +173,4 @@ func renderAcceptedSchedulerRawCapture(run model.SchedulerRun, itemNumber int, i
 	fmt.Fprintf(&b, "- Skill: %s\n", run.SkillPath)
 	fmt.Fprintf(&b, "- Suggested item: %d\n", itemNumber)
 	return b.String()
-}
-
-func limitRunes(value string, max int) string {
-	runes := []rune(value)
-	if len(runes) <= max {
-		return value
-	}
-	return string(runes[:max])
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -590,6 +591,13 @@ func (s AdapterService) handleIntentOrganize(ctx context.Context, req AdapterReq
 	}, nil
 }
 
+// withIntentLabel prefixes a response body with the recognized intent action,
+// so intent-routed replies are visibly distinguished from explicit commands.
+func withIntentLabel(result intentRuleResult, response AdapterResponse) AdapterResponse {
+	response.Body = fmt.Sprintf("识别为：%s\n\n%s", result.displayAction, response.Body)
+	return response
+}
+
 func (s AdapterService) handleIntentDiff(result intentRuleResult, sourceKey string) (AdapterResponse, error) {
 	plan, response, ok, err := s.resolveUniquePendingPlan(sourceKey, "预览当前 source 下唯一待审批 plan")
 	if err != nil || !ok {
@@ -599,8 +607,7 @@ func (s AdapterService) handleIntentDiff(result intentRuleResult, sourceKey stri
 	if err != nil {
 		return AdapterResponse{}, err
 	}
-	response.Body = fmt.Sprintf("识别为：%s\n\n%s", result.displayAction, response.Body)
-	return response, nil
+	return withIntentLabel(result, response), nil
 }
 
 func (s AdapterService) handleIntentApprove(ctx context.Context, result intentRuleResult, sourceKey string) (AdapterResponse, error) {
@@ -618,8 +625,7 @@ func (s AdapterService) handleIntentApprove(ctx context.Context, result intentRu
 		PlanID: approved.PlanID,
 		Body:   fmt.Sprintf("Plan %s applied.", approved.PlanID),
 	}
-	response.Body = fmt.Sprintf("识别为：%s\n\n%s", result.displayAction, response.Body)
-	return response, nil
+	return withIntentLabel(result, response), nil
 }
 
 func (s AdapterService) handleIntentReject(result intentRuleResult, sourceKey string) (AdapterResponse, error) {
@@ -637,8 +643,7 @@ func (s AdapterService) handleIntentReject(result intentRuleResult, sourceKey st
 		PlanID: rejected.PlanID,
 		Body:   fmt.Sprintf("Plan %s rejected.", rejected.PlanID),
 	}
-	response.Body = fmt.Sprintf("识别为：%s\n\n%s", result.displayAction, response.Body)
-	return response, nil
+	return withIntentLabel(result, response), nil
 }
 
 func (s AdapterService) activeBucket(sourceKey string) (model.CaptureBucket, bool, error) {
@@ -733,8 +738,8 @@ func classifyIntentRules(text string) intentRuleResult {
 
 func stripIntentPrefix(text string, prefixes []string) (string, bool) {
 	for _, prefix := range prefixes {
-		if strings.HasPrefix(text, prefix) {
-			payload := strings.TrimSpace(strings.TrimPrefix(text, prefix))
+		if rest, ok := strings.CutPrefix(text, prefix); ok {
+			payload := strings.TrimSpace(rest)
 			return payload, payload != ""
 		}
 	}
@@ -742,13 +747,7 @@ func stripIntentPrefix(text string, prefixes []string) (string, bool) {
 }
 
 func exactAny(value string, candidates ...string) bool {
-	value = strings.TrimSpace(value)
-	for _, candidate := range candidates {
-		if value == candidate {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(candidates, strings.TrimSpace(value))
 }
 
 func normalizeIntentRouterMode(value string) string {

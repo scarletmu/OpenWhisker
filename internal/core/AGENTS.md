@@ -13,9 +13,16 @@ Primary responsibilities:
 
 Primary files:
 
-- `ingest.go`: low-risk raw capture flow.
-- `plans.go`: medium-risk organize, diff, approve, and reject flow.
+- `ingest.go`: low-risk raw capture and capture-bucket flow.
+- `plans.go`: medium-risk organize, diff, approve, and reject lifecycle (PlanService).
+- `adapter.go`: external adapter command routing (AdapterService); IM intake and outbox.
+- `intent_router.go`: rules / hybrid / off intent classification and clarification state machine.
+- `scheduler.go` / `scheduler_status.go` / `scheduler_suggestions.go`: read-only scheduler tick, status, and suggested-capture acceptance.
+- `render.go`: pure presentation — markdown diff/preview/summary helpers and note renderers. No SQL, no IO.
+- `context.go`: LLM vault-context assembly (raw / expander) and frontmatter source-trace parsing.
 - `*_test.go`: behavior anchors for workflow lifecycle.
+
+`render.go` and `context.go` hold only free functions extracted from the files above; keep new presentation / context-building helpers there rather than growing the service files.
 
 Related docs:
 
