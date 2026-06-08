@@ -99,6 +99,8 @@ reasoning 和 writing 之间的审计边界。一个 plan 包含 purpose、risk 
 
 outbox 使用 actor identity：Knowledge Bot 负责用户主动触发的 capture / organize / expand / approval；Scheduler Bot 负责定时简报、RSS 观察、提醒和 suggested capture 确认提示。两个 bot 可在同一 Matrix room 内共存，delivery 按 `knowledge` / `scheduler` actor 选择发送身份；Scheduler Bot 仍只是 read-only Scheduler 的展示与交互身份，不因此获得 vault 写入能力。
 
+**outbox 路由按 kind 订阅（多 OUT adapter 后的方向）**：`actor` 解决"谁发"（发送身份），是已实现的一个轴；当 OUT adapter 不止 Matrix 时，还需要"发给哪个 adapter"这第二个轴，挂在 `OutboxMessage.Kind` 上——**每个 adapter 声明自己认领哪些 kind、各收各的**，producer（scheduler / 命令路径 / 任何 skill）不写死目标 adapter。面向人的通知类 kind（如 `human_notification`：简报 / 提醒 / 确认文案）是**泛支持**，所有人类通知 adapter 都收；面向特定外部系统的 kind（如 `review_cards`）只由认领它的 adapter 消费。这样换 / 加一个 OUT adapter 不改 producer。今天只有 Matrix 一个 OUT adapter，路由退化为直发；第二个 adapter 的具体落地见 [`knowledgehelper-integration.md`](knowledgehelper-integration.md)（设计稿，未落代码）。
+
 ## 数据对象
 
 当前 durable object model：

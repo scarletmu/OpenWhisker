@@ -11,7 +11,7 @@
 5. [工具驱动的捕获](architecture/tool-driven-capture.md)：让捕获/输入环节具备现状与记忆感知的设计稿（走法 A，未落代码）。
 6. 子系统设计：[只读定时 Skill 调度](architecture/scheduler.md) · [Agent 工具调用](architecture/agent-tooling.md) · [收件箱自动 enrich](architecture/inbox-enrichment.md) · [记忆召回](architecture/memory-recall.md)。
 7. Schema / Contract：[Proposal Note](architecture/proposal-note-schema.md) · [Knowledge Draft](architecture/knowledge-draft-schema.md) · [Knowledge Expander 模型](architecture/knowledge-expander-model-contract.md) · [Intent Router 模型](architecture/intent-router-model-contract.md) · [IM Intent Router](architecture/im-intent-router.md) · [Capture Bucket](architecture/capture-bucket.md) · [Frontmatter 解析](architecture/frontmatter-parsing.md)。
-8. 适配与外部对接：[Matrix Private IM](adapters/matrix-private-im.md) · [Vault Profile Analyzer Skill](skills/vault-profile-analyzer/SKILL.md)。
+8. 适配与外部对接：[Matrix Private IM](adapters/matrix-private-im.md) · [Vault Profile Analyzer Skill](skills/vault-profile-analyzer/SKILL.md) · [KnowledgeHelper 对接](architecture/knowledgehelper-integration.md)（设计稿，未落代码）。
 9. 部署：[部署指南](deployment/README.md)，OpenWhisker daemon 的构建、配置与原生服务运行。
 
 延后议题：[CubeSandbox 运行沙箱评估](architecture/cubesandbox-runtime-sandbox-evaluation.md) 仅在 sandbox 课题恢复时阅读，不在主线路径上。
@@ -38,6 +38,7 @@ docs/
     knowledge-expander-model-contract.md
     proposal-note-schema.md
     frontmatter-parsing.md
+    knowledgehelper-integration.md
     cubesandbox-runtime-sandbox-evaluation.md
   adapters/
     matrix-private-im.md
