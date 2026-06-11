@@ -8,7 +8,7 @@
 - 按预设节律触发（scheduler cron，见[只读定时 Skill 调度](scheduler.md)）；
 - 系统事件触发（inbox enrich，见[收件箱自动 enrich](inbox-enrichment.md)）。
 
-agent runtime **永远 read-only**。任何写 vault 的能力（包括"新增 vault Skill"本身）必须走主线 `WikiJob → VaultPlan → Policy → Approval → VaultExecutor`，见[设计哲学](design-philosophy.md)。
+agent runtime **永远 read-only**。任何写 vault 的能力（包括"新增 vault Skill"本身）必须走主线 `WikiJob → VaultPlan → Policy → Approval → VaultExecutor`，见[设计哲学](../20-architecture/design-philosophy.md)。
 
 ## 不可破的边界
 

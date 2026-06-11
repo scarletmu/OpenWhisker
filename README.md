@@ -70,7 +70,7 @@ OpenWhisker 会读这一组 raw 输入，调 LLM 生成一份 Knowledge 草稿�
 ### 6. 真实 vault 不会被偷偷写
 
 - 它只写你用 `--vault <path>` 显式指定的那个 vault，且写入被严格限制在 vault root 内——绝对路径、`..` 穿越、symlink 逃逸、`.obsidian/` / `.git/` 等隐藏目录一律拒绝。（没配 `--vault` 时只会动仓库自带的 `testdata/vault` 示例，碰不到你的真实库。）
-- 用 CLI `plan approve` 在真实 vault 上 apply 时，默认（`--sync=auto`）会在前后各做一次 Obsidian Headless Sync，避免和手机端并发冲突；常驻 `daemon` 不自己做同步，跨设备同步交给同机的桌面 Obsidian Sync（详见[部署指南](docs/deployment/README.md)）。
+- 用 CLI `plan approve` 在真实 vault 上 apply 时，默认（`--sync=auto`）会在前后各做一次 Obsidian Headless Sync，避免和手机端并发冲突；常驻 `daemon` 不自己做同步，跨设备同步交给同机的桌面 Obsidian Sync（详见[部署指南](docs/50-deployment/README.md)）。
 - 每个被改写的文件都带 `before_hash` 校验，并发或手动改动会被拒绝而不是覆盖。
 
 ### 7. 不想用 IM 也可以纯 CLI
@@ -154,7 +154,7 @@ go test ./...
 
 ## 部署
 
-把 OpenWhisker 作为长期服务跑起来（本地硬件上的原生 launchd / systemd 服务），见 [部署指南](docs/deployment/README.md)。
+把 OpenWhisker 作为长期服务跑起来（本地硬件上的原生 launchd / systemd 服务），见 [部署指南](docs/50-deployment/README.md)。
 
 ## 它为什么不会乱来
 
@@ -171,19 +171,19 @@ go test ./...
 
 - [Project Guide](AGENTS.md)：面向 LLM agent 的项目规则、参考源关系和工作边界。
 - [文档索引](docs/README.md)：当前文档结构和推荐阅读顺序。
-- [部署指南](docs/deployment/README.md)：构建、配置、以原生服务长期运行。
-- [当前进度与交接说明](docs/progress.md)：当前状态、验证状态和下一步优先级。
-- [项目决策](docs/project-decisions.md)：已收敛的长期架构决策和阶段默认值。
-- [设计哲学](docs/architecture/design-philosophy.md)：VaultPlan / VaultExecutor 架构理念。
-- [架构概览](docs/architecture/overview.md)：当前架构边界和后续方向。
-- [IM Intent Router 架构规格](docs/architecture/im-intent-router.md)
-- [Capture Bucket 规格](docs/architecture/capture-bucket.md)
-- [Intent Router 小模型 Contract](docs/architecture/intent-router-model-contract.md)
-- [只读定时 Skill 调度](docs/architecture/scheduler.md)：scheduler、cron、外部信息源适配器。
-- [Agent 工具调用](docs/architecture/agent-tooling.md)：`ask` / `@skill` 多轮工具循环与 budget 守卫。
-- [收件箱自动打标签](docs/architecture/inbox-enrichment.md)：enrich 编排与三道 policy guard。
-- [记忆召回](docs/architecture/memory-recall.md)：tag / text / link 三 pass 召回。
-- [Matrix Adapter 实践](docs/adapters/matrix-private-im.md)
+- [部署指南](docs/50-deployment/README.md)：构建、配置、以原生服务长期运行。
+- [当前进度与交接说明](docs/00-overview/project-status.md)：当前状态、验证状态和下一步优先级。
+- [项目决策](docs/80-decisions/project-decisions.md)：已收敛的长期架构决策和阶段默认值。
+- [设计哲学](docs/20-architecture/design-philosophy.md)：VaultPlan / VaultExecutor 架构理念。
+- [架构概览](docs/20-architecture/system-overview.md)：当前架构边界和后续方向。
+- [IM Intent Router 架构规格](docs/30-design/im-intent-router.md)
+- [Capture Bucket 规格](docs/40-api/capture-bucket.md)
+- [Intent Router 小模型 Contract](docs/40-api/intent-router-model-contract.md)
+- [只读定时 Skill 调度](docs/30-design/scheduler.md)：scheduler、cron、外部信息源适配器。
+- [Agent 工具调用](docs/30-design/agent-tooling.md)：`ask` / `@skill` 多轮工具循环与 budget 守卫。
+- [收件箱自动打标签](docs/30-design/inbox-enrichment.md)：enrich 编排与三道 policy guard。
+- [记忆召回](docs/30-design/memory-recall.md)：tag / text / link 三 pass 召回。
+- [Matrix Adapter 实践](docs/30-design/matrix-adapter.md)
 - [Changelog](CHANGELOG.md)
 
 ## 一句话架构

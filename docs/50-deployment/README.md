@@ -1,6 +1,6 @@
 # OpenWhisker 部署指南
 
-本文是 OpenWhisker **守护进程本身**的部署引导：怎么构建、配置、长期运行。Matrix 服务端（Synapse / Caddy / PostgreSQL）拓扑见 [`docs/adapters/matrix-private-im.md`](../adapters/matrix-private-im.md)。
+本文是 OpenWhisker **守护进程本身**的部署引导：怎么构建、配置、长期运行。Matrix 服务端（Synapse / Caddy / PostgreSQL）拓扑见 [`docs/adapters/matrix-private-im.md`](../30-design/matrix-adapter.md)。
 
 v1 的标准部署形态是**本地硬件上的原生常驻服务**：家用桌面 Mac 走 launchd，Linux NUC 走 systemd。Docker 在 v1 里被定位为**可复现构建与验证工具**，不是生产主形态；容器形态作为可选运行方式保留（见下方「可选：容器形态」）。
 
@@ -140,7 +140,7 @@ daemon 通过 `direct_fs` 直接写 vault 文件，**自身不负责跨设备同
 - **桌面同步形态**：设备上同时运行桌面 Obsidian，由 Obsidian Sync 负责把 daemon 写入的文件同步到其它设备。daemon 不做额外动作。切到真实 vault 只是把 `--vault` 指向真实 vault 路径，无新增代码。
 - **Headless 同步形态**：设备上没有桌面 Obsidian，跨设备同步需要 Obsidian Headless Sync（`ob` 二进制）。`ob` 不内嵌在 daemon 里 —— 它属于交互式 `plan approve` / `vault sync` CLI 路径，不在常驻服务里。
 
-硬约束（见 [`design-philosophy.md`](../architecture/design-philosophy.md) §4.5）：**不要在同一台设备上让桌面 Obsidian Sync 和 Headless Sync 同时管理同一个 vault。**
+硬约束（见 [`design-philosophy.md`](../20-architecture/design-philosophy.md) §4.5）：**不要在同一台设备上让桌面 Obsidian Sync 和 Headless Sync 同时管理同一个 vault。**
 
 ## v1 范围边界
 
@@ -182,9 +182,9 @@ deploy/local/
 
 ## 相关文档
 
-- [Matrix Private IM 适配](../adapters/matrix-private-im.md)：homeserver / Caddy / Synapse 服务端拓扑。
+- [Matrix Private IM 适配](../30-design/matrix-adapter.md)：homeserver / Caddy / Synapse 服务端拓扑。
 - [macOS launchd 部署](launchd.md)：OpenWhisker daemon 的用户级 LaunchAgent 模板与状态检查。
 - [Linux systemd 部署](systemd.md)：OpenWhisker daemon 的用户级 systemd service 模板与状态检查。
-- [设计哲学](../architecture/design-philosophy.md)：执行器、同步形态与设备拓扑约束。
-- [当前进度](../progress.md)：验证状态与已知遗留。
+- [设计哲学](../20-architecture/design-philosophy.md)：执行器、同步形态与设备拓扑约束。
+- [当前进度](../00-overview/project-status.md)：验证状态与已知遗留。
 - [环境变量模板](../../.env.local.example)：完整配置项清单。

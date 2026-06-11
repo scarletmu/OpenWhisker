@@ -160,7 +160,7 @@ go run ./cmd/openwhisker daemon \
   --matrix auto
 ```
 
-当前部署约束是单 Matrix 自动化房间：一个私有、非 E2EE 房间同时承载 capture、命令、diff / approve / reject、scheduler 输出和告警。`OPENWHISKER_MATRIX_ROOM_ID` 是目标配置边界，不是临时 MVP 降级；不要为当前部署形态拆出 Inbox / Approval / Alerts 等多房间路由。部署见 [`docs/deployment/README.md`](../deployment/README.md)。
+当前部署约束是单 Matrix 自动化房间：一个私有、非 E2EE 房间同时承载 capture、命令、diff / approve / reject、scheduler 输出和告警。`OPENWHISKER_MATRIX_ROOM_ID` 是目标配置边界，不是临时 MVP 降级；不要为当前部署形态拆出 Inbox / Approval / Alerts 等多房间路由。部署见 [`docs/deployment/README.md`](../50-deployment/README.md)。
 
 Phase 5 引入 Scheduler 后，Matrix 交互身份支持同一 room 内的双 bot 模型：Knowledge Bot 负责用户主动的 capture / organize / expand / diff / approve / reject；Scheduler Bot 负责定时简报、RSSHub / RSS 观察、提醒和 suggested capture 确认提示。两者可以共享同一个 OpenWhisker 后端和同一个 Matrix room，但在 outbox / delivery 层通过 actor identity 区分：`knowledge` actor 默认由 Knowledge Bot 发送，`scheduler` actor 在配置 Scheduler Bot 凭据后由 Scheduler Bot 发送。Matrix adapter 会忽略两个 bot 自己发出的消息，避免 Knowledge Bot 把 Scheduler Bot 的简报当成用户 raw input。Scheduler Bot 只是展示和交互身份，不获得 vault 写入权限。
 
@@ -249,7 +249,7 @@ OpenWhisker OutboxMessage
 
 以下配置只表达组件关系。镜像 tag、Synapse 配置字段和路由路径在部署当天必须以官方文档和实际版本复核。
 
-OpenWhisker daemon 与 Matrix 服务的关系：daemon 通过 Matrix Client-Server API 连接 homeserver，本身不暴露端口，也没有独立的 adapter 服务进程 —— Matrix adapter 是 daemon 二进制内的一个模块。daemon 的构建与配置见 [`docs/deployment/README.md`](../deployment/README.md)。
+OpenWhisker daemon 与 Matrix 服务的关系：daemon 通过 Matrix Client-Server API 连接 homeserver，本身不暴露端口，也没有独立的 adapter 服务进程 —— Matrix adapter 是 daemon 二进制内的一个模块。daemon 的构建与配置见 [`docs/deployment/README.md`](../50-deployment/README.md)。
 
 ```yaml
 services:
