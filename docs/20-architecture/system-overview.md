@@ -95,7 +95,7 @@ reasoning 和 writing 之间的审计边界。一个 plan 包含 purpose、risk 
 
 ### Outbox
 
-向选定的 UI 或 IM channel 发送用户可见的状态、审批提示、diff、错误和完成消息。首期核心 IM 入口实践见 [`matrix-private-im.md`](../30-design/matrix-adapter.md)。Matrix adapter 属于交互层和 outbox 通知层，通过 bot client `/sync` 接收命令和 raw input，不直接写 vault，也不绕过 `VaultPlan -> Policy Check -> Approval -> VaultExecutor` 链路。
+向选定的 UI 或 IM channel 发送用户可见的状态、审批提示、diff、错误和完成消息。首期核心 IM 入口实践见 [`matrix-adapter.md`](../30-design/matrix-adapter.md)。Matrix adapter 属于交互层和 outbox 通知层，通过 bot client `/sync` 接收命令和 raw input，不直接写 vault，也不绕过 `VaultPlan -> Policy Check -> Approval -> VaultExecutor` 链路。
 
 outbox 使用 actor identity：Knowledge Bot 负责用户主动触发的 capture / organize / expand / approval；Scheduler Bot 负责定时简报、RSS 观察、提醒和 suggested capture 确认提示。两个 bot 可在同一 Matrix room 内共存，delivery 按 `knowledge` / `scheduler` actor 选择发送身份；Scheduler Bot 仍只是 read-only Scheduler 的展示与交互身份，不因此获得 vault 写入能力。
 

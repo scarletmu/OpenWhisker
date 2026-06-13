@@ -1,6 +1,6 @@
 # OpenWhisker 部署指南
 
-本文是 OpenWhisker **守护进程本身**的部署引导：怎么构建、配置、长期运行。Matrix 服务端（Synapse / Caddy / PostgreSQL）拓扑见 [`docs/adapters/matrix-private-im.md`](../30-design/matrix-adapter.md)。
+本文是 OpenWhisker **守护进程本身**的部署引导：怎么构建、配置、长期运行。Matrix 服务端（Synapse / Caddy / PostgreSQL）拓扑见 [`docs/30-design/matrix-adapter.md`](../30-design/matrix-adapter.md)。
 
 v1 的标准部署形态是**本地硬件上的原生常驻服务**：家用桌面 Mac 走 launchd，Linux NUC 走 systemd。Docker 在 v1 里被定位为**可复现构建与验证工具**，不是生产主形态；容器形态作为可选运行方式保留（见下方「可选：容器形态」）。
 
@@ -38,7 +38,7 @@ Docker 仍然有用，但职责收窄为：跑可复现构建、产出并 smoke 
 
 - 一台本地常开设备：桌面 Mac 或 Linux NUC。
 - Go toolchain —— 原生构建（`make build`）需要。镜像构建与验证另需 Docker。
-- 一个可达的 Matrix homeserver 和一个低权限 bot 账号（服务端部署见 `matrix-private-im.md`）。
+- 一个可达的 Matrix homeserver 和一个低权限 bot 账号（服务端部署见 `matrix-adapter.md`）。
 - 一个 OpenAI-compatible LLM 端点和 API key（DeepSeek 等）。
 - 目标 vault 目录（v1 默认指向一个目录；真实 vault + Obsidian Sync 生产签收见下方范围边界）。
 
@@ -93,7 +93,7 @@ service 文件把 `WorkingDirectory` 指向这个目录，`--db` / `--since-file
 ```sh
 # 1. 拷贝模板到用户 LaunchAgents，并按真实路径填写 <...> 占位符
 mkdir -p ~/Library/LaunchAgents
-cp docs/deployment/openwhisker.daemon.plist.example \
+cp docs/50-deployment/openwhisker.daemon.plist.example \
    ~/Library/LaunchAgents/local.openwhisker.daemon.plist
 
 # 2. 装为当前用户的 LaunchAgent
@@ -164,7 +164,7 @@ make docker-build
 docker compose -f deploy/local/compose.yaml up -d   # 或 make docker-run
 ```
 
-容器内建议运行同样的 `openwhisker daemon`，挂载 `data/` 持久卷与 vault 卷。与自托管 homeserver 同栈编排时，把这个服务并入 `matrix-private-im.md` 的 Synapse / Caddy / PostgreSQL 骨架。
+容器内建议运行同样的 `openwhisker daemon`，挂载 `data/` 持久卷与 vault 卷。与自托管 homeserver 同栈编排时，把这个服务并入 `matrix-adapter.md` 的 Synapse / Caddy / PostgreSQL 骨架。
 
 ## 关键运作文档
 
@@ -174,7 +174,7 @@ docker compose -f deploy/local/compose.yaml up -d   # 或 make docker-run
 deploy/local/
   runbook.md                          真实环境部署与运维步骤
   compose.yaml                        由 openwhisker.compose.example.yaml 填实
-  openwhisker.daemon.plist             由 docs/deployment/openwhisker.daemon.plist.example 填实（macOS）
+  openwhisker.daemon.plist             由 docs/50-deployment/openwhisker.daemon.plist.example 填实（macOS）
   openwhisker.systemd.example.service  由对应 example 填实（Linux）
 ```
 
