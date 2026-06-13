@@ -11,6 +11,7 @@
 - [im-intent-router.md](im-intent-router.md)：IM 入站消息到结构化意图的归一化中间件。
 - [frontmatter-parsing.md](frontmatter-parsing.md)：统一的 frontmatter 解析包设计。
 - [tool-driven-capture.md](tool-driven-capture.md)：工具驱动捕获的设计稿（走法 A，未落代码）。
+- [im-quick-capture.md](im-quick-capture.md)：IM 入口重定位为零摩擦异步速记收件箱的设计稿（未落代码）。
 - [matrix-adapter.md](matrix-adapter.md)：Matrix 适配器实践，含私有非 E2EE homeserver 接入与服务端拓扑。
 
 完整导航见 [`docs/README.md`](../README.md)。

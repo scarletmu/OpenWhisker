@@ -9,6 +9,7 @@
 3. [项目决策](80-decisions/project-decisions.md)：跨阶段仍然有效的架构决策。
 4. [设计哲学](20-architecture/design-philosophy.md)：完整 VaultPlan / VaultExecutor 方向。
 5. [工具驱动的捕获](30-design/tool-driven-capture.md)：让捕获/输入环节具备现状与记忆感知的设计稿（走法 A，未落代码）。
+   [IM 速记捕获](30-design/im-quick-capture.md)：把 IM 入口重定位为零摩擦异步速记收件箱的设计稿（未落代码）。
 6. 子系统设计：[只读定时 Skill 调度](30-design/scheduler.md) · [Agent 工具调用](30-design/agent-tooling.md) · [收件箱自动 enrich](30-design/inbox-enrichment.md) · [记忆召回](30-design/memory-recall.md) · [IM Intent Router](30-design/im-intent-router.md) · [Frontmatter 解析](30-design/frontmatter-parsing.md)。
 7. Schema / Contract：[Capture Bucket](40-api/capture-bucket.md) · [Proposal Note](40-api/proposal-note-schema.md) · [Knowledge Draft](40-api/knowledge-draft-schema.md) · [Intent Router 模型](40-api/intent-router-model-contract.md) · [Knowledge Expander 模型](40-api/knowledge-expander-model-contract.md)。
 8. 适配与外部对接：[Matrix Adapter](30-design/matrix-adapter.md) · [Vault Profile Analyzer Skill](90-appendix/skills/vault-profile-analyzer/SKILL.md)。

@@ -456,6 +456,8 @@ openwhisker-{outbox_message_id}
 
 ## 命令与交互
 
+> 本节及下方"典型流程"描述的是当前已实现的分组 + 审批交互。该交互层正在被重定位为零摩擦异步速记收件箱，方向见 [`im-quick-capture.md`](im-quick-capture.md)（设计稿，未落代码）。homeserver 接入、出入站契约、幂等与安全边界等不受影响。
+
 首期使用文本命令，不依赖 Element widget 或 slash command 扩展。
 
 | 命令 | 行为 |
