@@ -11,10 +11,10 @@ Primary responsibilities:
 
 Implemented providers:
 
-- `OpenAIRawOrganizer`: organize raw captures into medium-risk drafts. Contract: `docs/architecture/` (Phase 4B section).
-- `OpenAIKnowledgeExpander`: expand thin Knowledge notes into medium-risk append / create-child plans, or surface high-risk restructure proposals. Contract: `docs/architecture/knowledge-expander-model-contract.md`.
-- `OpenAIIntentClassifier`: classify IM inputs into controlled router intents. Contract: `docs/architecture/intent-router-model-contract.md`.
-- `OpenAISchedulerEngine`: turn a Scheduler Host-provided read-only skill bundle into a scheduler result envelope. Contract: `docs/phases/phase-5-read-only-skill-scheduler.md`.
+- `OpenAIRawOrganizer`: organize raw captures into medium-risk drafts. Contract: `docs/40-api/knowledge-draft-schema.md`.
+- `OpenAIKnowledgeExpander`: expand thin Knowledge notes into medium-risk append / create-child plans, or surface high-risk restructure proposals. Contract: `docs/40-api/knowledge-expander-model-contract.md`.
+- `OpenAIIntentClassifier`: classify IM inputs into controlled router intents. Contract: `docs/40-api/intent-router-model-contract.md`.
+- `OpenAISchedulerEngine`: turn a Scheduler Host-provided read-only skill bundle into a scheduler result envelope. Contract: `docs/30-design/scheduler.md`.
 
 All providers share the same `OpenAICompatibleClient` + `json_object` + client-side hard validation + single empty-content retry pattern.
 

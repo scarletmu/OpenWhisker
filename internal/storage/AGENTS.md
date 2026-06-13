@@ -16,8 +16,6 @@ Primary files:
 
 Related docs:
 
-- `docs/phases/phase-1-minimal-slice.md`
-- `docs/phases/phase-2-approval-diff.md`
-- `docs/architecture/overview.md`
+- `docs/20-architecture/system-overview.md`
 
 Keep migrations additive unless the user explicitly asks for a breaking local database reset.

@@ -13,5 +13,6 @@
 - [tool-driven-capture.md](tool-driven-capture.md)：工具驱动捕获的设计稿（走法 A，未落代码）。
 - [im-quick-capture.md](im-quick-capture.md)：IM 入口重定位为零摩擦异步速记收件箱的设计稿（未落代码）。
 - [matrix-adapter.md](matrix-adapter.md)：Matrix 适配器实践，含私有非 E2EE homeserver 接入与服务端拓扑。
+- [knowledgehelper-integration.md](knowledgehelper-integration.md)：KnowledgeHelper 作为第二个 Core Adapter 的对接设计稿（未落代码）；KH 侧契约见 [`40-api/knowledgehelper-contract.md`](../40-api/knowledgehelper-contract.md)。
 
 完整导航见 [`docs/README.md`](../README.md)。

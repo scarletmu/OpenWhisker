@@ -18,10 +18,7 @@ Primary files:
 
 Related docs:
 
-- `docs/architecture/design-philosophy.md`
-- `docs/architecture/proposal-note-schema.md`
-- `docs/phases/phase-1-minimal-slice.md`
-- `docs/phases/phase-2-approval-diff.md`
-- `docs/phases/phase-4-wiki-agent-workflow.md` (Phase 4C.1)
+- `docs/20-architecture/design-philosophy.md`
+- `docs/40-api/proposal-note-schema.md`
 
 Policy changes should be made before executor changes when enabling new write behavior.

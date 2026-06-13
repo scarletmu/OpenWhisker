@@ -21,4 +21,4 @@ Boundaries:
 - Read-only. This package must not write the vault. Vault context reads use no-follow opens and honor forbidden-scope checks (`IsForbiddenScopePath`).
 - Any resulting change still flows through `VaultPlan -> policy -> approval when needed -> executor`.
 
-Authoritative contracts: `docs/phases/phase-5-read-only-skill-scheduler.md`, and `docs/phases/phase-6-scheduler-skill-creator.md` for Skill creation.
+Authoritative contract: `docs/30-design/scheduler.md`.

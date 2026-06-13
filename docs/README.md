@@ -11,8 +11,8 @@
 5. [工具驱动的捕获](30-design/tool-driven-capture.md)：让捕获/输入环节具备现状与记忆感知的设计稿（走法 A，未落代码）。
    [IM 速记捕获](30-design/im-quick-capture.md)：把 IM 入口重定位为零摩擦异步速记收件箱的设计稿（未落代码）。
 6. 子系统设计：[只读定时 Skill 调度](30-design/scheduler.md) · [Agent 工具调用](30-design/agent-tooling.md) · [收件箱自动 enrich](30-design/inbox-enrichment.md) · [记忆召回](30-design/memory-recall.md) · [IM Intent Router](30-design/im-intent-router.md) · [Frontmatter 解析](30-design/frontmatter-parsing.md)。
-7. Schema / Contract：[Capture Bucket](40-api/capture-bucket.md) · [Proposal Note](40-api/proposal-note-schema.md) · [Knowledge Draft](40-api/knowledge-draft-schema.md) · [Intent Router 模型](40-api/intent-router-model-contract.md) · [Knowledge Expander 模型](40-api/knowledge-expander-model-contract.md)。
-8. 适配与外部对接：[Matrix Adapter](30-design/matrix-adapter.md) · [Vault Profile Analyzer Skill](90-appendix/skills/vault-profile-analyzer/SKILL.md)。
+7. Schema / Contract：[Capture Bucket](40-api/capture-bucket.md) · [Proposal Note](40-api/proposal-note-schema.md) · [Knowledge Draft](40-api/knowledge-draft-schema.md) · [Intent Router 模型](40-api/intent-router-model-contract.md) · [Knowledge Expander 模型](40-api/knowledge-expander-model-contract.md) · [KnowledgeHelper 契约对接单](40-api/knowledgehelper-contract.md)（给 KH 仓库 agent 的 checklist）。
+8. 适配与外部对接：[Matrix Adapter](30-design/matrix-adapter.md) · [Vault Profile Analyzer Skill](90-appendix/skills/vault-profile-analyzer/SKILL.md) · [KnowledgeHelper 对接](30-design/knowledgehelper-integration.md)（设计稿，未落代码）。
 9. 部署：[部署指南](50-deployment/README.md)，OpenWhisker daemon 的构建、配置与原生服务运行。
 
 延后议题：[CubeSandbox 运行沙箱评估](90-appendix/cubesandbox-runtime-sandbox-evaluation.md) 仅在 sandbox 课题恢复时阅读，不在主线路径上。

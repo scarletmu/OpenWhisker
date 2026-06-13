@@ -16,4 +16,4 @@ Dependencies / boundaries:
 - Enrichment policy / the `rewrite_note` guard live in `internal/policy` (`internal/policy/enrich.go`).
 - Does not write the vault directly — durable changes go through `VaultPlan -> policy -> approval when needed -> executor`.
 
-Authoritative contract: `docs/phases/phase-7-inbox-enrichment.md`.
+Authoritative contract: `docs/30-design/inbox-enrichment.md`.

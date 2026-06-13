@@ -19,8 +19,8 @@ Primary files:
 
 Related docs:
 
-- `docs/architecture/design-philosophy.md`
-- `docs/architecture/overview.md`
-- `docs/project-decisions.md`
+- `docs/20-architecture/design-philosophy.md`
+- `docs/20-architecture/system-overview.md`
+- `docs/80-decisions/project-decisions.md`
 
 Keep model changes compatible with `internal/storage` schema and existing phase documents.

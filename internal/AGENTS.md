@@ -5,8 +5,8 @@ This directory contains the OpenWhisker implementation boundary.
 Start here after reading:
 
 - `docs/README.md`
-- `docs/architecture/overview.md`
-- the active phase document in `docs/phases/`
+- `docs/20-architecture/system-overview.md`
+- the relevant subsystem design under `docs/30-design/`
 
 ## Module map
 
@@ -21,7 +21,7 @@ Write-path core (the spine: `VaultPlan -> policy -> approval when needed -> exec
 Vault I/O and content helpers:
 
 - `vault/`: the wikilink / backlink index (`linkindex/`) over the vault, with live `fsnotify` updates; a read-only graph consumed by `memory/`.
-- `markdown/`: frontmatter split + parse — the single source of truth for frontmatter. Contract: `docs/architecture/frontmatter-parsing.md`.
+- `markdown/`: frontmatter split + parse — the single source of truth for frontmatter. Contract: `docs/30-design/frontmatter-parsing.md`.
 - `sanitize/`: redaction of secrets / PII in config keys, feed URLs, Skill config, and free text before content leaves the trust boundary (prompts, logs).
 
 LLM reasoning (generates plans, never writes):
@@ -31,13 +31,13 @@ LLM reasoning (generates plans, never writes):
 
 Feature subsystems:
 
-- `enrich/`: Phase 7 inbox enrichment — an async agent pass that tags newly-captured Raw notes via the `rewrite_note` guard. See `internal/enrich/AGENTS.md`. Contract: `docs/phases/phase-7-inbox-enrichment.md`.
-- `memory/`: Phase 8 recall service — controlled tag vocabulary plus tag / text / one-hop-related recall over a SQLite cache derived from frontmatter. See `internal/memory/AGENTS.md`. Contract: `docs/phases/phase-8-memory-recall.md`.
-- `scheduler/`: read-only scheduled Skill registry parsing, cron matching, budget / scope lint, an RSS source adapter, and Skill runner boundaries. See `internal/scheduler/AGENTS.md`. Contracts: `docs/phases/phase-5-read-only-skill-scheduler.md`, `docs/phases/phase-6-scheduler-skill-creator.md`.
+- `enrich/`: Phase 7 inbox enrichment — an async agent pass that tags newly-captured Raw notes via the `rewrite_note` guard. See `internal/enrich/AGENTS.md`. Contract: `docs/30-design/inbox-enrichment.md`.
+- `memory/`: Phase 8 recall service — controlled tag vocabulary plus tag / text / one-hop-related recall over a SQLite cache derived from frontmatter. See `internal/memory/AGENTS.md`. Contract: `docs/30-design/memory-recall.md`.
+- `scheduler/`: read-only scheduled Skill registry parsing, cron matching, budget / scope lint, an RSS source adapter, and Skill runner boundaries. See `internal/scheduler/AGENTS.md`. Contract: `docs/30-design/scheduler.md`.
 
 Context and external entry:
 
 - `profile/`: vault profile records, tool-budget defaults, and task skill generation for skill-driven adapter context. Profile analysis should happen in vault-local skills, not inside OpenWhisker runtime.
-- `adapters/`: external entry adapters — Matrix private IM intake and outbox delivery (package `matrix`). Contract: `docs/adapters/matrix-private-im.md`.
+- `adapters/`: external entry adapters — Matrix private IM intake and outbox delivery (package `matrix`). Contract: `docs/30-design/matrix-adapter.md`.
 
 Keep LLM reasoning out of direct writes. New write paths should still flow through `VaultPlan -> policy -> approval when needed -> executor`.

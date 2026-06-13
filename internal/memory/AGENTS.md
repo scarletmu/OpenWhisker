@@ -23,4 +23,4 @@ Boundaries:
 
 - Recall informs plans; it is an input to reasoning, never a vault write path.
 
-Authoritative contract: `docs/phases/phase-8-memory-recall.md`. Read it before changing recall behavior or the derived-cache shape.
+Authoritative contract: `docs/30-design/memory-recall.md`. Read it before changing recall behavior or the derived-cache shape.

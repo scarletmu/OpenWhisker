@@ -4,7 +4,7 @@
 
 ## 文件
 
-- 示例模板：`docs/deployment/openwhisker.daemon.plist.example`
+- 示例模板：`docs/50-deployment/openwhisker.daemon.plist.example`
 - daemon 状态文件：`data/daemon-status.json`
 - stdout 日志：`logs/openwhisker-daemon.out.log`
 - stderr 日志：`logs/openwhisker-daemon.err.log`
@@ -15,7 +15,7 @@
 
 ```sh
 mkdir -p ~/Library/LaunchAgents
-cp docs/deployment/openwhisker.daemon.plist.example ~/Library/LaunchAgents/local.openwhisker.daemon.plist
+cp docs/50-deployment/openwhisker.daemon.plist.example ~/Library/LaunchAgents/local.openwhisker.daemon.plist
 ```
 
 必须检查并替换模板中的占位符：
