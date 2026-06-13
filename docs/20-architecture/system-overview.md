@@ -2,7 +2,7 @@
 
 本文是 OpenWhisker 的当前架构索引。
 
-详细概念来源是 [`design-philosophy.md`](design-philosophy.md)。本文负责把概念文档收敛成当前仓库的实现边界和后续演进方向。各子系统的详细设计见对应文档：[只读定时 Skill 调度](scheduler.md) · [Agent 工具调用](agent-tooling.md) · [收件箱自动 enrich](inbox-enrichment.md) · [记忆召回](memory-recall.md)。
+详细概念来源是 [`design-philosophy.md`](design-philosophy.md)。本文负责把概念文档收敛成当前仓库的实现边界和后续演进方向。各子系统的详细设计见对应文档：[只读定时 Skill 调度](../30-design/scheduler.md) · [Agent 工具调用](../30-design/agent-tooling.md) · [收件箱自动 enrich](../30-design/inbox-enrichment.md) · [记忆召回](../30-design/memory-recall.md)。
 
 ## 当前实现基线
 
@@ -25,7 +25,7 @@ raw text input
 
 approval apply 是 sync-aware 的：默认 test vault 仍关闭同步；当用户显式传入真实 vault 路径且使用默认 `--sync=auto` 时，core 会在 `direct_fs_executor.Apply` 前后通过 Headless `ob` 执行 one-shot sync。pre-sync 后仍由 `DirectFS.Apply` 重新执行 lock、path guard 和 `before_hash` guard；post-sync 失败只作为 warning 返回，不把已成功的 vault write 误标为失败。
 
-IM 入口实现了 Matrix Adapter、长期 Matrix daemon、Core Adapter API，以及 IM Intent Router（rules / hybrid / off 三模式、capture bucket、source-scoped binding、pending clarification 状态机）。落地能力的当前状态、验证状态与下一步优先级以 [`progress.md`](../progress.md) 为准。
+IM 入口实现了 Matrix Adapter、长期 Matrix daemon、Core Adapter API，以及 IM Intent Router（rules / hybrid / off 三模式、capture bucket、source-scoped binding、pending clarification 状态机）。落地能力的当前状态、验证状态与下一步优先级以 [`progress.md`](../00-overview/project-status.md) 为准。
 
 ## 系统定位
 
@@ -69,8 +69,8 @@ External System
 
 - **Raw Organizer**：真实 LLM-backed，可显式启用；
 - **Knowledge Expander**：瘦身版，仅 `append`（medium）+ `propose_restructure`（high），CLI-only；
-- **Scheduler Skill Runner**：只读 scheduler host，详见[只读定时 Skill 调度](scheduler.md)；
-- **Agent 工具调用 runtime**：host-agnostic 的 `AgentRunner` + `ToolCallingEngine` + 5 read-only vault 工具 + `recall_memory`，被 scheduler / Matrix `@<skill-id>` / CLI `ask` / inbox enrich 四类触发共用，详见[Agent 工具调用](agent-tooling.md)。
+- **Scheduler Skill Runner**：只读 scheduler host，详见[只读定时 Skill 调度](../30-design/scheduler.md)；
+- **Agent 工具调用 runtime**：host-agnostic 的 `AgentRunner` + `ToolCallingEngine` + 5 read-only vault 工具 + `recall_memory`，被 scheduler / Matrix `@<skill-id>` / CLI `ask` / inbox enrich 四类触发共用，详见[Agent 工具调用](../30-design/agent-tooling.md)。
 
 Wiki Reader 和完整 Maintenance Agent 仍属于 `design-philosophy.md` 描述的后续方向。
 
@@ -80,7 +80,7 @@ reasoning 和 writing 之间的审计边界。一个 plan 包含 purpose、risk 
 
 ### Policy Checker
 
-在 approval 或 execution 前验证 plan：path safety、allowed operation types、risk classification、approval requirement、source traceability、OpenWhisker trace frontmatter，以及 vault-specific `VaultProfile` / `VaultSkill` 声明的目录和 controlled tag 要求。inbox enrich 在此基础上叠加 path / field / body 三道 guard，见[收件箱自动 enrich](inbox-enrichment.md)。
+在 approval 或 execution 前验证 plan：path safety、allowed operation types、risk classification、approval requirement、source traceability、OpenWhisker trace frontmatter，以及 vault-specific `VaultProfile` / `VaultSkill` 声明的目录和 controlled tag 要求。inbox enrich 在此基础上叠加 path / field / body 三道 guard，见[收件箱自动 enrich](../30-design/inbox-enrichment.md)。
 
 ### VaultExecutor
 
@@ -95,11 +95,11 @@ reasoning 和 writing 之间的审计边界。一个 plan 包含 purpose、risk 
 
 ### Outbox
 
-向选定的 UI 或 IM channel 发送用户可见的状态、审批提示、diff、错误和完成消息。首期核心 IM 入口实践见 [`matrix-private-im.md`](../adapters/matrix-private-im.md)。Matrix adapter 属于交互层和 outbox 通知层，通过 bot client `/sync` 接收命令和 raw input，不直接写 vault，也不绕过 `VaultPlan -> Policy Check -> Approval -> VaultExecutor` 链路。
+向选定的 UI 或 IM channel 发送用户可见的状态、审批提示、diff、错误和完成消息。首期核心 IM 入口实践见 [`matrix-private-im.md`](../30-design/matrix-adapter.md)。Matrix adapter 属于交互层和 outbox 通知层，通过 bot client `/sync` 接收命令和 raw input，不直接写 vault，也不绕过 `VaultPlan -> Policy Check -> Approval -> VaultExecutor` 链路。
 
 outbox 使用 actor identity：Knowledge Bot 负责用户主动触发的 capture / organize / expand / approval；Scheduler Bot 负责定时简报、RSS 观察、提醒和 suggested capture 确认提示。两个 bot 可在同一 Matrix room 内共存，delivery 按 `knowledge` / `scheduler` actor 选择发送身份；Scheduler Bot 仍只是 read-only Scheduler 的展示与交互身份，不因此获得 vault 写入能力。
 
-**outbox 路由按 kind 订阅（多 OUT adapter 后的方向）**：`actor` 解决"谁发"（发送身份），是已实现的一个轴；当 OUT adapter 不止 Matrix 时，还需要"发给哪个 adapter"这第二个轴，挂在 `OutboxMessage.Kind` 上——**每个 adapter 声明自己认领哪些 kind、各收各的**，producer（scheduler / 命令路径 / 任何 skill）不写死目标 adapter。面向人的通知类 kind（如 `human_notification`：简报 / 提醒 / 确认文案）是**泛支持**，所有人类通知 adapter 都收；面向特定外部系统的 kind（如 `review_cards`）只由认领它的 adapter 消费。这样换 / 加一个 OUT adapter 不改 producer。今天只有 Matrix 一个 OUT adapter，路由退化为直发；第二个 adapter 的具体落地见 [`knowledgehelper-integration.md`](knowledgehelper-integration.md)（设计稿，未落代码）。
+**outbox 路由按 kind 订阅（多 OUT adapter 后的方向）**：`actor` 解决"谁发"（发送身份），是已实现的一个轴；当 OUT adapter 不止 Matrix 时，还需要"发给哪个 adapter"这第二个轴，挂在 `OutboxMessage.Kind` 上——**每个 adapter 声明自己认领哪些 kind、各收各的**，producer（scheduler / 命令路径 / 任何 skill）不写死目标 adapter。面向人的通知类 kind（如 `human_notification`：简报 / 提醒 / 确认文案）是**泛支持**，所有人类通知 adapter 都收；面向特定外部系统的 kind（如 `review_cards`）只由认领它的 adapter 消费。这样换 / 加一个 OUT adapter 不改 producer。今天只有 Matrix 一个 OUT adapter，路由退化为直发；第二个 adapter 的具体落地见 [`knowledgehelper-integration.md`](../30-design/knowledgehelper-integration.md)（设计稿，未落代码）。
 
 ## 数据对象
 

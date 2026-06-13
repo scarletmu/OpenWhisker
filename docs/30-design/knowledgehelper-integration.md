@@ -1,6 +1,6 @@
 # KnowledgeHelper 对接设计
 
-> 本文是**设计方向稿，未落代码**。它描述 OpenWhisker 与 KnowledgeHelper（仓库内部代号 InterviewPolice，下称 KH）如何打通。核心立场：**KH 不是一次性的"外部系统集成"，而是挂在 OpenWhisker 现有 Core Adapter API 下的第二个 adapter**，与 [Matrix Adapter](../adapters/matrix-private-im.md) 同类。具体能力是否已实现以 [`progress.md`](../progress.md) 为准；与[设计哲学](design-philosophy.md)一样，不要假设这里描述的每项能力都已落地。
+> 本文是**设计方向稿，未落代码**。它描述 OpenWhisker 与 KnowledgeHelper（仓库内部代号 InterviewPolice，下称 KH）如何打通。核心立场：**KH 不是一次性的"外部系统集成"，而是挂在 OpenWhisker 现有 Core Adapter API 下的第二个 adapter**，与 [Matrix Adapter](matrix-adapter.md) 同类。具体能力是否已实现以 [`project-status.md`](../00-overview/project-status.md) 为准；与[设计哲学](../20-architecture/design-philosophy.md)一样，不要假设这里描述的每项能力都已落地。
 
 KH 是一款移动端优先、离线优先的**面试题卡复习 PWA**：把面试题整理成「题卡 + 题目 + 标签」，配合 AI 实时批改（`GradeResult`）、AI 讲解（`ExplainResult`）与 TTS，追踪掌握度、易错题和复盘历史。后端 Go + Gin + GORM，AI 走厂商中立的 OpenAI 兼容接口（dev 指向 DeepSeek），契约以 `openapi/openapi.yaml` 为单一真相。
 
@@ -76,7 +76,7 @@ KH 就挂在同一套 API 下（落地建议 `internal/adapters/knowledgehelper/
 - **方向 A（OW→KH）= OUT**：切卡结果是一种新 kind（`review_cards`）的 `OutboxMessage`；KH adapter `PullOutbox` → 翻成 KH 的 `/import/preview` + `/import/commit` → `MarkOutboxDelivered`。与 Matrix adapter 拉 outbox→发房间→标已投递同构。
 - **方向 B（KH→OW）= IN**：复习遥测经 `AdapterRequest` 喂进 `HandleText`（或结构化的兄弟入口）→ 变 capture/WikiJob → Raw → enrichment/Expander。与一条 Matrix 消息进来同构。
 
-**outbox 路由按"能力/kind 订阅"（多 adapter 后的关键机制）**：outbox 消息已有的 `Kind` 字段就是挂点——**adapter 声明自己认领哪些 kind、各收各的**，skill / 命令不写死目标 adapter。`review_cards` 只有 KH adapter（将来还有 Anki adapter）认领；面向人的 `human_notification`（简报 / 提醒 / 确认文案）是**泛支持**类，所有人类通知 adapter 都收。这样换/加卡片系统不改 skill，兑现"KH 可替换"。**此为跨 adapter 的通用机制，不限 KH**（scheduler、命令路径、未来任何 adapter 都适用）；本文只就 KH 用到的 kind 说明，通用机制的权威描述见[架构概览的 Outbox 路由](overview.md#outbox)。
+**outbox 路由按"能力/kind 订阅"（多 adapter 后的关键机制）**：outbox 消息已有的 `Kind` 字段就是挂点——**adapter 声明自己认领哪些 kind、各收各的**，skill / 命令不写死目标 adapter。`review_cards` 只有 KH adapter（将来还有 Anki adapter）认领；面向人的 `human_notification`（简报 / 提醒 / 确认文案）是**泛支持**类，所有人类通知 adapter 都收。这样换/加卡片系统不改 skill，兑现"KH 可替换"。**此为跨 adapter 的通用机制，不限 KH**（scheduler、命令路径、未来任何 adapter 都适用）；本文只就 KH 用到的 kind 说明，通用机制的权威描述见[架构概览的 Outbox 路由](../20-architecture/system-overview.md#outbox)。
 
 **这个模型的核心收益是把 transport 和 reasoning 彻底分开：**
 
@@ -115,7 +115,7 @@ KH 就挂在同一套 API 下（落地建议 `internal/adapters/knowledgehelper/
 
   "按知识点聚合"不在这一步做——题→知识点的归类交给下游 enrichment（它本就基于 vault 词表做归属），避免送回这步提前硬聚合。
 
-- **走标准链路**：Raw 落盘（低风险自动放行）→ [收件箱 enrichment](inbox-enrichment.md) 挂回源笔记的 `topic/` / `skill/` 词表 → 需要补知识时由 [Knowledge Expander](knowledge-expander-model-contract.md) 生成 `VaultPlan`（写 `Knowledge/` 为中风险走审批；大改结构为 high-risk 出 proposal note）。
+- **走标准链路**：Raw 落盘（低风险自动放行）→ [收件箱 enrichment](inbox-enrichment.md) 挂回源笔记的 `topic/` / `skill/` 词表 → 需要补知识时由 [Knowledge Expander](../40-api/knowledge-expander-model-contract.md) 生成 `VaultPlan`（写 `Knowledge/` 为中风险走审批；大改结构为 high-risk 出 proposal note）。
 - **`missing` 是核心价值**：它是结构化、具体到知识点的"差距清单"。普通笔记系统只知道"你写了什么"，这条回流让 vault 知道"你以为掌握、实际答不出的是什么"，精确驱动补全——这是 OW 现有 capture / enrichment 拿不到的输入。
 
 ## 7. binding 表（adapter 自有状态）

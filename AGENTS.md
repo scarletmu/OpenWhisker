@@ -8,7 +8,7 @@ The current goal is to develop OpenWhisker into a wiki-first, plan-before-write 
 
 ### Design Philosophy
 
-- `docs/architecture/design-philosophy.md`
+- `docs/20-architecture/design-philosophy.md`
 
 This is the primary design source for the proposed `VaultPlan / VaultExecutor` architecture.
 

@@ -259,12 +259,7 @@ func (s IngestService) AppendRawBucket(ctx context.Context, req AppendRawBucketR
 		return model.CaptureBucket{}, IngestRawResult{}, fmt.Errorf("bucket %s is %s, cannot append", bucket.ID, bucket.Status)
 	}
 	if !bucket.ExpiresAt.IsZero() && now.After(bucket.ExpiresAt) {
-		bucket.Status = model.CaptureBucketStatusExpired
-		bucket.UpdatedAt = now
-		closedAt := now
-		bucket.ClosedAt = &closedAt
-		bucket.CloseReason = "ttl expired"
-		_ = s.store.SaveCaptureBucket(bucket)
+		s.closeBucket(bucket, model.CaptureBucketStatusExpired, "ttl expired", now)
 		return model.CaptureBucket{}, IngestRawResult{}, fmt.Errorf("bucket %s expired", bucket.ID)
 	}
 	current, err := s.readVaultFile(bucket.RawPath)
@@ -272,12 +267,7 @@ func (s IngestService) AppendRawBucket(ctx context.Context, req AppendRawBucketR
 		return model.CaptureBucket{}, IngestRawResult{}, err
 	}
 	if currentHash := model.ContentHash([]byte(current)); currentHash != bucket.RawHashAfterLastAppend {
-		bucket.Status = model.CaptureBucketStatusHashMismatch
-		bucket.UpdatedAt = now
-		closedAt := now
-		bucket.ClosedAt = &closedAt
-		bucket.CloseReason = "raw hash mismatch"
-		_ = s.store.SaveCaptureBucket(bucket)
+		s.closeBucket(bucket, model.CaptureBucketStatusHashMismatch, "raw hash mismatch", now)
 		return model.CaptureBucket{}, IngestRawResult{}, fmt.Errorf("bucket %s raw hash mismatch", bucket.ID)
 	}
 	inputJSON, err := json.Marshal(req)
@@ -440,15 +430,33 @@ func (s IngestService) readVaultFile(relPath string) (string, error) {
 }
 
 func (s IngestService) failJob(jobID string, err error) error {
-	_ = s.store.AddOutboxMessage(model.OutboxMessage{
+	return failJobWithError(s.store, s.now(), jobID, err)
+}
+
+// closeBucket records a terminal status on a capture bucket and persists it.
+// The store error is intentionally ignored: callers are already returning a
+// more specific error to the user, and bucket closure is best-effort cleanup.
+func (s IngestService) closeBucket(bucket model.CaptureBucket, status, reason string, now time.Time) {
+	bucket.Status = status
+	bucket.UpdatedAt = now
+	closedAt := now
+	bucket.ClosedAt = &closedAt
+	bucket.CloseReason = reason
+	_ = s.store.SaveCaptureBucket(bucket)
+}
+
+// failJobWithError emits an error outbox message and marks the job failed.
+// Shared by IngestService.failJob and PlanService.failPlanJob.
+func failJobWithError(store *storage.Store, now time.Time, jobID string, err error) error {
+	_ = store.AddOutboxMessage(model.OutboxMessage{
 		ID:        model.NewID("out"),
 		JobID:     jobID,
 		Kind:      model.OutboxKindError,
 		Body:      err.Error(),
 		Status:    model.OutboxStatusPending,
-		CreatedAt: s.now(),
+		CreatedAt: now,
 	})
-	return s.store.UpdateJobStatus(jobID, model.JobStatusFailed, "", err.Error())
+	return store.UpdateJobStatus(jobID, model.JobStatusFailed, "", err.Error())
 }
 
 func renderRawNote(job model.WikiJob, text string, createdAt time.Time) string {

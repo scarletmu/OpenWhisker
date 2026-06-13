@@ -4,7 +4,7 @@
 
 写入主链路解决的是"用户触发后如何安全地把知识变更写入 vault"；Scheduler 解决的是另一类问题：系统如何在合适的时间主动把该看的信息推到用户面前。因此 Scheduler 被建模为新的**输入和观察层**，而不是新的写入层。
 
-完整写入边界与风险分级见[设计哲学](design-philosophy.md)；agent 运行时见[Agent 工具调用](agent-tooling.md)。
+完整写入边界与风险分级见[设计哲学](../20-architecture/design-philosophy.md)；agent 运行时见[Agent 工具调用](agent-tooling.md)。
 
 ## 定位
 
@@ -206,7 +206,7 @@ openwhisker daemon
 - scheduler tick 后尽快触发 outbox delivery，但 delivery 失败不回滚 scheduler run log；
 - 并发模型：scheduler ticker + Matrix long-poll 两个 goroutine 共享单连接 `storage.Store`，不引入 supervisor / 多 worker，不并发执行同一 schedule；tick error 写 stderr 并等下一轮，不退出进程。
 
-部署模板见[部署指南](../deployment/README.md)（macOS launchd / Linux systemd）。
+部署模板见[部署指南](../50-deployment/README.md)（macOS launchd / Linux systemd）。
 
 ## suggested_raw_capture：外部信息转 Raw
 

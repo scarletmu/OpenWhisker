@@ -2,7 +2,7 @@
 
 本文描述 inbox enrichment：在 raw 输入落盘后，叠加一层**异步的 enrichment agent run**，让 LLM 用只读 vault 工具把刚落盘的 Raw 在你 vault **已有的 `topic/` / `skill/` tag 词表**里定位，把归属结果写回 Raw 的 frontmatter。
 
-它复用 [Agent 工具调用](agent-tooling.md)的同一套 runtime 与 5+1 read-only 工具，写回仍走主线 `VaultPlan → Policy → Executor`（见[设计哲学](design-philosophy.md)），词表与召回侧依赖[记忆召回](memory-recall.md)。
+它复用 [Agent 工具调用](agent-tooling.md)的同一套 runtime 与 5+1 read-only 工具，写回仍走主线 `VaultPlan → Policy → Executor`（见[设计哲学](../20-architecture/design-philosophy.md)），词表与召回侧依赖[记忆召回](memory-recall.md)。
 
 核心立场：
 
