@@ -128,7 +128,7 @@ KH 就挂在同一套 API 下（落地建议 `internal/adapters/knowledgehelper/
 - **Card 级断链（Obsidian 里手动重命名/移动）**：OW 自己执行的移动顺手更新表；只有"绕过 OW 的手动移动"会路径失配。处理——投影时发现映射路径已不存在、却冒出一篇未映射且标题/内容高度相似的新笔记 → 在预览里提示「`Interview/A.md` 像是被重命名成 `Interview/B.md`，把它的 12 张卡重新挂过去？」，人确认即愈合。
 - **Question 级断链（改字 / 重排 / 增删题）**：投影时拿当前题目集与表里的文本快照做**相似度对齐**（文本相似为主、顺序作 tiebreaker），产出"匹配 / 新增 / 删除 / 改写"方案，塞进方向 A 那个本来就要人确认的预览。改字不丢复习状态（仍能匹配上），重排不错位。
 - **残余风险**：相似度对齐在"两道题几乎一样""一道题被大改到像删了重写"的**模糊尾部**可能错配。兜底——**模糊的永不自动决议，一律进预览让人裁定**；最坏只是那条尾部题目的复习状态重置（与纯 hash 一个量级），只发生在真正歧义处。
-- **方向 B 的 `source`**：KH 的 `Question.source` 只存 **OW 发的不透明 questionId**（稳定），回流时由 adapter 用 binding 解析成当时的活笔记路径。KH 这边也保持干净、不感知 vault 路径。
+- **方向 B 的 `sourceRef`**：KH 的 `Question.sourceRef` 只存 **OW 发的不透明 questionId**（稳定），回流时由 adapter 用 binding 解析成当时的活笔记路径。KH 这边也保持干净、不感知 vault 路径。（字段定名 `sourceRef` 而非 `source`，是为避开 spec 里已占用的 `GradeResult.source` 命名碰撞，详见[契约对接单](../40-api/knowledgehelper-contract.md) Part A。）
 - **附带好处**：这份"上次投影快照"正好是将来 scheduler 版（§5）算"自上次以来改了啥"所需的状态，顺手铺路。
 
 ## 8. reasoning 与 Skill
@@ -154,11 +154,12 @@ study（vault）→ test（KH）→ 测出缺口（grading `missing`）→ 捕�
 
 | 改动点 | 位置 | 说明 |
 |---|---|---|
-| `Question.source` | KH `openapi/openapi.yaml` | 存 OW 发的不透明 questionId，供方向 B 回流解析源笔记。改 spec 后双端 codegen 联动（`oapi-codegen` + `openapi-typescript`） |
-| 复习事件 `pending/delivered` | KH 后端 + 只读遥测端点 | KH 打点 + 暴露 pending 增量（weak + `missing` + history），挂 JWT，沿用"后端是 AI/数据唯一出口"鉴权 |
+| `Question.sourceRef` | KH `openapi/openapi.yaml` | 存 OW 发的不透明 questionId，供方向 B 回流解析源笔记。定名 `sourceRef` 避开 `GradeResult.source` 碰撞。改 spec 后双端 codegen 联动（`oapi-codegen` + `openapi-typescript`） |
+| 只读复习遥测端点 | KH 后端 + `openapi.yaml` | 暴露 weak 题增量（`since` 游标 + `missing` + history），挂 JWT，沿用"后端是 AI/数据唯一出口"鉴权。**这是方向 B 的 v1 必需件** |
+| 复习事件 `pending/delivered`（可选） | KH 后端 | per-event 投递标记，仅省流量、非正确性依赖（OW 侧幂等已兜底）；是 snapshot/append 形态之上的**新状态层**，拉入时按真实工作量评估，**非 v1** |
 | KH Adapter | OW `internal/adapters/knowledgehelper/` | 挂 Core Adapter API；OUT=切卡 outbox→import，IN=遥测→capture；持有 binding 表 |
 | 切卡 outbox kind + 切卡 Skill | OW core + vault-local Skill | 新 OutboxMessage kind；`vault-review-card-extractor` Skill |
-| 遥测拉取 | OW scheduler | 周期 pull pending + ack |
+| 遥测拉取 | OW scheduler | 周期 pull（`since` 游标）→ 幂等落 Raw；scheduler 只读不 ack（见 §6） |
 
 **不改动**：KH 始终是干净的 PWA + API，不感知 vault、不引入 vault 依赖、不主动出站；OW 不新增绕过 VaultExecutor 的写入面；LLM 不感知 KH。
 
@@ -172,7 +173,7 @@ study（vault）→ test（KH）→ 测出缺口（grading `missing`）→ 捕�
 
 ## 12. 演进路径（建议顺序）
 
-1. **契约打底**：KH 给 `Question` 加 `source`、复习事件加 `pending/delivered`，跑通双端 codegen。
+1. **契约打底**：KH 给 `Question` 加 `sourceRef`、新增只读复习遥测端点（`since` 游标增量），跑通双端 codegen；per-event `pending/delivered` 为可选优化、非 v1 必需。可直接执行的 KH 侧 checklist 见[契约对接单](../40-api/knowledgehelper-contract.md)。
 2. **KH Adapter 骨架**：挂 Core Adapter API，打通 OUT（import）与 IN（遥测）两条传输 + binding 表。
 3. **方向 A 最小切片**：显式命令 → 切卡 Skill 只覆盖 `Interview/` → preview→审批（含 binding 对账）→ commit。
 4. **方向 B 回流**：scheduler pull pending → 幂等落 Raw → enrichment 挂回源笔记。
