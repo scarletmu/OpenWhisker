@@ -2,6 +2,8 @@
 
 状态：partial implementation。Stage 1 rules-only 入口、`source_key` 绑定、Matrix 接入、source-scoped approval guard、raw bucket append metadata rewrite、intent-triggered create/organize/approve/reject outbox suppression、Stage 2 OpenAI-compatible classifier、intent audit jsonl，以及 `bucket_relation=unclear` 触发的 pending clarification 状态机（创建 / 数字+短语规则匹配回复 / 新消息自动 cancel / 5 分钟 TTL 惰性 expire）已落代码；澄清回复抽取 `additional_payload_text` 尚未实现。
 
+> **方向提示**：本文记录当前**已落代码**的 bucket + 审批意图路由实现。IM 入口正按 [`im-quick-capture.md`](im-quick-capture.md) 重定位为零摩擦速记收件箱——届时 `organize_request` / `diff_request` / `approve_request` / `reject_request` 四类意图与 topic-bucket 绑定将收敛或移除，输入路由退化为"链接还是文字 + 三个保留命令（看今天 / 撤回上一条 / 找一下）"。本文描述的是**现状**，不是目标形态；改造落代码前不要据此假设未来行为。
+
 本文定义 OpenWhisker 的通用 IM Intent Router 边界。它是 adapter 入站消息和 Core Adapter API 之间的中间件，用于把自然语言入口归一化成受控结构化意图。
 
 ## 位置

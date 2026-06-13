@@ -131,6 +131,7 @@ vocab / 现状就绪
 
 ## 参考
 
+- IM 速记入口（其第 4 节后台打标复用本文走法 A）：[IM 速记捕获](im-quick-capture.md)
 - 写入主链路与风险分级：[设计哲学](../20-architecture/design-philosophy.md)
 - 已实现的走法-A 对照基线：[收件箱自动 enrich](inbox-enrichment.md)
 - ReAct 引擎与工具：[Agent 工具调用](agent-tooling.md)

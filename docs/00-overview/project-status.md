@@ -35,6 +35,7 @@ CLI 与部署：完整命令面见 `go run ./cmd/openwhisker`；作为长期服�
 
 ## 后续方向
 
+- **IM 入口重定位为速记收件箱**：把现有"分组 + 审批"流水线收敛为零摩擦异步速记（文字→当天收件箱 `Raw/Inbox/`、链接→后台剪藏入 `Raw/Sources/`、后台 ReAct 打标、三个收件箱命令），移除 IM 路径的 organize / approve / diff 往返。设计稿见 [`im-quick-capture.md`](../30-design/im-quick-capture.md)，未落代码；落地后上方"IM Intent Router""capture bucket"相关现状描述将随之收敛。
 - 按真实使用反馈扩展 rules-only 短句词表与 clarification 回复词表（基于真实未命中样本，避免盲扩）。
 - 新增能力（多模态 bucket 输入、clarification 回复 `additional_payload_text` 抽取等）按"已知限制"里的实际需求单独立项。
 - intent router / scheduler skill 接入 `memory.Recall()`，把"这条消息是否延续某个 tag 主题"作为分类信号。
