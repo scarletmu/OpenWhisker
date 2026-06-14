@@ -880,7 +880,7 @@ func runMatrixPollOnce(args []string, stdout, stderr io.Writer) error {
 	contextMode := fs.String("context-mode", contextModeDefault(), "raw organizer context mode: minimal or vault-rules")
 	vaultProfile := fs.String("vault-profile", vaultProfileDefault(), "vault profile: generic or knowledge-vault")
 	llmModel := fs.String("llm-model", llmModelDefault(), "OpenAI-compatible model for --organizer=openai-compatible")
-	intentRouter := fs.String("intent-router", intentRouterDefault(), "intent router mode: hybrid, rules, or off")
+	intentRouter := fs.String("intent-router", intentRouterDefault(), "intent router mode: hybrid, rules, quick-capture, or off")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -973,7 +973,7 @@ func runMatrixDaemon(args []string, stdout, stderr io.Writer) error {
 	contextMode := fs.String("context-mode", contextModeDefault(), "raw organizer context mode: minimal or vault-rules")
 	vaultProfile := fs.String("vault-profile", vaultProfileDefault(), "vault profile: generic or knowledge-vault")
 	llmModel := fs.String("llm-model", llmModelDefault(), "OpenAI-compatible model for --organizer=openai-compatible")
-	intentRouter := fs.String("intent-router", intentRouterDefault(), "intent router mode: hybrid, rules, or off")
+	intentRouter := fs.String("intent-router", intentRouterDefault(), "intent router mode: hybrid, rules, quick-capture, or off")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1078,7 +1078,7 @@ func runDaemon(args []string, stdout, stderr io.Writer) error {
 	errorDelay := fs.Duration("error-delay", 5*time.Second, "delay after Matrix sync errors")
 	organizerName := fs.String("organizer", organizerDefault(), "raw organizer: deterministic or openai-compatible")
 	contextMode := fs.String("context-mode", contextModeDefault(), "raw organizer context mode: minimal or vault-rules")
-	intentRouter := fs.String("intent-router", intentRouterDefault(), "intent router mode: hybrid, rules, or off")
+	intentRouter := fs.String("intent-router", intentRouterDefault(), "intent router mode: hybrid, rules, quick-capture, or off")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1798,8 +1798,8 @@ func printUsage(stderr io.Writer) {
   openwhisker scheduler schedules list [--db data/openwhisker.db] [--vault testdata/vault] [--vault-profile generic|knowledge-vault]
   openwhisker scheduler schedules enable|disable [--db data/openwhisker.db] [--vault testdata/vault] [--vault-profile generic|knowledge-vault] <schedule_id>
   openwhisker scheduler accept [--db data/openwhisker.db] [--vault testdata/vault] [--vault-profile generic|knowledge-vault] [--item 1] <scheduler_run_id>
-  openwhisker matrix poll-once [--db data/openwhisker.db] [--vault testdata/vault] [--homeserver URL] [--access-token TOKEN] [--password PASSWORD] [--user-id USER] [--room-id ROOM] [--session-file data/matrix-session.json] [--scheduler-access-token TOKEN] [--scheduler-password PASSWORD] [--scheduler-user-id USER] [--scheduler-session-file data/matrix-scheduler-session.json] [--since TOKEN] [--intent-router hybrid|rules|off] [--organizer deterministic|openai-compatible] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault] [--llm-model MODEL]
-  openwhisker matrix daemon [--db data/openwhisker.db] [--vault testdata/vault] [--homeserver URL] [--access-token TOKEN] [--password PASSWORD] [--user-id USER] [--room-id ROOM] [--since-file data/matrix-since.token] [--session-file data/matrix-session.json] [--scheduler-access-token TOKEN] [--scheduler-password PASSWORD] [--scheduler-user-id USER] [--scheduler-session-file data/matrix-scheduler-session.json] [--intent-router hybrid|rules|off] [--organizer deterministic|openai-compatible] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault] [--llm-model MODEL]`)
+  openwhisker matrix poll-once [--db data/openwhisker.db] [--vault testdata/vault] [--homeserver URL] [--access-token TOKEN] [--password PASSWORD] [--user-id USER] [--room-id ROOM] [--session-file data/matrix-session.json] [--scheduler-access-token TOKEN] [--scheduler-password PASSWORD] [--scheduler-user-id USER] [--scheduler-session-file data/matrix-scheduler-session.json] [--since TOKEN] [--intent-router hybrid|rules|quick-capture|off] [--organizer deterministic|openai-compatible] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault] [--llm-model MODEL]
+  openwhisker matrix daemon [--db data/openwhisker.db] [--vault testdata/vault] [--homeserver URL] [--access-token TOKEN] [--password PASSWORD] [--user-id USER] [--room-id ROOM] [--since-file data/matrix-since.token] [--session-file data/matrix-session.json] [--scheduler-access-token TOKEN] [--scheduler-password PASSWORD] [--scheduler-user-id USER] [--scheduler-session-file data/matrix-scheduler-session.json] [--intent-router hybrid|rules|quick-capture|off] [--organizer deterministic|openai-compatible] [--context-mode minimal|vault-rules] [--vault-profile generic|knowledge-vault] [--llm-model MODEL]`)
 }
 
 func defaultOBBin() string {
@@ -2102,10 +2102,11 @@ func intentClassifierForMode(mode string) (core.IntentClassifier, error) {
 				Project:      coalesce(os.Getenv("OPENWHISKER_INTENT_PROJECT_ID"), os.Getenv("OPENAI_PROJECT_ID")),
 			},
 		}, nil
-	case "rules", "off":
+	case "rules", "quick-capture", "off":
+		// quick-capture and rules/off need no LLM intent classifier.
 		return nil, nil
 	default:
-		return nil, fmt.Errorf("unsupported intent router mode %q; want hybrid, rules, or off", mode)
+		return nil, fmt.Errorf("unsupported intent router mode %q; want hybrid, rules, quick-capture, or off", mode)
 	}
 }
 

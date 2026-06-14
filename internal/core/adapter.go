@@ -115,10 +115,39 @@ func (s AdapterService) HandleText(ctx context.Context, req AdapterRequest) (Ada
 			return resp, err
 		}
 	}
+	// Quick-capture mode: every non-slash message is a frictionless capture
+	// into the per-day inbox. Slash commands still reach the adapter command
+	// parser (e.g. /status, /jobs) for operational use. Bucket / approval /
+	// clarification intents are intentionally bypassed.
+	if s.intentRouterMode == intentRouterModeQuickCapture {
+		if strings.HasPrefix(req.Text, "/") {
+			return s.handleAdapterCommand(ctx, req)
+		}
+		return s.handleQuickCapture(ctx, req)
+	}
 	if s.intentRouterMode != "off" && !strings.HasPrefix(req.Text, "/") {
 		return s.handleIntentText(ctx, req)
 	}
 	return s.handleAdapterCommand(ctx, req)
+}
+
+// handleQuickCapture appends one text snippet to the per-day inbox and returns
+// an immediate "已记录" ack. No outbox message is emitted (the ack is the
+// response body) and no enrich hook fires — background tagging is a later step.
+func (s AdapterService) handleQuickCapture(ctx context.Context, req AdapterRequest) (AdapterResponse, error) {
+	result, err := NewIngestServiceWithConventions(s.store, s.vaultRoot, s.planOpts.Conventions).
+		CaptureInbox(ctx, CaptureInboxRequest{
+			Text:   req.Text,
+			Source: adapterSource(req),
+		})
+	if err != nil {
+		return AdapterResponse{}, err
+	}
+	return AdapterResponse{
+		Status: model.JobStatusDone,
+		JobID:  result.JobID,
+		Body:   "已记录",
+	}, nil
 }
 
 // tryHandleAtMention returns handled=false when the message is not an

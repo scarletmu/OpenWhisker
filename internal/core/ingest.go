@@ -23,6 +23,10 @@ type IngestService struct {
 	vaultRoot   string
 	now         func() time.Time
 	enrichHook  EnrichEnqueuer
+	// loc resolves the day boundary and block timestamps for the quick-capture
+	// inbox. nil falls back to time.Local — a personal capture inbox rolls over
+	// at the user's local midnight, not UTC. Injectable for deterministic tests.
+	loc *time.Location
 }
 
 // EnrichEnqueuer is the dependency-inverted interface IngestService uses to
@@ -96,6 +100,20 @@ func NewIngestServiceWithConventions(store *storage.Store, vaultRoot string, con
 func (s IngestService) WithEnrichHook(h EnrichEnqueuer) IngestService {
 	s.enrichHook = h
 	return s
+}
+
+// WithLocation pins the timezone used to resolve the quick-capture day file
+// and block timestamps. Tests set a fixed location for deterministic output.
+func (s IngestService) WithLocation(loc *time.Location) IngestService {
+	s.loc = loc
+	return s
+}
+
+func (s IngestService) location() *time.Location {
+	if s.loc != nil {
+		return s.loc
+	}
+	return time.Local
 }
 
 func (s IngestService) IngestRaw(ctx context.Context, req IngestRawRequest) (IngestRawResult, error) {
@@ -196,6 +214,165 @@ func (s IngestService) IngestRaw(ctx context.Context, req IngestRawRequest) (Ing
 		}
 	}
 	return result, nil
+}
+
+// CaptureInboxRequest is one frictionless quick-capture: a single text snippet
+// appended to the day's rolling inbox file. No bucket, no approval.
+type CaptureInboxRequest struct {
+	Text   string `json:"text"`
+	Source string `json:"source"`
+}
+
+// CaptureInbox is the IM quick-capture spine: append one text snippet to the
+// per-day inbox file Raw/Inbox/YYYY-MM-DD.md as an independent, timestamped
+// "## 输入 N" block. The first capture of the day creates the file; later
+// captures rewrite it under a content-hash guard. Low-risk, auto-applied, no
+// outbox message (the caller returns the ack directly). Background tagging,
+// link clipping, and inbox commands are later steps and are not wired here.
+func (s IngestService) CaptureInbox(ctx context.Context, req CaptureInboxRequest) (IngestRawResult, error) {
+	req.Text = strings.TrimSpace(req.Text)
+	if req.Text == "" {
+		return IngestRawResult{}, errors.New("raw text is required")
+	}
+	if req.Source == "" {
+		req.Source = "cli"
+	}
+
+	now := s.now()
+	local := now.In(s.location())
+	day := local.Format("2006-01-02")
+	targetPath := fmt.Sprintf("%s/%s.md", s.conventions.RawInboxDir, day)
+
+	existing, exists, err := s.readVaultFileIfExists(targetPath)
+	if err != nil {
+		return IngestRawResult{}, err
+	}
+
+	inputJSON, err := json.Marshal(req)
+	if err != nil {
+		return IngestRawResult{}, err
+	}
+	jobType := model.JobTypeIngestRaw
+	if exists {
+		jobType = model.JobTypeAppendRaw
+	}
+	job := model.WikiJob{
+		ID:        model.NewID("job"),
+		Type:      jobType,
+		Status:    model.JobStatusPending,
+		Source:    req.Source,
+		InputJSON: string(inputJSON),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := s.store.CreateJob(job); err != nil {
+		return IngestRawResult{}, err
+	}
+
+	plan, err := s.buildInboxPlan(job, targetPath, existing, exists, req.Text, req.Source, local, now)
+	if err != nil {
+		_ = s.failJob(job.ID, err)
+		return IngestRawResult{}, err
+	}
+	if err := s.store.SavePlan(plan); err != nil {
+		_ = s.failJob(job.ID, err)
+		return IngestRawResult{}, err
+	}
+	if err := s.checker.Check(plan); err != nil {
+		_ = s.failJob(job.ID, err)
+		return IngestRawResult{}, err
+	}
+	if err := s.store.UpdateJobStatus(job.ID, model.JobStatusApplying, "", ""); err != nil {
+		return IngestRawResult{}, err
+	}
+	applyResult, err := s.executor.Apply(ctx, plan)
+	if err != nil {
+		_ = s.store.UpdatePlanStatus(plan.ID, model.PlanStatusFailed, nil)
+		_ = s.failJob(job.ID, err)
+		return IngestRawResult{}, err
+	}
+	appliedAt := s.now()
+	if err := s.store.UpdatePlanStatus(plan.ID, model.PlanStatusApplied, &appliedAt); err != nil {
+		_ = s.failJob(job.ID, err)
+		return IngestRawResult{}, err
+	}
+
+	result := IngestRawResult{
+		JobID:      job.ID,
+		PlanID:     plan.ID,
+		TargetPath: targetPath,
+		Messages:   []string{"quick capture applied"},
+	}
+	if len(applyResult.AppliedOperations) > 0 {
+		result.AfterHash = applyResult.AppliedOperations[0].AfterHash
+	}
+	resultJSON, _ := json.Marshal(result)
+	if err := s.store.UpdateJobStatus(job.ID, model.JobStatusDone, string(resultJSON), ""); err != nil {
+		return IngestRawResult{}, err
+	}
+	return result, nil
+}
+
+// buildInboxPlan builds the low-risk plan for one quick-capture: a create_note
+// for the day's first capture, or a hash-guarded rewrite_note that appends one
+// block and refreshes the frontmatter `updated` field for later captures.
+func (s IngestService) buildInboxPlan(job model.WikiJob, targetPath, existing string, exists bool, text, source string, local, now time.Time) (model.VaultPlan, error) {
+	if !exists {
+		content := renderQuickInboxNote(local.Format("2006-01-02"), source, text, local)
+		payload, err := json.Marshal(model.CreateNotePayload{Content: content})
+		if err != nil {
+			return model.VaultPlan{}, err
+		}
+		return model.VaultPlan{
+			ID:               model.NewID("plan"),
+			JobID:            job.ID,
+			Purpose:          "open quick-capture day inbox",
+			RiskLevel:        model.RiskLow,
+			RequiresApproval: false,
+			Summary:          "Create today's quick-capture inbox file with the first input block.",
+			SourceRefs:       []string{job.ID},
+			TargetPaths:      []string{targetPath},
+			Operations: []model.VaultOperation{{
+				ID:          model.NewID("op"),
+				Type:        model.OperationCreateNote,
+				TargetPath:  targetPath,
+				PayloadJSON: string(payload),
+				Reason:      "Capture quick text into the low-risk per-day inbox before any knowledge processing.",
+				RiskLevel:   model.RiskLow,
+			}},
+			Status:    model.PlanStatusProposed,
+			CreatedAt: now,
+		}, nil
+	}
+
+	beforeHash := model.ContentHash([]byte(existing))
+	block := renderRawBucketAppendBlock(nextInputIndex(existing), text, source, local)
+	nextContent := rewriteRawBucketUpdated(existing, local) + block
+	payload, err := json.Marshal(model.CreateNotePayload{Content: nextContent})
+	if err != nil {
+		return model.VaultPlan{}, err
+	}
+	return model.VaultPlan{
+		ID:               model.NewID("plan"),
+		JobID:            job.ID,
+		Purpose:          "append quick-capture text",
+		RiskLevel:        model.RiskLow,
+		RequiresApproval: false,
+		Summary:          "Append one input block to today's quick-capture inbox and refresh metadata under a hash guard.",
+		SourceRefs:       []string{job.ID, targetPath},
+		TargetPaths:      []string{targetPath},
+		Operations: []model.VaultOperation{{
+			ID:          model.NewID("op"),
+			Type:        model.OperationRewriteNote,
+			TargetPath:  targetPath,
+			BeforeHash:  beforeHash,
+			PayloadJSON: string(payload),
+			Reason:      "Append quick text to today's inbox and update metadata under a content-hash guard.",
+			RiskLevel:   model.RiskLow,
+		}},
+		Status:    model.PlanStatusProposed,
+		CreatedAt: now,
+	}, nil
 }
 
 func (s IngestService) CreateRawBucket(ctx context.Context, req CreateRawBucketRequest) (model.CaptureBucket, IngestRawResult, error) {
@@ -417,6 +594,19 @@ func (s IngestService) buildRawPlan(job model.WikiJob, text string, now time.Tim
 	}, nil
 }
 
+// readVaultFileIfExists reads a vault file, reporting exists=false (no error)
+// when the file is absent so callers can branch create vs append.
+func (s IngestService) readVaultFileIfExists(relPath string) (content string, exists bool, err error) {
+	content, err = s.readVaultFile(relPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return content, true, nil
+}
+
 func (s IngestService) readVaultFile(relPath string) (string, error) {
 	fullPath, err := executor.ResolveVaultPath(s.vaultRoot, relPath)
 	if err != nil {
@@ -507,6 +697,38 @@ openwhisker_job_id: %s
 # %s
 %s`, title, job.Source, job.SourceKey, createdAt.Format(time.RFC3339), createdAt.Format(time.RFC3339),
 		bucketID, job.ID, title, renderRawBucketAppendBlock(1, text, job.Source, createdAt))
+}
+
+// renderQuickInboxNote renders the day's quick-capture inbox file with its
+// first input block. The container holds heterogeneous snippets, so it carries
+// no raw_kind — the downstream vault-raw-organizer infers kind per block.
+func renderQuickInboxNote(day, source, text string, createdAt time.Time) string {
+	title := "速记收件箱 " + day
+	stamp := createdAt.Format(time.RFC3339)
+	return fmt.Sprintf(`---
+title: %q
+status: inbox
+source: %s
+created: %s
+updated: %s
+openwhisker_capture: quick-inbox
+---
+
+# %s
+%s`, title, source, stamp, stamp, title, renderRawBucketAppendBlock(1, text, source, createdAt))
+}
+
+// nextInputIndex returns the next "## 输入 N" block number for an inbox file by
+// scanning existing block headings; it tolerates gaps and out-of-order blocks.
+func nextInputIndex(content string) int {
+	highest := 0
+	for _, line := range strings.Split(content, "\n") {
+		var n int
+		if _, err := fmt.Sscanf(strings.TrimSpace(line), "## 输入 %d", &n); err == nil && n > highest {
+			highest = n
+		}
+	}
+	return highest + 1
 }
 
 func renderRawBucketAppendBlock(index int, text, source string, createdAt time.Time) string {

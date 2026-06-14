@@ -18,6 +18,11 @@ const (
 	intentRouterModeHybrid = "hybrid"
 	intentRouterModeRules  = "rules"
 	intentRouterModeOff    = "off"
+	// intentRouterModeQuickCapture is the IM quick-capture inbox mode: every
+	// non-slash message is a frictionless capture appended to the per-day
+	// inbox file, with no bucket lifecycle, intent classification, or
+	// approval round-trips. See docs/30-design/im-quick-capture.md.
+	intentRouterModeQuickCapture = "quick-capture"
 )
 
 const (
@@ -760,6 +765,8 @@ func normalizeIntentRouterMode(value string) string {
 		return intentRouterModeOff
 	case intentRouterModeRules:
 		return intentRouterModeRules
+	case intentRouterModeQuickCapture:
+		return intentRouterModeQuickCapture
 	case "", intentRouterModeHybrid:
 		return intentRouterModeHybrid
 	default:
