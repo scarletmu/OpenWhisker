@@ -14,7 +14,8 @@
 IM 入口与意图路由：
 
 - Matrix Adapter + 长期 daemon + Core Adapter API；
-- IM Intent Router：rules / hybrid / off 三模式、source-scoped binding、capture bucket、pending clarification 状态机、OpenAI-compatible classifier、intent audit。
+- IM Intent Router：`quick-capture`（默认）/ rules / hybrid / off 四模式、source-scoped binding、capture bucket、pending clarification 状态机、OpenAI-compatible classifier、intent audit。
+- **IM 速记收件箱（quick-capture，默认模式）**：非命令文字 → 秒回「已记录」、追加进当天 `Raw/Inbox/YYYY-MM-DD.md`；链接 → 即时回「已记录，剪藏中」、后台 `internal/clip` 抓正文转 Markdown 成 `Raw/Sources/` 剪藏稿（出站走 `internal/safehttp` SSRF 守卫）；两类落盘后异步触发 enrich 打标；收件箱命令「看今天 / 撤回上一条 / 找一下」；旧 organize / approve / diff / reject 在该模式下被重定向、不再有审批往返。详见 [`im-quick-capture.md`](../30-design/im-quick-capture.md)。
 
 agent 能力（均为只读 vault，写回一律走主线 policy / approval）：
 
@@ -35,7 +36,7 @@ CLI 与部署：完整命令面见 `go run ./cmd/openwhisker`；作为长期服�
 
 ## 后续方向
 
-- **IM 入口重定位为速记收件箱**：把现有"分组 + 审批"流水线收敛为零摩擦异步速记（文字→当天收件箱 `Raw/Inbox/`、链接→后台剪藏入 `Raw/Sources/`、后台 ReAct 打标、三个收件箱命令），移除 IM 路径的 organize / approve / diff 往返。设计稿见 [`im-quick-capture.md`](../30-design/im-quick-capture.md)，未落代码；落地后上方"IM Intent Router""capture bucket"相关现状描述将随之收敛。
+- **IM 速记收件箱的收尾项**（主体已落地，见"已落地能力"）：enrich 当前为文件级 frontmatter 打标，逐块标签粒度与「新词正式收录标签库」的低频确认家务仍是设计稿；剪藏队列为进程内非持久 channel（worker 扫 `status: clipping` 残留稿兜底），按真实使用反馈再评估是否需要持久队列；`capture_buckets` schema 在新模型下的去留待评估。
 - 按真实使用反馈扩展 rules-only 短句词表与 clarification 回复词表（基于真实未命中样本，避免盲扩）。
 - 新增能力（多模态 bucket 输入、clarification 回复 `additional_payload_text` 抽取等）按"已知限制"里的实际需求单独立项。
 - intent router / scheduler skill 接入 `memory.Recall()`，把"这条消息是否延续某个 tag 主题"作为分类信号。

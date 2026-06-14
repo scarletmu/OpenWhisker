@@ -19,6 +19,7 @@ import (
 	"github.com/scarletmu/openwhisker/internal/adapters/matrix"
 	"github.com/scarletmu/openwhisker/internal/agent"
 	"github.com/scarletmu/openwhisker/internal/agentdispatch"
+	"github.com/scarletmu/openwhisker/internal/clip"
 	"github.com/scarletmu/openwhisker/internal/core"
 	"github.com/scarletmu/openwhisker/internal/enrich"
 	"github.com/scarletmu/openwhisker/internal/executor"
@@ -1179,6 +1180,21 @@ func runDaemon(args []string, stdout, stderr io.Writer) error {
 		}
 		enrichService = svc
 	}
+	// §3.2 link clipping: in-process queue + background worker. The clip
+	// service writes the skeleton note on capture and rewrites it with the
+	// fetched article in the background, reusing the enrich queue to tag the
+	// finished clip.
+	clipQueue := clip.NewQueue(0)
+	clipService, err := clip.NewService(clip.Config{
+		Store:       store,
+		Conventions: conventions,
+		VaultRoot:   *vaultRoot,
+		Queue:       clipQueue,
+		Enrich:      enrichQueue,
+	})
+	if err != nil {
+		return fmt.Errorf("clip service: %w", err)
+	}
 	skillLookup := newRegistrySkillLookup(*vaultRoot, vaultProfile)
 	schedulerService := core.NewSchedulerServiceWithOptions(store, *vaultRoot, core.SchedulerServiceOptions{
 		VaultProfile: vaultProfile,
@@ -1214,6 +1230,7 @@ func runDaemon(args []string, stdout, stderr io.Writer) error {
 			AgentDispatcher: daemonDispatcher,
 			SkillLookup:     skillLookup,
 			EnrichHook:      enrichQueue,
+			ClipCapturer:    clipService,
 		})
 		matrixClient, resolvedUserID, err := matrixClientForAuth(context.Background(), matrixAuthOptions{
 			Homeserver:  *homeserver,
@@ -1299,6 +1316,22 @@ func runDaemon(args []string, stdout, stderr io.Writer) error {
 		go func() {
 			defer wg.Done()
 			if err := scanner.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				select {
+				case errCh <- err:
+				default:
+				}
+			}
+		}()
+	}
+	// §3.2 clip worker drains the link-clip queue and recovers stragglers. It
+	// runs whenever the Matrix entry is enabled (that is the only producer of
+	// clip jobs).
+	if matrixAdapter != nil {
+		clipWorker := clip.NewWorker(clipService, clip.WithLogger(stderr))
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := clipWorker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				select {
 				case errCh <- err:
 				default:
@@ -1813,7 +1846,11 @@ func intentRouterDefault() string {
 	if value := strings.TrimSpace(os.Getenv("OPENWHISKER_INTENT_ROUTER")); value != "" {
 		return value
 	}
-	return "hybrid"
+	// §6: the IM entry is the zero-friction quick-capture inbox by default. The
+	// legacy bucket + intent-classifier modes (hybrid / rules / off) remain
+	// available via --intent-router or OPENWHISKER_INTENT_ROUTER, but they are
+	// no longer the default IM experience.
+	return "quick-capture"
 }
 
 func effectivePlanSyncMode(mode, vaultRoot string) (string, error) {
@@ -1887,6 +1924,9 @@ func vaultConventionsForProfile(profile string) (policy.Conventions, error) {
 	}
 	if value := strings.TrimSpace(os.Getenv("OPENWHISKER_RAW_INBOX_DIR")); value != "" {
 		conventions.RawInboxDir = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OPENWHISKER_RAW_SOURCES_DIR")); value != "" {
+		conventions.RawSourcesDir = value
 	}
 	if value := strings.TrimSpace(os.Getenv("OPENWHISKER_RAW_PROCESSED_DIR")); value != "" {
 		conventions.RawProcessedDir = value

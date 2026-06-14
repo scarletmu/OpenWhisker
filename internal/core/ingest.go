@@ -310,6 +310,27 @@ func (s IngestService) CaptureInbox(ctx context.Context, req CaptureInboxRequest
 	if err := s.store.UpdateJobStatus(job.ID, model.JobStatusDone, string(resultJSON), ""); err != nil {
 		return IngestRawResult{}, err
 	}
+	// §4 background tagging: enqueue an enrich job for the day file so the
+	// async tagging pass tags it as soon as the capture settles, instead of
+	// waiting for the periodic Raw/Inbox/ scan to pick it up. The enrich
+	// queue's upsert never demotes a done/running row, so re-enqueueing the
+	// same day file on every capture is safe; the trade-off is that enrich
+	// tags the whole heterogeneous day file once (file granularity), not each
+	// block — per-block tagging is left to the downstream organizer, matching
+	// the container-has-no-raw_kind decision in §3.1. Enqueue errors are
+	// surfaced via outbox but never roll back the successful capture.
+	if s.enrichHook != nil {
+		if hookErr := s.enrichHook.Enqueue(targetPath, job.ID); hookErr != nil {
+			_ = s.store.AddOutboxMessage(model.OutboxMessage{
+				ID:        model.NewID("out"),
+				JobID:     job.ID,
+				Kind:      model.OutboxKindError,
+				Body:      fmt.Sprintf("enrich enqueue: %v", hookErr),
+				Status:    model.OutboxStatusPending,
+				CreatedAt: s.now(),
+			})
+		}
+	}
 	return result, nil
 }
 

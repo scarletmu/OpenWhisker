@@ -2,7 +2,7 @@
 
 状态：partial implementation。`capture_buckets` 持久化、active bucket create/append/close/organize、source_key 校验、hash guard、raw append frontmatter `updated` rewrite 和 intent-triggered create/organize/approve/reject outbox suppression 已落代码；图片/文件和 plan revision 未实现。
 
-> **方向提示**：本文记录当前**已落代码**的"按 topic 分组 bucket + append + organize + 审批"实现。IM 入口正按 [`../30-design/im-quick-capture.md`](../30-design/im-quick-capture.md) 重定位为速记收件箱：bucket 的 topic 分组语义将被"按天收件箱"（`Raw/Inbox/YYYY-MM-DD.md`）取代，IM 路径不再有 organize / approve / diff 往返。`capture_buckets` schema 在新模型下的去留待实现阶段评估。本文描述**现状**，不是目标形态。
+> **方向提示**：IM 入口已按 [`../30-design/im-quick-capture.md`](../30-design/im-quick-capture.md) 重定位为速记收件箱并落代码：`quick-capture` 现为默认意图路由模式，IM 路径下 bucket 的 topic 分组语义已被"按天收件箱"（`Raw/Inbox/YYYY-MM-DD.md`）取代，organize / approve / diff / reject 在该模式下被重定向、不再有审批往返。本文记录的"按 topic 分组 bucket + append + organize + 审批"实现**仍在代码中**（`hybrid` / `rules` 模式经 `--intent-router` 仍可用），但已非 IM 默认路径。`capture_buckets` schema 在新模型下的去留待后续评估。本文描述该后备路径的**现状**，不是 IM 目标形态。
 
 本文定义 Phase 4B.5 的 active raw bucket、pending clarification 和 raw append 行为。
 

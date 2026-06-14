@@ -1,6 +1,6 @@
 # IM 速记捕获（Quick Capture）设计
 
-状态：**首步（文字脊柱）已落代码；其余仍为设计稿**。本文重新定位 IM（Matrix）入口的角色与交互模型：从现有的"分组 + 审批"流水线，改为一个零摩擦、异步处理的速记收件箱。已落地的部分只有 §3.1 的纯文字捕获脊柱（发文字 → 秒回「已记录」 → 追加进当天 `Raw/Inbox/YYYY-MM-DD.md`，由 `--intent-router quick-capture` 模式开启）；后台打标（§4）、链接剪藏（§3.2）、收件箱命令（§5）、旧流程拆除（§6）均尚未落代码，不要假设这些能力已存在。各节内以行内标注区分「已落地」与「设计稿」。当前已实现的入口形态另见 [`matrix-adapter.md`](matrix-adapter.md) 与 [`im-intent-router.md`](im-intent-router.md)；本文是对它们交互层的重定位。
+状态：**整篇重设计已落代码**。本文重新定位 IM（Matrix）入口的角色与交互模型：从现有的"分组 + 审批"流水线，改为一个零摩擦、异步处理的速记收件箱。已落地：文字捕获脊柱（§3.1）、链接剪藏（§3.2，`internal/clip`）、后台打标（§4，接通 `internal/enrich`）、三个收件箱命令（§5，看今天 / 撤回上一条 / 找一下）、旧流程在 IM 路径的拆除（§6，`quick-capture` 现为默认模式，旧的 organize / approve / diff / reject 在该模式下被重定向）。`hybrid` / `rules` / `off` 旧模式仍可经 `--intent-router` 标志或 `OPENWHISKER_INTENT_ROUTER` 环境变量保留。当前已实现的入口形态另见 [`matrix-adapter.md`](matrix-adapter.md) 与 [`im-intent-router.md`](im-intent-router.md)；本文是对它们交互层的重定位。
 
 ## 1. 背景与动机
 
@@ -30,16 +30,18 @@
 
 ### 3.1 文字 → 当天收件箱
 
-> **状态：已落代码**（首步脊柱）。以下除最后一条「后台打标」外均已实现：`internal/core` 的 `CaptureInbox` 走 `create_note` / `rewrite_note`（hash 守卫追加）落盘，由 `--intent-router quick-capture` 模式接通；日界按机器本地时区滚动。
+> **状态：已落代码**。`internal/core` 的 `CaptureInbox` 走 `create_note` / `rewrite_note`（hash 守卫追加）落盘，由 `quick-capture` 模式接通（现为默认）；日界按机器本地时区滚动。落盘后异步触发后台打标（见第 4 节）。
 
 - 一条文字进来，即时回"已记录"，落进**当天的收件箱文件**（`Raw/Inbox/YYYY-MM-DD.md`，按天滚动）。
 - 收件箱按天归集：一天一个文件。选"天"为粒度，是因为它是**唯一一个不需要使用者做归类决定**的单位；再往细切（按主题、按场景）就等于把刚去掉的"这条归哪一组"决策请回来。
 - 当天文件是**待清空的滚动收件箱**，不是日记。它变大、变杂，是提示该把这批拉进下游工具整理，而非越攒越厚的归宿。
 - 捕获粒度（天）与处理粒度（条）解耦：按天往里丢，但每条都是独立、带时间戳、带标签的小块；下游整理时想怎么切就怎么切。**粗着捕获，细着处理。**
 - 落盘形态：同一天的多条都追加进**同一个** `YYYY-MM-DD.md`，每条是一个带完整时间戳（精确到秒）的独立块；不为单条速记开文件。块的具体格式沿用 Raw 多段记录的 `## 输入 N` 写法（单文件、多段、每段标类型/时间/来源）。容器 frontmatter 带 `openwhisker_capture: quick-inbox` 认领这类文件，但**不在容器上标 `raw_kind`**——当天文件是混装的，每条的 kind 留给下游 organizer 按内容推断。
-- 落盘后，后台 agent 异步为这条打标签（见第 4 节）。**（设计稿，未落代码——首步不含后台打标。）**
+- 落盘后，后台 agent 异步为这条打标签（见第 4 节）。**（已落代码：`CaptureInbox` 落盘后把当天文件 enqueue 进 `internal/enrich`；注意当前打标是文件级 frontmatter 标签，非逐块标签。）**
 
 ### 3.2 链接 → 剪藏稿单独成文
+
+> **状态：已落代码**（`internal/clip`）。链接经 `quick-capture` 路由到剪藏服务：先即时落一篇 `status: clipping` 骨架稿、秒回「已记录，剪藏中」，后台 worker 再抓取正文、用 stdlib HTML 抽取器转 Markdown、经 plan→policy→executor 改写成稿；抓取失败落 `status: failed` 并回错误。出站抓取统一走 `internal/safehttp` 的 SSRF 守卫。队列为进程内非持久 channel，worker 周期性扫描 `status: clipping` 残留稿补抓以兜底重启丢失。
 
 - 一个链接进来，即时回"已记录，剪藏中"。
 - 后台跑剪藏 skill：抽取网页正文、转成干净 Markdown、提取标题与出处。形态参照 Obsidian Web Clipper / defuddle 这类现成能力，不重新发明。
@@ -50,6 +52,8 @@
 落点直接复用 vault 现有的 Raw 粗分桶，不新增目录结构：文字速记落 `Raw/Inbox/`（按天滚动），链接剪藏落 `Raw/Sources/`（`raw_kind: web-clip`，每条一篇）。两者都属"未整理材料"，由下游 `vault-raw-organizer` 在消化阶段再做归类与 `source` 回链。
 
 ## 4. 标签策略
+
+> **状态：已落代码（接通既有 `internal/enrich`）**。`CaptureInbox` / 剪藏成稿后把目标文件 enqueue 进 enrich 队列，由其异步打标。**当前限制**：enrich 走的是文件级 frontmatter 打标（整篇一组标签），尚非本节设想的逐块标签；逐块粒度与「新词正式收录」的低频确认家务仍为设计稿。
 
 打标签由后台 agent 以工具调用、ReAct 方式完成：agent 主动查使用者现有的标签体系、相关笔记，再下判断，而不是凭空猜一个。这与 [`tool-driven-capture.md`](tool-driven-capture.md)（走法 A）描述的现状感知打标是同一套机制。
 
@@ -64,6 +68,8 @@
 
 ## 5. 命令
 
+> **状态：已落代码**（`internal/core/inbox.go`）。三个命令均支持自然语言短语与 slash 两种触发；「撤回上一条」走 hash 守卫的 `rewrite_note` 删除当天最后一个块；「找一下」逆序扫 `Raw/Inbox/*.md` 且排除剪藏稿。
+
 命令只用来**操作收件箱本身**，不用来处理内容（处理由后台 agent 与下游工具负责）。第一版保留三个：
 
 | 命令 | 行为 |
@@ -75,6 +81,8 @@
 除这三个命令外，使用者发的任何东西都默认是一条要被接住的速记胶囊。
 
 ## 6. 相对旧入口去掉的东西
+
+> **状态：已落代码（IM 路径拆除）**。`quick-capture` 现为默认意图路由模式；该模式下 `/organize`、`/diff`、`/approve`、`/reject` 被识别为已退役命令并回一句重定向（"把素材消化成知识请在 Claude Code / Codex 里直接对 vault 操作"），不再进入审批往返。底层 `hybrid` / `rules` / `off` 模式与 PlanService 审批代码**未删除**，仍可经 `--intent-router` 标志或 `OPENWHISKER_INTENT_ROUTER` 保留；本节是 IM 默认路径上的拆除，非代码层删除。
 
 - **主题分组**：开组 / 追加 / 收尾的手动生命周期管理全部移除，由"按天自动归集"替代。
 - **"整理这组"**：IM 不再承担把素材加工成成稿知识的环节。
@@ -100,3 +108,4 @@
 - 2026-06-13：锁定落点与「找一下」范围——文字落 `Raw/Inbox/`（按天），链接剪藏落 `Raw/Sources/`（`raw_kind: web-clip`），「找一下」仅搜文字速记收件箱。仍为设计稿，未落代码。
 - 2026-06-13：确认实现分步推进，首步只落**纯文字脊柱**——发文字 → 秒回「已记录」 → 追加进当天 `Raw/Inbox/YYYY-MM-DD.md`；暂不含后台打标、链接剪藏、收件箱命令与旧流程拆除（这些是后续步骤）。同时锁定同一天多条共用一个文件、每条为带秒级时间戳的独立块。这是首步落代码前的设计定稿。
 - 2026-06-13：首步文字脊柱**已落代码**（`internal/core` 的 `CaptureInbox` / `buildInboxPlan`，新增 `--intent-router quick-capture` 模式，`internal/core/quick_capture_test.go` 三例全绿）。落地期定下三处文档此前未写明的细节：日界按机器本地时区滚动；容器带 `openwhisker_capture: quick-inbox` 标记但不带 `raw_kind`；回执即两字「已记录」、不经 outbox（避免回执发两遍）。文档状态据此从「整篇未落代码」改为「首步已落、其余设计稿」。
+- 2026-06-15：§3.2 / §4 / §5 / §6 **全部落代码**，整篇重设计实现完成。落地期的工程决定：(1) 链接剪藏自成 `internal/clip` 包，stdlib-only HTML→Markdown 抽取器（go.mod 仍只有 fsnotify + sqlite 两个依赖），队列为进程内非持久 channel + worker 扫 `status: clipping` 残留稿兜底；(2) SSRF 守卫从 RSS adapter 抽出，去重进新包 `internal/safehttp`，剪藏与 RSS 共用；(3) 策略放行新增 `RawSourcesDir`（默认 `Raw/Sources`，可经 `OPENWHISKER_RAW_SOURCES_DIR` 覆盖），`isLowRiskCaptureDir` 同时放行 `Raw/Inbox` 与 `Raw/Sources` 的低风险捕获写入；(4) §4 复用既有 `internal/enrich`，当前为文件级 frontmatter 打标，逐块标签与新词收录确认仍为设计稿；(5) §6 为非破坏性拆除——`quick-capture` 设为默认、退役命令重定向，`hybrid` / `rules` / `off` 与审批代码保留。`intentRouterDefault()` 翻为 `quick-capture`。全量 `go test ./...` 与 `go vet ./...` 通过。

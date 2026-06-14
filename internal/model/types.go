@@ -9,6 +9,7 @@ const (
 	JobTypeExpandKnowledge = "expand_knowledge"
 	JobTypeSchedulerRun    = "scheduler_run"
 	JobTypeEnrichRaw       = "enrich_raw"
+	JobTypeClipWeb         = "clip_web"
 
 	EnrichJobStatePending          = "pending"
 	EnrichJobStateRunning          = "running"

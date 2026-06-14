@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/scarletmu/openwhisker/internal/safehttp"
 	"github.com/scarletmu/openwhisker/internal/sanitize"
 )
 
@@ -323,77 +324,16 @@ func validateFeedURL(value string) error {
 	// Reject explicit IP literals that target internal/loopback/metadata
 	// services without paying for a DNS lookup. DNS-name targets still get
 	// re-checked at fetch time (see fetchRSSFeed) to defeat DNS rebinding
-	// and to refuse names that resolve only to private space.
+	// and to refuse names that resolve only to private space. The IP/name
+	// guard itself lives in internal/safehttp so the clip fetcher shares it.
 	if ip := net.ParseIP(hostname); ip != nil {
-		if err := assertPublicIP(ip); err != nil {
+		if err := safehttp.AssertPublicIP(ip); err != nil {
 			return fmt.Errorf("feed URL host %s: %w", hostname, err)
 		}
-	} else if isReservedHostname(hostname) {
+	} else if safehttp.IsReservedHostname(hostname) {
 		return fmt.Errorf("feed URL host %q targets a reserved name", hostname)
 	}
 	return nil
-}
-
-// assertPublicIP rejects loopback, link-local, multicast, unspecified, and
-// RFC1918 / RFC4193 / cloud-metadata addresses. This is the SSRF guard for
-// the RSS adapter — without it a vault SCHEDULE.md could point feed_urls at
-// http://169.254.169.254/ (AWS/GCP IMDS) or http://10.x.x.x/ (internal admin
-// endpoints) and the daemon would happily fetch + surface the response.
-func assertPublicIP(ip net.IP) error {
-	if ip.IsUnspecified() {
-		return errors.New("address is unspecified (0.0.0.0/::)")
-	}
-	if ip.IsLoopback() {
-		return errors.New("address is loopback")
-	}
-	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-		return errors.New("address is link-local")
-	}
-	if ip.IsMulticast() {
-		return errors.New("address is multicast")
-	}
-	if ip.IsPrivate() {
-		return errors.New("address is private (RFC1918 / RFC4193)")
-	}
-	// Cloud-metadata + benchmark ranges. IsPrivate() does not cover
-	// 169.254.169.254 (link-local handled above), but 100.64.0.0/10
-	// (RFC6598 carrier-grade NAT) and IPv4-mapped IPv6 of the same need an
-	// explicit check.
-	if v4 := ip.To4(); v4 != nil {
-		// 100.64.0.0/10 RFC6598 shared address space.
-		if v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
-			return errors.New("address is RFC6598 shared address space")
-		}
-	}
-	return nil
-}
-
-// isReservedHostname returns true for DNS names that map to local/internal
-// services we never want to fetch even if the operator forgets to use an
-// IP literal.
-func isReservedHostname(host string) bool {
-	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
-	if host == "" {
-		return true
-	}
-	if host == "localhost" {
-		return true
-	}
-	suffixes := []string{
-		".localhost",
-		".local",       // mDNS
-		".internal",    // common internal TLD
-		".intranet",
-		".corp",
-		".home",
-		".lan",
-	}
-	for _, suffix := range suffixes {
-		if strings.HasSuffix(host, suffix) {
-			return true
-		}
-	}
-	return false
 }
 
 // safeFeedURLLabel returns a single-URL form of sanitize.FeedURLList: useful
@@ -473,7 +413,7 @@ func minInt(a, b int) int {
 func newSafeRSSClient() *http.Client {
 	return &http.Client{
 		Timeout:   rssHTTPClientTimeout,
-		Transport: safeRSSTransport{},
+		Transport: safehttp.Transport{},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 5 {
 				return errors.New("too many redirects")
@@ -481,45 +421,4 @@ func newSafeRSSClient() *http.Client {
 			return validateFeedURL(req.URL.String())
 		},
 	}
-}
-
-type safeRSSTransport struct{}
-
-func (safeRSSTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if err := assertRequestHostPublic(req); err != nil {
-		return nil, err
-	}
-	return http.DefaultTransport.RoundTrip(req)
-}
-
-// assertRequestHostPublic resolves the request hostname and rejects the
-// request if any returned address is non-public. If resolution fails or
-// returns no addresses, the underlying transport handles the dial (and any
-// failure that follows), so this function never adds a false positive.
-func assertRequestHostPublic(req *http.Request) error {
-	hostname := req.URL.Hostname()
-	if hostname == "" {
-		return errors.New("rss adapter: request has no hostname")
-	}
-	if ip := net.ParseIP(hostname); ip != nil {
-		if err := assertPublicIP(ip); err != nil {
-			return fmt.Errorf("rss adapter: refusing host %s: %w", hostname, err)
-		}
-		return nil
-	}
-	resolver := net.DefaultResolver
-	addrs, err := resolver.LookupHost(req.Context(), hostname)
-	if err != nil || len(addrs) == 0 {
-		return nil
-	}
-	for _, addr := range addrs {
-		ip := net.ParseIP(addr)
-		if ip == nil {
-			continue
-		}
-		if err := assertPublicIP(ip); err != nil {
-			return fmt.Errorf("rss adapter: %s resolved to %s: %w", hostname, addr, err)
-		}
-	}
-	return nil
 }

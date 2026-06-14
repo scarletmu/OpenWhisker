@@ -23,6 +23,7 @@ Vault I/O and content helpers:
 - `vault/`: the wikilink / backlink index (`linkindex/`) over the vault, with live `fsnotify` updates; a read-only graph consumed by `memory/`.
 - `markdown/`: frontmatter split + parse — the single source of truth for frontmatter. Contract: `docs/30-design/frontmatter-parsing.md`.
 - `sanitize/`: redaction of secrets / PII in config keys, feed URLs, Skill config, and free text before content leaves the trust boundary (prompts, logs).
+- `safehttp/`: the single SSRF guard for every outbound HTTP caller (RSS adapter, link clipper) — public-IP / reserved-host checks and the guarded `http.Client`.
 
 LLM reasoning (generates plans, never writes):
 
@@ -34,6 +35,7 @@ Feature subsystems:
 - `enrich/`: Phase 7 inbox enrichment — an async agent pass that tags newly-captured Raw notes via the `rewrite_note` guard. See `internal/enrich/AGENTS.md`. Contract: `docs/30-design/inbox-enrichment.md`.
 - `memory/`: Phase 8 recall service — controlled tag vocabulary plus tag / text / one-hop-related recall over a SQLite cache derived from frontmatter. See `internal/memory/AGENTS.md`. Contract: `docs/30-design/memory-recall.md`.
 - `scheduler/`: read-only scheduled Skill registry parsing, cron matching, budget / scope lint, an RSS source adapter, and Skill runner boundaries. See `internal/scheduler/AGENTS.md`. Contract: `docs/30-design/scheduler.md`.
+- `clip/`: §3.2 link clipping — fetch a captured URL, extract its article to Markdown, and write a `Raw/Sources/` web-clip note through the plan→policy→executor spine; background worker + straggler scan. See `internal/clip/CLAUDE.md`. Contract: `docs/30-design/im-quick-capture.md` §3.2.
 
 Context and external entry:
 

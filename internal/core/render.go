@@ -19,6 +19,51 @@ func resultStatusSummary(status string, paths []string) string {
 	return status + " for " + strings.Join(paths, ", ")
 }
 
+// inboxExcerpt collapses an entry's text to a single short line for IM replies.
+func inboxExcerpt(text string, maxRunes int) string {
+	flat := strings.Join(strings.Fields(text), " ")
+	runes := []rune(flat)
+	if len(runes) > maxRunes {
+		return string(runes[:maxRunes]) + "…"
+	}
+	return flat
+}
+
+// inboxTimeLabel renders an entry's RFC3339 timestamp as HH:MM, falling back to
+// the raw stamp when it cannot be parsed.
+func inboxTimeLabel(stamp string) string {
+	if t, err := time.Parse(time.RFC3339, stamp); err == nil {
+		return t.Format("15:04")
+	}
+	return stamp
+}
+
+// renderInboxToday renders the "看今天" reply: one line per captured entry.
+func renderInboxToday(entries []InboxEntry) string {
+	if len(entries) == 0 {
+		return "今天还没有速记。"
+	}
+	lines := make([]string, 0, len(entries)+1)
+	lines = append(lines, fmt.Sprintf("今天记了 %d 条：", len(entries)))
+	for _, e := range entries {
+		lines = append(lines, fmt.Sprintf("%d. [%s] %s", e.Index, inboxTimeLabel(e.Timestamp), inboxExcerpt(e.Text, 60)))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// renderInboxSearch renders the "找一下" reply: matched entries newest first.
+func renderInboxSearch(keyword string, hits []InboxSearchHit) string {
+	if len(hits) == 0 {
+		return fmt.Sprintf("没找到包含「%s」的速记。", keyword)
+	}
+	lines := make([]string, 0, len(hits)+1)
+	lines = append(lines, fmt.Sprintf("找到 %d 条包含「%s」的速记：", len(hits), keyword))
+	for _, h := range hits {
+		lines = append(lines, fmt.Sprintf("- %s #%d %s", h.Day, h.Entry.Index, inboxExcerpt(h.Entry.Text, 60)))
+	}
+	return strings.Join(lines, "\n")
+}
+
 func renderNoPreparedDiff(err NoPreparedDiffError) string {
 	if err.RiskLevel == model.RiskLow && err.Status == model.PlanStatusApplied {
 		return fmt.Sprintf("Plan %s is a low-risk raw capture that was already auto-applied, so it has no approval diff.\nRun /organize last first, then use /diff <plan_id> on the approval plan.", err.PlanID)

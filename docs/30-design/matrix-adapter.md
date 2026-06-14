@@ -456,7 +456,7 @@ openwhisker-{outbox_message_id}
 
 ## 命令与交互
 
-> 本节及下方"典型流程"描述的是当前已实现的分组 + 审批交互。该交互层正在被重定位为零摩擦异步速记收件箱，方向见 [`im-quick-capture.md`](im-quick-capture.md)（设计稿，未落代码）。homeserver 接入、出入站契约、幂等与安全边界等不受影响。
+> **本节描述的分组 + 审批交互已不再是 IM 默认路径。** 速记收件箱重定位（[`im-quick-capture.md`](im-quick-capture.md)）已落代码，`quick-capture` 现为默认意图路由模式：非命令文字直接进当天 `Raw/Inbox/`、链接走 `internal/clip` 剪藏、后台 enrich 打标，`/organize`、`/diff`、`/approve`、`/reject` 在该模式下被重定向、不再进入审批往返；收件箱命令为「看今天 / 撤回上一条 / 找一下」。本节及下方"典型流程"描述的分组 + 审批交互**仍在代码中**，但仅在经 `--intent-router hybrid|rules|off` 显式切回旧模式时生效。homeserver 接入、出入站契约、幂等与安全边界等不受影响。
 
 首期使用文本命令，不依赖 Element widget 或 slash command 扩展。
 

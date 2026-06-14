@@ -20,6 +20,7 @@ const minBeforeHashLen = 64
 type Conventions struct {
 	ProfileID         string   `json:"profile_id"`
 	RawInboxDir       string   `json:"raw_inbox_dir"`
+	RawSourcesDir     string   `json:"raw_sources_dir"`
 	RawProcessedDir   string   `json:"raw_processed_dir"`
 	KnowledgeDir      string   `json:"knowledge_dir"`
 	KnowledgeDraftDir string   `json:"knowledge_draft_dir"`
@@ -44,6 +45,7 @@ func DefaultConventions() Conventions {
 	return Conventions{
 		ProfileID:         "generic",
 		RawInboxDir:       "Raw/Inbox",
+		RawSourcesDir:     "Raw/Sources",
 		RawProcessedDir:   "Raw/Processed",
 		KnowledgeDir:      "Knowledge",
 		KnowledgeDraftDir: "Knowledge/Drafts",
@@ -77,6 +79,9 @@ func (c Conventions) Normalize() Conventions {
 	if strings.TrimSpace(c.RawInboxDir) == "" {
 		c.RawInboxDir = "Raw/Inbox"
 	}
+	if strings.TrimSpace(c.RawSourcesDir) == "" {
+		c.RawSourcesDir = "Raw/Sources"
+	}
 	if strings.TrimSpace(c.RawProcessedDir) == "" {
 		c.RawProcessedDir = "Raw/Processed"
 	}
@@ -93,6 +98,7 @@ func (c Conventions) Normalize() Conventions {
 		c.AgentReportsDir = "Meta/Reports"
 	}
 	c.RawInboxDir = cleanRelativeDir(c.RawInboxDir)
+	c.RawSourcesDir = cleanRelativeDir(c.RawSourcesDir)
 	c.RawProcessedDir = cleanRelativeDir(c.RawProcessedDir)
 	c.KnowledgeDir = cleanRelativeDir(c.KnowledgeDir)
 	c.KnowledgeDraftDir = cleanRelativeDir(c.KnowledgeDraftDir)
@@ -123,8 +129,8 @@ func (c Checker) Check(plan model.VaultPlan) error {
 		}
 		switch op.Type {
 		case model.OperationCreateNote:
-			if !hasDirPrefix(op.TargetPath, conventions.RawInboxDir) {
-				return fmt.Errorf("create_note target %q is outside %s", op.TargetPath, conventions.RawInboxDir)
+			if !isLowRiskCaptureDir(op.TargetPath, conventions) {
+				return fmt.Errorf("create_note target %q is outside %s or %s", op.TargetPath, conventions.RawInboxDir, conventions.RawSourcesDir)
 			}
 		case model.OperationAppendNote:
 			if !hasDirPrefix(op.TargetPath, conventions.RawInboxDir) {
@@ -141,8 +147,8 @@ func (c Checker) Check(plan model.VaultPlan) error {
 				return fmt.Errorf("append_note payload content is required for %s", op.ID)
 			}
 		case model.OperationRewriteNote:
-			if !hasDirPrefix(op.TargetPath, conventions.RawInboxDir) {
-				return fmt.Errorf("rewrite_note target %q is outside %s", op.TargetPath, conventions.RawInboxDir)
+			if !isLowRiskCaptureDir(op.TargetPath, conventions) {
+				return fmt.Errorf("rewrite_note target %q is outside %s or %s", op.TargetPath, conventions.RawInboxDir, conventions.RawSourcesDir)
 			}
 			if err := validateMutatingBeforeHash(op); err != nil {
 				return err
@@ -626,6 +632,14 @@ func cleanStringList(values []string) []string {
 		out = append(out, value)
 	}
 	return out
+}
+
+// isLowRiskCaptureDir reports whether path lives under one of the low-risk
+// capture roots: the per-day text inbox (Raw/Inbox) or the link-clip store
+// (Raw/Sources). Both hold unprocessed material that the auto-allow path may
+// write without approval.
+func isLowRiskCaptureDir(path string, conventions Conventions) bool {
+	return hasDirPrefix(path, conventions.RawInboxDir) || hasDirPrefix(path, conventions.RawSourcesDir)
 }
 
 func hasDirPrefix(path, dir string) bool {

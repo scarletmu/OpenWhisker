@@ -5,13 +5,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/scarletmu/openwhisker/internal/model"
 	"github.com/scarletmu/openwhisker/internal/profile"
 	"github.com/scarletmu/openwhisker/internal/storage"
 )
+
+// ClipCapturer creates a web-clip skeleton note for a captured link and queues
+// the background fetch, returning the note path and job id. Implemented by
+// internal/clip.Service; injected so core does not depend on the clip package.
+type ClipCapturer interface {
+	Clip(ctx context.Context, rawURL, source, sourceKey string) (notePath string, jobID string, err error)
+}
 
 type AdapterService struct {
 	store            *storage.Store
@@ -31,6 +40,11 @@ type AdapterService struct {
 	// this adapter (and downstream intent_router bucket paths that are not
 	// bucket-scoped) schedule an enrich job after Apply.
 	enrichHook EnrichEnqueuer
+
+	// §3.2: optional link-clip capturer. When set, a bare-URL message in
+	// quick-capture mode is clipped into Raw/Sources instead of appended to
+	// the text inbox. nil → URLs are captured as plain text.
+	clipCapturer ClipCapturer
 }
 
 type AdapterServiceOptions struct {
@@ -45,6 +59,9 @@ type AdapterServiceOptions struct {
 	// Phase 7 optional enrich enqueuer. Passed through to every IngestService
 	// the adapter constructs.
 	EnrichHook EnrichEnqueuer
+
+	// §3.2 optional link-clip capturer (internal/clip.Service).
+	ClipCapturer ClipCapturer
 }
 
 type AdapterRequest struct {
@@ -75,6 +92,7 @@ func NewAdapterServiceWithOptions(store *storage.Store, vaultRoot string, opts A
 		agentDispatcher:  opts.AgentDispatcher,
 		skillLookup:      opts.SkillLookup,
 		enrichHook:       opts.EnrichHook,
+		clipCapturer:     opts.ClipCapturer,
 	}
 }
 
@@ -120,8 +138,20 @@ func (s AdapterService) HandleText(ctx context.Context, req AdapterRequest) (Ada
 	// parser (e.g. /status, /jobs) for operational use. Bucket / approval /
 	// clarification intents are intentionally bypassed.
 	if s.intentRouterMode == intentRouterModeQuickCapture {
+		if resp, handled, err := s.tryInboxCommand(ctx, req); handled {
+			return resp, err
+		}
 		if strings.HasPrefix(req.Text, "/") {
+			if cmd, _ := splitAdapterCommand(req.Text); isRetiredIMCommand(cmd) {
+				return AdapterResponse{
+					Status: "command_retired",
+					Body:   "速记收件箱不在 IM 里做整理或审批。把素材消化成知识，请在 Claude Code / Codex 里直接对 vault 操作。",
+				}, nil
+			}
 			return s.handleAdapterCommand(ctx, req)
+		}
+		if rawURL, ok := bareURL(req.Text); ok && s.clipCapturer != nil {
+			return s.handleClipCapture(ctx, req, rawURL)
 		}
 		return s.handleQuickCapture(ctx, req)
 	}
@@ -136,6 +166,7 @@ func (s AdapterService) HandleText(ctx context.Context, req AdapterRequest) (Ada
 // response body) and no enrich hook fires — background tagging is a later step.
 func (s AdapterService) handleQuickCapture(ctx context.Context, req AdapterRequest) (AdapterResponse, error) {
 	result, err := NewIngestServiceWithConventions(s.store, s.vaultRoot, s.planOpts.Conventions).
+		WithEnrichHook(s.enrichHook).
 		CaptureInbox(ctx, CaptureInboxRequest{
 			Text:   req.Text,
 			Source: adapterSource(req),
@@ -148,6 +179,139 @@ func (s AdapterService) handleQuickCapture(ctx context.Context, req AdapterReque
 		JobID:  result.JobID,
 		Body:   "已记录",
 	}, nil
+}
+
+// isRetiredIMCommand reports whether a slash command belongs to the old
+// organize / approve / diff flow that §6 removes from the IM (quick-capture)
+// path. Operational commands (/status, /jobs, /scheduler) and the inbox
+// commands remain available; these four are redirected to the desktop tools.
+func isRetiredIMCommand(command string) bool {
+	switch command {
+	case "/organize", "/diff", "/approve", "/reject":
+		return true
+	default:
+		return false
+	}
+}
+
+// bareURL reports whether the whole message is a single http/https URL — the
+// signal that the user wants the link clipped rather than stored as plain text.
+// A URL mixed with other words is treated as a text capture (§3.2: clips are the
+// article itself, with no surrounding annotation).
+func bareURL(text string) (string, bool) {
+	t := strings.TrimSpace(text)
+	if t == "" || len(strings.Fields(t)) != 1 {
+		return "", false
+	}
+	if !strings.HasPrefix(t, "http://") && !strings.HasPrefix(t, "https://") {
+		return "", false
+	}
+	parsed, err := url.Parse(t)
+	if err != nil || parsed.Host == "" {
+		return "", false
+	}
+	return t, true
+}
+
+// handleClipCapture creates the web-clip skeleton + queues the fetch, acking
+// "已记录，剪藏中". If the capturer rejects the URL (e.g. an SSRF-blocked or
+// non-public target), the link is captured as plain text instead so nothing is
+// lost.
+func (s AdapterService) handleClipCapture(ctx context.Context, req AdapterRequest, rawURL string) (AdapterResponse, error) {
+	_, jobID, err := s.clipCapturer.Clip(ctx, rawURL, adapterSource(req), req.SourceKey)
+	if err != nil {
+		return s.handleQuickCapture(ctx, req)
+	}
+	return AdapterResponse{
+		Status: model.JobStatusDone,
+		JobID:  jobID,
+		Body:   "已记录，剪藏中",
+	}, nil
+}
+
+// inboxCommandKind classifies a quick-capture message as one of the three
+// reserved inbox commands, or "" when it is just another capture. List and undo
+// match only an exact whole-message phrase (so "今天去爬山" is captured, not
+// treated as a command); search matches a recognized prefix that is the whole
+// command word (a bare "搜索", or the prefix followed by a separator + keyword).
+func inboxCommandKind(text string) (kind, arg string) {
+	trimmed := strings.TrimSpace(text)
+	lower := strings.ToLower(trimmed)
+	switch {
+	case exactAny(trimmed, "看今天", "今天", "今天记了啥", "今天记了什么") || lower == "/today":
+		return "today", ""
+	case exactAny(trimmed, "撤回", "撤回上一条", "撤回刚才", "撤销", "撤销上一条") || lower == "/undo":
+		return "undo", ""
+	}
+	for _, prefix := range []string{"找一下", "搜一下", "搜索", "/find", "/search"} {
+		rest, ok := strings.CutPrefix(trimmed, prefix)
+		if !ok {
+			continue
+		}
+		// Require the prefix to stand as its own word: either nothing
+		// follows (a bare "搜索" → prompt for a keyword) or the next rune is
+		// a separator. Otherwise the prefix is glued to ordinary text
+		// ("搜索引擎的原理…") and the message is a capture, not a command.
+		if rest != "" && !startsWithCommandSeparator(rest) {
+			continue
+		}
+		arg = strings.TrimSpace(strings.TrimLeft(rest, "：: 　\t"))
+		return "find", arg
+	}
+	return "", ""
+}
+
+// startsWithCommandSeparator reports whether s begins with a character that
+// separates an inbox command word from its argument: ASCII / full-width space,
+// tab, or an ASCII / full-width colon.
+func startsWithCommandSeparator(s string) bool {
+	r, _ := utf8.DecodeRuneInString(s)
+	switch r {
+	case ' ', '\t', '　', ':', '：':
+		return true
+	default:
+		return false
+	}
+}
+
+// tryInboxCommand handles the three quick-capture inbox commands (§5). It
+// returns handled=false when the message is an ordinary capture so the caller
+// continues to handleQuickCapture.
+func (s AdapterService) tryInboxCommand(ctx context.Context, req AdapterRequest) (AdapterResponse, bool, error) {
+	kind, arg := inboxCommandKind(req.Text)
+	if kind == "" {
+		return AdapterResponse{}, false, nil
+	}
+	ingest := NewIngestServiceWithConventions(s.store, s.vaultRoot, s.planOpts.Conventions).
+		WithEnrichHook(s.enrichHook)
+	local := s.now().In(time.Local)
+	switch kind {
+	case "today":
+		entries, _, err := ingest.ListInboxDay(local)
+		if err != nil {
+			return AdapterResponse{}, true, err
+		}
+		return AdapterResponse{Status: "ok", Body: renderInboxToday(entries)}, true, nil
+	case "undo":
+		removed, ok, err := ingest.UndoLastInbox(ctx, local)
+		if err != nil {
+			return AdapterResponse{}, true, err
+		}
+		if !ok {
+			return AdapterResponse{Status: "ok", Body: "今天还没有可撤回的速记。"}, true, nil
+		}
+		return AdapterResponse{Status: model.JobStatusDone, Body: "已撤回：" + inboxExcerpt(removed.Text, 40)}, true, nil
+	case "find":
+		if arg == "" {
+			return AdapterResponse{Status: "ok", Body: "想找什么？用「找一下 关键词」。"}, true, nil
+		}
+		hits, err := ingest.SearchInbox(arg, 10)
+		if err != nil {
+			return AdapterResponse{}, true, err
+		}
+		return AdapterResponse{Status: "ok", Body: renderInboxSearch(arg, hits)}, true, nil
+	}
+	return AdapterResponse{}, false, nil
 }
 
 // tryHandleAtMention returns handled=false when the message is not an
