@@ -200,13 +200,12 @@ func splitInboxBlocks(content string) (header string, blocks []string) {
 	lines := strings.Split(content, "\n")
 	starts := []int{}
 	offset := 0
-	offsets := make([]int, len(lines))
-	for i, line := range lines {
-		offsets[i] = offset
+	for _, line := range lines {
+		start := offset
 		offset += len(line) + 1 // +1 for the split-stripped newline
 		var n int
 		if _, err := fmt.Sscanf(strings.TrimSpace(line), "## 输入 %d", &n); err == nil {
-			starts = append(starts, offsets[i])
+			starts = append(starts, start)
 		}
 	}
 	if len(starts) == 0 {
@@ -272,8 +271,9 @@ func parseInboxBlock(block string) InboxEntry {
 		case strings.HasPrefix(trimmed, "- 来源："):
 			entry.Source = strings.TrimSpace(strings.TrimPrefix(trimmed, "- 来源："))
 		case strings.HasPrefix(trimmed, "```"):
-			// Opening fence: "```text" → fence is the backtick run.
-			fence = strings.TrimRight(trimmed, "text")
+			// Opening fence: capture the leading backtick run, ignoring any
+			// language tag ("```text" → "```").
+			fence = trimmed[:len(trimmed)-len(strings.TrimLeft(trimmed, "`"))]
 			inBody = true
 		}
 	}
