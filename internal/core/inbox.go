@@ -51,13 +51,47 @@ func (s IngestService) ListInboxDay(local time.Time) ([]InboxEntry, string, erro
 	return parseInboxEntries(content), path, nil
 }
 
+// undoMaxAttempts bounds UndoLastInbox's retry loop. A retry only happens when
+// a concurrent rewrite — typically a background enrich pass tagging the same day
+// file — flips the content hash between our read and the guarded apply. A few
+// attempts comfortably outlast a single enrich landing.
+const undoMaxAttempts = 3
+
+// ErrInboxBusy is returned when repeated concurrent rewrites of today's inbox
+// (e.g. a background enrich pass) keep changing the file out from under an undo.
+// The undo made no change and is safe to retry.
+var ErrInboxBusy = errors.New("inbox is being updated in the background; please retry")
+
 // UndoLastInbox removes the most recent input block from today's day file under
 // a content-hash guard and returns the removed entry. ok is false when there is
 // nothing to undo (no day file, or no input blocks). Removing the only block
 // leaves the day file with just its frontmatter + heading — undo never deletes
 // the day file itself (no delete_note operation exists in the low-risk policy).
+//
+// The undo races the background enrich pass, which rewrites the same day file
+// under its own hash guard. The guard makes the loser of that race fail safely
+// (no clobber) rather than corrupt the file, so a hash conflict is retried from
+// a fresh read instead of surfaced to the user; ErrInboxBusy is returned only if
+// the conflict persists across undoMaxAttempts.
 func (s IngestService) UndoLastInbox(ctx context.Context, local time.Time) (InboxEntry, bool, error) {
 	path := s.inboxDayPath(local)
+	for range undoMaxAttempts {
+		removed, ok, err := s.undoLastInboxOnce(ctx, local, path)
+		if executor.IsConflict(err) {
+			continue // concurrent rewrite flipped the hash guard; re-read and retry
+		}
+		if err != nil {
+			return InboxEntry{}, false, err
+		}
+		return removed, ok, nil
+	}
+	return InboxEntry{}, false, ErrInboxBusy
+}
+
+// undoLastInboxOnce is one attempt of UndoLastInbox. It returns an
+// executor.ConflictError (detectable via executor.IsConflict) when the hash
+// guard rejects the rewrite, so the caller can retry from a fresh read.
+func (s IngestService) undoLastInboxOnce(ctx context.Context, local time.Time, path string) (InboxEntry, bool, error) {
 	existing, exists, err := s.readVaultFileIfExists(path)
 	if err != nil {
 		return InboxEntry{}, false, err

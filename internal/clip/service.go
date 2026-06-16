@@ -147,6 +147,15 @@ func (s *Service) ProcessClip(ctx context.Context, job Job) error {
 		return fmt.Errorf("clip: read skeleton %s: %w", job.NotePath, err)
 	}
 	doc := parseFrontmatter(existing)
+	// Idempotency guard: the same note can be enqueued twice — once by Clip()
+	// on capture and again by the worker's straggler scan, which re-enqueues any
+	// note still in status: clipping. Once the first pass rewrites the note to
+	// clipped / clip-failed, a duplicate pass would re-fetch the page, send a
+	// second outbox message, and re-enqueue tagging. Skip anything that is no
+	// longer clipping.
+	if doc.Scalar("status") != statusClipping {
+		return nil
+	}
 	source := doc.Scalar("source")
 	created := parseStamp(doc.Scalar("created"), s.now())
 	now := s.now()

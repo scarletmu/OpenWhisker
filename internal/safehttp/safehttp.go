@@ -79,6 +79,13 @@ func IsReservedHostname(host string) bool {
 // if any returned address is non-public. If resolution fails or returns no
 // addresses, the underlying transport handles the dial (and any failure that
 // follows), so this never adds a false positive.
+//
+// This narrows but does not fully close DNS rebinding: the transport re-resolves
+// the host independently when it dials, so an attacker who returns a public IP
+// to this lookup and a private one to the dial's lookup can still slip through
+// the gap. Fully closing it would require pinning the address verified here into
+// the dialer (a custom DialContext). The current callers fetch low-value
+// vault-supplied URLs, so the residual window is accepted rather than closed.
 func AssertRequestHostPublic(req *http.Request) error {
 	hostname := req.URL.Hostname()
 	if hostname == "" {
@@ -108,8 +115,9 @@ func AssertRequestHostPublic(req *http.Request) error {
 
 // ValidatePublicURL enforces that a raw URL is an absolute http/https URL with
 // no userinfo and a host that is not an obviously-internal IP literal or
-// reserved name. DNS-name hosts are re-checked at dial time by the guarded
-// transport (defeating DNS rebinding).
+// reserved name. DNS-name hosts are re-resolved and re-checked at dial time by
+// the guarded transport, which narrows (but does not fully close — see
+// AssertRequestHostPublic) the DNS-rebinding window.
 func ValidatePublicURL(rawURL string) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed.Host == "" {

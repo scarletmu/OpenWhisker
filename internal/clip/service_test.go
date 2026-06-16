@@ -103,6 +103,52 @@ func TestClipSkeletonThenProcessRewritesNote(t *testing.T) {
 	}
 }
 
+// A note can be enqueued twice — once by Clip() and again by the worker's
+// straggler scan, which re-enqueues anything still in status: clipping. Once the
+// first pass finishes the clip, a second ProcessClip on the same job must be a
+// no-op: no re-fetch, no duplicate outbox message, no duplicate tagging.
+func TestProcessClipIsIdempotentForFinishedNote(t *testing.T) {
+	vaultRoot := filepath.Join(t.TempDir(), "vault")
+	if err := os.MkdirAll(vaultRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	svc, store, enrich := newTestService(t, vaultRoot)
+	fetches := 0
+	svc.WithFetch(func(context.Context, *http.Client, string) (string, error) {
+		fetches++
+		return `<html><head><title>Doc</title></head><body><article><p>body</p></article></body></html>`, nil
+	})
+
+	notePath, _, err := svc.Clip(context.Background(), "https://example.com/x", "cli", "")
+	if err != nil {
+		t.Fatalf("Clip() error = %v", err)
+	}
+	job, _ := dequeue(svc)
+	if err := svc.ProcessClip(context.Background(), job); err != nil {
+		t.Fatalf("first ProcessClip() error = %v", err)
+	}
+
+	// Replay the same job (as the straggler scan would). The note is now
+	// status: clipped, so the second pass should bail out before doing any work.
+	if err := svc.ProcessClip(context.Background(), job); err != nil {
+		t.Fatalf("second ProcessClip() error = %v", err)
+	}
+
+	if fetches != 1 {
+		t.Fatalf("fetches = %d, want 1 (second pass must not re-fetch)", fetches)
+	}
+	if len(enrich.calls) != 1 {
+		t.Fatalf("enrich calls = %d, want 1 (no duplicate tagging)", len(enrich.calls))
+	}
+	out, _ := store.ListPendingOutbox(10)
+	if len(out) != 1 {
+		t.Fatalf("outbox messages = %d, want 1 (no duplicate notification)", len(out))
+	}
+	if final := mustRead(t, vaultRoot, notePath); !strings.Contains(final, "status: clipped") {
+		t.Fatalf("note should remain clipped:\n%s", final)
+	}
+}
+
 func TestClipProcessFailureRecordsFailedStatus(t *testing.T) {
 	vaultRoot := filepath.Join(t.TempDir(), "vault")
 	if err := os.MkdirAll(vaultRoot, 0o755); err != nil {

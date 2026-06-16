@@ -294,6 +294,9 @@ func (s AdapterService) tryInboxCommand(ctx context.Context, req AdapterRequest)
 		return AdapterResponse{Status: "ok", Body: renderInboxToday(entries)}, true, nil
 	case "undo":
 		removed, ok, err := ingest.UndoLastInbox(ctx, local)
+		if errors.Is(err, ErrInboxBusy) {
+			return AdapterResponse{Status: "ok", Body: "刚才后台在更新今天的收件箱，撤回没成功，稍等再试一次。"}, true, nil
+		}
 		if err != nil {
 			return AdapterResponse{}, true, err
 		}
